@@ -1,0 +1,20 @@
+# Build output
+/target
+
+# Rust
+**/*.rs.bk
+*.pdb
+
+# Editors
+.vscode/
+.idea/
+.zed/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
