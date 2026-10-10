@@ -1,5 +1,3 @@
-//! Assets (icons) embedded into the binary.
-
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};

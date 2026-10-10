@@ -1,14 +1,11 @@
-//! Client-side window decorations: a drop shadow, a thin border, rounded
-//! corners and resize handles, replacing the frame the window manager draws.
-
 use gpui::{
     Bounds, CursorStyle, Decorations, HitboxBehavior, Hsla, IntoElement, MouseButton, Pixels,
     Point, ResizeEdge, Size, Tiling, Window, canvas, div, point, prelude::*, px, rgb,
     transparent_black,
 };
 
-/// Width of the transparent area around the window that holds the shadow and
-/// doubles as the resize handle.
+/// The transparent area around the window holds the shadow and doubles as the
+/// resize handle.
 const SHADOW_SIZE: Pixels = px(10.);
 const ROUNDING: Pixels = px(8.);
 
@@ -33,7 +30,6 @@ pub fn window_frame(window: &mut Window, content: impl IntoElement) -> impl Into
         // resized from; the others keep their handles.
         .when(!fully_tiled(tiling), |div| {
             div.child(
-                // Shows a resize cursor over the shadow area.
                 canvas(
                     |_bounds, window, _cx| {
                         let size = window.window_bounds().get_bounds().size;
@@ -97,12 +93,11 @@ fn fully_tiled(tiling: Tiling) -> bool {
     tiling.top && tiling.bottom && tiling.left && tiling.right
 }
 
-/// The edge or corner under `pos`, ignoring tiled edges.
-fn resize_edge(pos: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
-    let top = !tiling.top && pos.y < SHADOW_SIZE;
-    let bottom = !tiling.bottom && pos.y > size.height - SHADOW_SIZE;
-    let left = !tiling.left && pos.x < SHADOW_SIZE;
-    let right = !tiling.right && pos.x > size.width - SHADOW_SIZE;
+fn resize_edge(position: Point<Pixels>, size: Size<Pixels>, tiling: Tiling) -> Option<ResizeEdge> {
+    let top = !tiling.top && position.y < SHADOW_SIZE;
+    let bottom = !tiling.bottom && position.y > size.height - SHADOW_SIZE;
+    let left = !tiling.left && position.x < SHADOW_SIZE;
+    let right = !tiling.right && position.x > size.width - SHADOW_SIZE;
 
     Some(match (top, bottom, left, right) {
         (true, _, true, _) => ResizeEdge::TopLeft,

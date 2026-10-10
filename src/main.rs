@@ -1,5 +1,6 @@
 mod assets;
 mod center;
+mod dev_overlay;
 mod title_bar;
 mod window_frame;
 
@@ -9,17 +10,19 @@ use gpui::{
     px, rgb, size,
 };
 
+use dev_overlay::DevOverlay;
 use title_bar::TitleBar;
 use window_frame::window_frame;
 
 const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
-/// Smallest size the window can be resized to (same as Zed).
+/// Same as Zed.
 const MIN_WINDOW_SIZE: Size<Pixels> = size(px(360.), px(240.));
 
 const TITLE: &str = "carear";
 
 struct Root {
     title_bar: Entity<TitleBar>,
+    dev_overlay: Entity<DevOverlay>,
 }
 
 impl Render for Root {
@@ -36,7 +39,7 @@ impl Render for Root {
                 .flex_col()
                 .bg(rgb(0x1e1e1e))
                 .when(client_decorations, |div| div.child(self.title_bar.clone()))
-                .child(div().flex_1()),
+                .child(div().flex_1().relative().child(self.dev_overlay.clone())),
         )
     }
 }
@@ -70,6 +73,7 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
+            dev_overlay::init(cx);
             let (bounds, maximize) = window_bounds(cx);
             let opened = cx.open_window(
                 WindowOptions {
@@ -98,11 +102,12 @@ fn main() {
                     });
                     cx.new(|cx| Root {
                         title_bar: cx.new(|_| TitleBar::new(TITLE)),
+                        dev_overlay: cx.new(DevOverlay::new),
                     })
                 },
             );
-            if let Err(err) = opened {
-                eprintln!("failed to open window: {err:#}");
+            if let Err(error) = opened {
+                eprintln!("failed to open window: {error:#}");
                 cx.quit();
                 return;
             }

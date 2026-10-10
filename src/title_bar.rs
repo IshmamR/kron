@@ -1,27 +1,15 @@
-//! Custom title bar used with client-side decorations: drag to move,
-//! double-click to maximize, right-click for the window menu, and
-//! minimize / maximize / close buttons. Sizes and icons follow Zed's
-//! Linux title bar.
-
 use gpui::{
     Context, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString,
     Window, div, prelude::*, px, rgb, svg,
 };
 
-/// How far the mouse must move after pressing before the window starts to
-/// move, so small jitter during a (double) click doesn't start a drag.
+// Small jitter during a (double) click shouldn't start a window move.
 const DRAG_THRESHOLD: Pixels = px(4.);
-
-/// Zed's `platform_title_bar_height`: 1.75rem, at least 34px.
-fn title_bar_height(window: &Window) -> Pixels {
-    (window.rem_size() * 1.75).max(px(34.))
-}
 
 pub struct TitleBar {
     title: SharedString,
-    /// Where the left button was pressed; the window move starts once the
-    /// mouse moves past `DRAG_THRESHOLD` so clicks and double-clicks still
-    /// reach the title bar.
+    /// Where the left button was pressed. The window move starts only past
+    /// `DRAG_THRESHOLD`, so clicks and double-clicks still reach the title bar.
     drag_start: Option<Point<Pixels>>,
 }
 
@@ -102,6 +90,11 @@ impl Render for TitleBar {
                     .child(WindowControl::Close.render()),
             )
     }
+}
+
+/// Same as Zed's `platform_title_bar_height`.
+fn title_bar_height(window: &Window) -> Pixels {
+    (window.rem_size() * 1.75).max(px(34.))
 }
 
 #[derive(Clone, Copy)]
