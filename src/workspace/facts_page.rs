@@ -34,7 +34,16 @@ const DETAIL_MAX_WIDTH: Pixels = px(760.);
 
 actions!(
     facts_page,
-    [ConfirmFact, ToggleHidden, Dismiss, FocusSearch, FocusList, CancelEdit, AddFacts]
+    [
+        ConfirmFact,
+        ToggleHidden,
+        Dismiss,
+        FocusSearch,
+        FocusList,
+        CancelEdit,
+        AddFacts,
+        UndoMerge
+    ]
 );
 
 /// Picks the `index`th wording to keep while merging, by its number key.
@@ -61,6 +70,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", ToggleHidden, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("delete", ToggleHidden, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(LIST_KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", UndoMerge, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("down", FocusList, Some(&input_in(SEARCH_CONTEXT))),
         KeyBinding::new("escape", FocusList, Some(&input_in(SEARCH_CONTEXT))),
         KeyBinding::new("escape", CancelEdit, Some(&input_in(FACT_EDITOR_CONTEXT))),
@@ -124,6 +134,7 @@ impl Render for FactsPage {
             }))
             .on_action(cx.listener(|this, _: &FocusList, window, cx| this.focus_list(window, cx)))
             .on_action(cx.listener(Self::cancel_edit))
+            .on_action(cx.listener(|this, _: &UndoMerge, window, cx| this.undo_merge(window, cx)))
             .on_action(cx.listener(|this, action: &KeepWording, _, cx| {
                 if let Some(&fact) = this.marked(cx).get(action.index) {
                     this.keep = Some(fact);

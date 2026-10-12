@@ -1,3 +1,4 @@
+mod application_view;
 mod fact_list;
 mod facts_page;
 mod inspector;
@@ -127,7 +128,7 @@ impl Workspace {
 
         let previews = cx.new(|cx| Previews::new(library.clone(), cx));
         let resume_grid = cx.new(|cx| ResumeGrid::new(library.clone(), previews.clone(), cx));
-        let job_view = cx.new(|cx| JobView::new(library.clone(), previews, cx));
+        let job_view = cx.new(|cx| JobView::new(library.clone(), previews, window, cx));
         let facts_page = cx.new(|cx| FactsPage::new(library.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
 

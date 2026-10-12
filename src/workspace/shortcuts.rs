@@ -9,13 +9,17 @@ use gpui_kit::{
 
 use super::ToggleSidebar;
 use super::facts_page::{
-    AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden,
+    AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden, UndoMerge,
 };
-use super::job_view::{Back, SelectNextLine, SelectPreviousLine};
-use super::resume_grid::{OpenSelected, SelectLeft, SelectRight};
+use super::application_view::{CancelEvent, SaveEvent, UndoDelete};
+use super::job_view::{
+    Back, SelectNextLine, SelectPreviousLine, ShowApplicationTab, ShowResumeTab,
+};
+use super::resume_grid::{OpenSelected, SelectLeft, SelectRight, ShowFilter};
 use super::{ShowShortcuts, resume_grid};
 
-const WIDTH: f32 = 560.;
+/// Two columns, so every shortcut fits without scrolling on most screens.
+const WIDTH: f32 = 900.;
 /// Room left above and below the dialog.
 const VERTICAL_MARGIN: f32 = 200.;
 /// The kit list's key context, where its ↑ ↓ bindings live.
@@ -41,18 +45,34 @@ pub fn open(window: &mut Window, cx: &mut App) {
                         .max_h(window.viewport_size().height - px(VERTICAL_MARGIN))
                         .overflow_y_scrollbar()
                         .child(
-                            v_flex()
-                                .gap_5()
+                            h_flex()
+                                .items_start()
+                                .gap_8()
                                 .pr_3()
-                                .children(
-                                    groups()
-                                        .into_iter()
-                                        .map(|group| group.render(window, cx)),
-                                ),
+                                .children(columns(groups()).into_iter().map(|column| {
+                                    v_flex().flex_1().min_w_0().gap_5().children(
+                                        column.into_iter().map(|group| group.render(window, cx)),
+                                    )
+                                })),
                         ),
                 )
             })
     });
+}
+
+/// Splits the groups, in order, into two columns of about the same height.
+fn columns(groups: Vec<Group>) -> [Vec<Group>; 2] {
+    // A group's title takes about a row.
+    let rows = |group: &Group| group.shortcuts.len() + 1;
+    let half = groups.iter().map(rows).sum::<usize>() / 2;
+    let mut columns = [Vec::new(), Vec::new()];
+    let mut filled = 0;
+    for group in groups {
+        let column = usize::from(filled >= half);
+        filled += rows(&group);
+        columns[column].push(group);
+    }
+    columns
 }
 
 struct Group {
@@ -104,6 +124,14 @@ fn groups() -> Vec<Group> {
                     "Open the selected résumé",
                     vec![Action(Box::new(OpenSelected)), Gesture("Double-click")],
                 ),
+                shortcut(
+                    "Switch the filter",
+                    vec![
+                        Action(Box::new(ShowFilter { index: 0 })),
+                        Gesture("to"),
+                        Action(Box::new(ShowFilter { index: 4 })),
+                    ],
+                ),
             ],
         },
         Group {
@@ -120,6 +148,16 @@ fn groups() -> Vec<Group> {
                     "Clear the selection, then go back",
                     vec![Action(Box::new(Back))],
                 ),
+                shortcut("Show the résumé", vec![Action(Box::new(ShowResumeTab))]),
+                shortcut("Show the application", vec![Action(Box::new(ShowApplicationTab))]),
+            ],
+        },
+        Group {
+            title: "Application",
+            shortcuts: vec![
+                shortcut("Save the event", vec![Action(Box::new(SaveEvent))]),
+                shortcut("Cancel logging", vec![Action(Box::new(CancelEvent))]),
+                shortcut("Undo deleting an event", vec![Action(Box::new(UndoDelete))]),
             ],
         },
         Group {
@@ -149,6 +187,7 @@ fn groups() -> Vec<Group> {
                 ),
                 shortcut("Merge, while merging", vec![Action(Box::new(ConfirmFact))]),
                 shortcut("Clear merge marks", vec![Action(Box::new(Dismiss))]),
+                shortcut("Undo the merge", vec![Action(Box::new(UndoMerge))]),
                 shortcut("Save the fact's text, while editing it", vec![Keystroke("enter")]),
                 shortcut("Add a line break, while editing", vec![Keystroke("shift-enter")]),
                 shortcut("Cancel editing", vec![Action(Box::new(CancelEdit))]),

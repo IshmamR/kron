@@ -10,7 +10,7 @@ use super::parts::{
     caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
 };
 use crate::model::{
-    Extraction, Fact, FactChange, FactId, FactStatus, Job, JobId, Library, Line, LineId,
+    Extraction, Fact, FactChange, FactId, FactStatus, JobId, Library, Line, LineId, ResumeId,
     TailoredResume, UnsupportedClaim, UnsupportedReason,
 };
 
@@ -20,13 +20,16 @@ use crate::model::{
 pub struct Inspector {
     library: Entity<Library>,
     job: JobId,
+    resume: ResumeId,
+    /// False for an older version, whose claims can't be acted on.
+    current: bool,
     selected: Option<LineId>,
 }
 
 impl RenderOnce for Inspector {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let library = self.library.read(cx);
-        let resume = library.job(self.job).and_then(Job::current_resume);
+        let resume = library.job(self.job).and_then(|job| job.resume(self.resume));
         let selected_line = self
             .selected
             .zip(resume)
@@ -96,10 +99,18 @@ impl RenderOnce for Inspector {
 }
 
 impl Inspector {
-    pub fn new(library: Entity<Library>, job: JobId, selected: Option<LineId>) -> Self {
+    pub fn new(
+        library: Entity<Library>,
+        job: JobId,
+        resume: ResumeId,
+        current: bool,
+        selected: Option<LineId>,
+    ) -> Self {
         Self {
             library,
             job,
+            resume,
+            current,
             selected,
         }
     }
@@ -174,7 +185,7 @@ impl Inspector {
                     .child(claim.text.clone()),
             )
             .child(div().text_xs().text_color(reason_color).child(reason))
-            .child(h_flex().child(action))
+            .when(self.current, |this| this.child(h_flex().child(action)))
             .into_any_element()
     }
 }

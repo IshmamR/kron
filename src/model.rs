@@ -1,3 +1,4 @@
+mod application;
 pub mod sample;
 
 use std::collections::HashSet;
@@ -6,6 +7,10 @@ use std::ops::Range;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub use application::{
+    InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
+};
 
 /// Share of the shorter fact's words the longer must contain to be offered as
 /// a duplicate.
@@ -32,6 +37,7 @@ id!(EntryId);
 id!(JobId);
 id!(ResumeId);
 id!(LineId);
+id!(EventId);
 
 /// Everything the app knows about the user. Held in memory for now.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -467,13 +473,8 @@ impl Job {
         self.resumes.last()
     }
 
-    /// The latest event that says where the application stands. Notes don't.
-    pub fn status(&self) -> Option<&JobEventKind> {
-        self.events
-            .iter()
-            .rev()
-            .map(|event| &event.kind)
-            .find(|kind| !matches!(kind, JobEventKind::Note(_)))
+    pub fn resume(&self, id: ResumeId) -> Option<&TailoredResume> {
+        self.resumes.iter().find(|resume| resume.id == id)
     }
 }
 
@@ -489,24 +490,6 @@ pub struct FactOverride {
 pub enum Inclusion {
     Include,
     Exclude,
-}
-
-/// The job's current status is its latest event.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct JobEvent {
-    pub at: DateTime<Utc>,
-    pub kind: JobEventKind,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum JobEventKind {
-    Applied,
-    RecruiterReplied,
-    InterviewScheduled { at: DateTime<Utc> },
-    Rejected,
-    Offer,
-    Withdrawn,
-    Note(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

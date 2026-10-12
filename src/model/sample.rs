@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, DurationRound, Local, TimeZone, Utc};
 use serde::Deserialize;
 
 use crate::model::{
     DocumentId, DocumentKind, Entry, EntryId, EntryKind, Extraction, Fact, FactId, FactKind,
-    FactSource, FactStatus, FactVersion, Job, JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId,
+    FactSource, FactStatus, FactVersion, InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId,
     Section, SourceDocument, TailoredResume, UnsupportedClaim, UnsupportedReason,
 };
 
@@ -185,10 +185,17 @@ impl Loader {
     }
 
     fn job(&self, job: SampleJob) -> Result<Job, String> {
-        let resumes = match job.resume {
-            Some(resume) => vec![self.resume(resume)?],
-            None => Vec::new(),
-        };
+        let mut resumes = job
+            .resumes
+            .into_iter()
+            .map(|resume| self.resume(resume))
+            .collect::<Result<Vec<_>, String>>()?;
+        resumes.sort_by_key(|resume| resume.generated_at);
+        let events = job
+            .events
+            .into_iter()
+            .map(|event| event.into_event(&resumes))
+            .collect();
         Ok(Job {
             id: JobId::new(),
             title: job.title,
@@ -199,11 +206,7 @@ impl Loader {
             overrides: Vec::new(),
             resumes,
             cover_letter: None,
-            events: job
-                .events
-                .into_iter()
-                .map(SampleEvent::into_event)
-                .collect(),
+            events,
         })
     }
 
@@ -270,7 +273,10 @@ impl Loader {
 
         Ok(TailoredResume {
             id: ResumeId::new(),
-            generated_at: Utc::now() - Duration::hours(resume.generated_hours_ago),
+            // On the hour, so the times shown don't change between launches.
+            generated_at: (Utc::now() - Duration::hours(resume.generated_hours_ago))
+                .duration_trunc(Duration::hours(1))
+                .unwrap_or_else(|_| Utc::now()),
             sections,
             unsupported_claims,
             basis,
@@ -410,45 +416,76 @@ struct SampleJob {
     created_days_ago: i64,
     #[serde(default)]
     events: Vec<SampleEvent>,
+    /// Every version generated; the latest is the current one.
     #[serde(default)]
-    resume: Option<SampleResume>,
+    resumes: Vec<SampleResume>,
 }
 
 #[derive(Deserialize)]
 struct SampleEvent {
+    /// Negative for events to come.
     days_ago: i64,
+    /// Local hour of the day; otherwise the current time.
+    #[serde(default)]
+    hour: Option<u32>,
     kind: SampleEventKind,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 #[derive(Deserialize)]
 enum SampleEventKind {
     Applied,
     RecruiterReplied,
-    InterviewScheduled { in_days: i64 },
-    Rejected,
+    Interview {
+        kind: InterviewKind,
+        #[serde(default)]
+        with: String,
+    },
     Offer,
+    Rejected,
     Withdrawn,
-    Note(String),
+    NoResponse,
+    Note,
 }
 
 impl SampleEvent {
-    fn into_event(self) -> JobEvent {
+    /// An application sends the latest résumé generated before it.
+    fn into_event(self, resumes: &[TailoredResume]) -> JobEvent {
+        let at = sample_time(self.days_ago, self.hour);
         let kind = match self.kind {
-            SampleEventKind::Applied => JobEventKind::Applied,
-            SampleEventKind::RecruiterReplied => JobEventKind::RecruiterReplied,
-            SampleEventKind::InterviewScheduled { in_days } => JobEventKind::InterviewScheduled {
-                at: Utc::now() + Duration::days(in_days),
+            SampleEventKind::Applied => JobEventKind::Applied {
+                resume: resumes
+                    .iter()
+                    .rev()
+                    .find(|resume| resume.generated_at <= at)
+                    .map(|resume| resume.id),
             },
-            SampleEventKind::Rejected => JobEventKind::Rejected,
+            SampleEventKind::RecruiterReplied => JobEventKind::RecruiterReplied,
+            SampleEventKind::Interview { kind, with } => JobEventKind::Interview { kind, with },
             SampleEventKind::Offer => JobEventKind::Offer,
+            SampleEventKind::Rejected => JobEventKind::Rejected,
             SampleEventKind::Withdrawn => JobEventKind::Withdrawn,
-            SampleEventKind::Note(note) => JobEventKind::Note(note),
+            SampleEventKind::NoResponse => JobEventKind::NoResponse,
+            SampleEventKind::Note => JobEventKind::Note,
         };
         JobEvent {
-            at: Utc::now() - Duration::days(self.days_ago),
-            kind,
+            note: self.note,
+            ..JobEvent::new(at, kind)
         }
     }
+}
+
+/// `days_ago` days from now, at `hour` local time if given.
+fn sample_time(days_ago: i64, hour: Option<u32>) -> DateTime<Utc> {
+    let at = Utc::now() - Duration::days(days_ago);
+    hour.and_then(|hour| {
+        let day = at.with_timezone(&Local).date_naive();
+        Local
+            .from_local_datetime(&day.and_hms_opt(hour, 0, 0)?)
+            .single()
+    })
+    .map_or(at, |local| local.with_timezone(&Utc))
 }
 
 #[derive(Deserialize)]

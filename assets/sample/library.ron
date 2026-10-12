@@ -133,7 +133,10 @@
             company: "Cinder Labs",
             description: "We're looking for a senior engineer to own our Rust services, mentor the team and improve reliability.",
             created_days_ago: 1,
-            resume: (
+            events: [
+                (days_ago: 0, kind: Note, note: "Referred by Sami Hasan, who works on their storage team. Mention it when applying."),
+            ],
+            resumes: [(
                 generated_hours_ago: 3,
                 sections: [
                     (lines: [
@@ -160,7 +163,7 @@
                     (text: "Writing production Rust since 2016.", reason: InventedYear(2016)),
                     (text: "Experience with embedded, no_std Rust.", reason: NoSupportingFact),
                 ],
-            ),
+            )],
         ),
         (
             title: "Backend Engineer, Payments",
@@ -169,12 +172,31 @@
             url: "https://example.com/jobs/ledgerly-backend",
             created_days_ago: 9,
             events: [
-                (days_ago: 8, kind: Applied),
-                (days_ago: 5, kind: RecruiterReplied),
-                (days_ago: 4, kind: InterviewScheduled(in_days: 3)),
+                (days_ago: 8, hour: 9, kind: Applied),
+                (days_ago: 5, hour: 16, kind: RecruiterReplied, note: "Recruiter is Nadia Karim. Asked for times next week."),
+                (days_ago: -3, hour: 14, kind: Interview(kind: Technical, with: "Farhan Ahmed and Priya Nair, payments team")),
             ],
-            resume: (
-                generated_hours_ago: 216,
+            // Regenerated after applying, so what was sent is the older version.
+            resumes: [
+                (
+                    generated_hours_ago: 216,
+                    sections: [
+                        (lines: [
+                            Fact("name"),
+                            Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                        ]),
+                        (title: "Experience", lines: [
+                            Heading("northwind"),
+                            Fact("migration"),
+                            Fact("latency"),
+                            Heading("brightline"),
+                            Fact("scheduling"),
+                        ]),
+                        (title: "Education", lines: [Heading("degree")]),
+                    ],
+                ),
+                (
+                generated_hours_ago: 24,
                 sections: [
                     (lines: [
                         Fact("name"),
@@ -197,7 +219,8 @@
                     (text: "Introduced property-based tests to the billing module.", reason: UsesHiddenFact("property_tests")),
                     (text: "Processed $2M in payments a day.", reason: InventedFigure("$2M")),
                 ],
-            ),
+                ),
+            ],
         ),
         // Long enough to run onto a second page.
         (
@@ -205,8 +228,8 @@
             company: "Atlas Freight",
             description: "Lead the technical direction of our routing platform: reliability, observability and the next generation of route planning.",
             created_days_ago: 3,
-            events: [(days_ago: 1, kind: Applied)],
-            resume: (
+            events: [(days_ago: 1, hour: 11, kind: Applied)],
+            resumes: [(
                 generated_hours_ago: 48,
                 sections: [
                     (lines: [
@@ -254,7 +277,161 @@
                 unsupported: [
                     (text: "Designed routing algorithms that cut fuel costs by 12%.", reason: InventedFigure("12%")),
                 ],
-            ),
+            )],
+        ),
+        (
+            title: "Rust Developer",
+            company: "Tidewater Systems",
+            description: "Write and maintain the Rust services behind our port logistics platform.",
+            created_days_ago: 23,
+            events: [
+                (days_ago: 21, hour: 10, kind: Applied),
+            ],
+            resumes: [(
+                generated_hours_ago: 528,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Fact("latency"),
+                        Fact("rust_guide"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+            )],
+        ),
+        (
+            title: "Backend Engineer, Payouts",
+            company: "Quillpay",
+            description: "Own the services that pay out sellers on time, every time.",
+            created_days_ago: 25,
+            events: [
+                (days_ago: 22, hour: 9, kind: Applied),
+                (days_ago: 18, hour: 13, kind: RecruiterReplied),
+                (days_ago: 10, hour: 15, kind: Interview(kind: Phone, with: "Mina Chowdhury, recruiter"), note: "Went well. She said the team would be in touch within a week."),
+            ],
+            resumes: [(
+                generated_hours_ago: 576,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Fact("on_call"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+            )],
+        ),
+        (
+            title: "Platform Engineer, Observability",
+            company: "Northstar Metrics",
+            description: "Build the tracing and metrics platform hundreds of engineers rely on.",
+            created_days_ago: 40,
+            events: [
+                (days_ago: 37, hour: 10, kind: Applied),
+                (days_ago: 33, hour: 12, kind: RecruiterReplied),
+                (days_ago: 28, hour: 11, kind: Interview(kind: Technical, with: "Two engineers from the metrics team")),
+                (days_ago: 20, hour: 10, kind: Interview(kind: Onsite, with: "A panel of four, including the platform lead")),
+                (days_ago: 16, hour: 17, kind: Rejected, note: "They went with someone with more Kubernetes operations experience."),
+            ],
+            resumes: [(
+                generated_hours_ago: 912,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("tracing"),
+                        Fact("capacity"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+            )],
+        ),
+        (
+            title: "Senior Backend Engineer",
+            company: "Brightwave",
+            description: "Lead backend work on our energy-trading platform.",
+            created_days_ago: 45,
+            events: [
+                (days_ago: 42, hour: 9, kind: Applied),
+                (days_ago: 36, hour: 14, kind: Interview(kind: Phone, with: "Rafi Islam, engineering manager")),
+                (days_ago: 30, hour: 11, kind: Interview(kind: Technical, with: "Two senior engineers")),
+                (days_ago: 24, hour: 10, kind: Interview(kind: Onsite, with: "The backend team and the CTO")),
+                (days_ago: 3, hour: 16, kind: Offer, note: "Offer letter by email. Reply by Oct 20."),
+            ],
+            resumes: [(
+                generated_hours_ago: 1032,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Fact("latency"),
+                        Fact("mentoring"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+            )],
+        ),
+        (
+            title: "Infrastructure Engineer",
+            company: "Kestrel Labs",
+            description: "Run the infrastructure behind our machine-learning research.",
+            created_days_ago: 30,
+            events: [
+                (days_ago: 28, hour: 10, kind: Applied),
+                (days_ago: 25, hour: 15, kind: RecruiterReplied),
+                (days_ago: 20, hour: 12, kind: Withdrawn, note: "The role turned out to be on-site only."),
+            ],
+            resumes: [(
+                generated_hours_ago: 696,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("capacity"),
+                        Fact("on_call"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+            )],
         ),
         (
             title: "Platform Engineer",

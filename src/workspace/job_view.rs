@@ -2,23 +2,25 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::Local;
+use chrono::{Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, Image, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, ScrollHandle, SharedString, Stateful, Subscription, Window, actions, canvas, div, img, point,
+    Point, ScrollHandle, Stateful, Subscription, Window, actions, canvas, div, img, point,
     prelude::*, px, rgb,
 };
 
+use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::Inspector;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
-use crate::model::{Job, JobEventKind, JobId, Library, LineId, TailoredResume};
+use crate::model::{Job, JobId, Library, LineId, ResumeId, TailoredResume};
 use crate::typeset::{LineBox, PageSize};
 
 const KEY_CONTEXT: &str = "JobView";
@@ -37,14 +39,20 @@ const PAPER: u32 = 0xfafafa;
 const SELECTION: u32 = 0x2f6fde;
 const EDITED_MARKER: u32 = 0xbf8700;
 
-actions!(job_view, [SelectNextLine, SelectPreviousLine, Back]);
+actions!(
+    job_view,
+    [SelectNextLine, SelectPreviousLine, Back, ShowResumeTab, ShowApplicationTab]
+);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("down", SelectNextLine, Some(KEY_CONTEXT)),
         KeyBinding::new("up", SelectPreviousLine, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-1", ShowResumeTab, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT)),
     ]);
+    application_view::init(cx);
 }
 
 pub enum JobViewEvent {
@@ -56,6 +64,11 @@ pub struct JobView {
     library: Entity<Library>,
     previews: Entity<Previews>,
     job: Option<JobId>,
+    tab: Tab,
+    /// The older résumé that was sent, when showing it instead of the
+    /// current one.
+    showing_sent: Option<ResumeId>,
+    application: Entity<ApplicationView>,
     selected: Option<LineId>,
     hovered: Option<LineId>,
     focus_handle: FocusHandle,
@@ -77,9 +90,11 @@ impl EventEmitter<JobViewEvent> for JobView {}
 impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
-        let render = self.job.and_then(|job| {
-            self.previews
-                .update(cx, |previews, cx| previews.get(job, pixels_per_point, cx))
+        let shown = self.shown_resume(self.library.read(cx)).map(|resume| resume.id);
+        let render = self.job.zip(shown).and_then(|(job, resume)| {
+            self.previews.update(cx, |previews, cx| {
+                previews.get_version(job, resume, pixels_per_point, cx)
+            })
         });
         self.pages = match &render {
             Some(PageRender::Ready(pages)) => Some(pages.clone()),
@@ -92,23 +107,13 @@ impl Render for JobView {
 
         let library = self.library.read(cx);
         let content = match self.job.and_then(|job| library.job(job)) {
-            Some(job) => h_resizable("job-view")
-                .with_state(&self.layout)
-                .child(resizable_panel().child(
-                    v_flex()
-                        .size_full()
-                        .child(job_header(job, cx))
-                        .when_some(outdated_notice(job, library, cx), |this, notice| {
-                            this.child(notice)
-                        })
-                        .child(self.render_resume(job, render, cx)),
-                ))
-                .child(
-                    resizable_panel()
-                        .size(INSPECTOR_WIDTH)
-                        .size_range(INSPECTOR_MIN_WIDTH..INSPECTOR_MAX_WIDTH)
-                        .child(Inspector::new(self.library.clone(), job.id, self.selected)),
-                )
+            Some(job) => v_flex()
+                .size_full()
+                .child(self.render_header(job, cx))
+                .child(div().flex_1().min_h_0().child(match self.tab {
+                    Tab::Resume => self.render_resume_tab(job, library, render, cx),
+                    Tab::Application => self.application.clone().into_any_element(),
+                }))
                 .into_any_element(),
             None => centered_message("No job selected", cx).into_any_element(),
         };
@@ -121,6 +126,12 @@ impl Render for JobView {
                 cx.listener(|this, _: &SelectPreviousLine, _, cx| this.move_selection(false, cx)),
             )
             .on_action(cx.listener(Self::back))
+            .on_action(cx.listener(|this, _: &ShowResumeTab, window, cx| {
+                this.set_tab(Tab::Resume, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowApplicationTab, window, cx| {
+                this.set_tab(Tab::Application, window, cx)
+            }))
             .size_full()
             .child(content)
     }
@@ -136,16 +147,30 @@ impl JobView {
     pub fn new(
         library: Entity<Library>,
         previews: Entity<Previews>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let application = cx.new(|cx| ApplicationView::new(library.clone(), window, cx));
         Self {
             _subscriptions: vec![
                 cx.observe(&library, |_, _, cx| cx.notify()),
                 cx.observe(&previews, |_, _, cx| cx.notify()),
+                cx.observe(&application, |_, _, cx| cx.notify()),
+                cx.subscribe_in(&application, window, |this, _, event, window, cx| {
+                    match event {
+                        ApplicationViewEvent::ShowResume(resume) => {
+                            this.show_version(*resume, cx);
+                            this.set_tab(Tab::Resume, window, cx);
+                        }
+                    }
+                }),
             ],
             library,
             previews,
             job: None,
+            tab: Tab::Resume,
+            showing_sent: None,
+            application,
             selected: None,
             hovered: None,
             focus_handle: cx.focus_handle(),
@@ -164,6 +189,10 @@ impl JobView {
     pub fn set_job(&mut self, job: JobId, cx: &mut Context<Self>) {
         if self.job != Some(job) {
             self.job = Some(job);
+            self.tab = Tab::Resume;
+            self.showing_sent = None;
+            self.application
+                .update(cx, |application, cx| application.set_job(job, cx));
             self.selected = None;
             self.hovered = None;
             self.pages = None;
@@ -173,8 +202,34 @@ impl JobView {
     }
 
     pub fn select_line(&mut self, line: LineId, cx: &mut Context<Self>) {
+        self.tab = Tab::Resume;
+        self.showing_sent = None;
         self.selected = Some(line);
         self.scroll_pending = true;
+        cx.notify();
+    }
+
+    fn set_tab(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
+        self.tab = tab;
+        // The tab's controls may have had focus; keys still need somewhere
+        // to go.
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Shows a version of the résumé: the current one, or an older one sent.
+    fn show_version(&mut self, resume: ResumeId, cx: &mut Context<Self>) {
+        let library = self.library.read(cx);
+        let current = self
+            .job
+            .and_then(|job| library.job(job))
+            .and_then(Job::current_resume)
+            .map(|resume| resume.id);
+        self.showing_sent = (Some(resume) != current).then_some(resume);
+        self.selected = None;
+        self.hovered = None;
+        self.pages = None;
+        self.scroll_handle.set_offset(point(px(0.), px(0.)));
         cx.notify();
     }
 
@@ -188,8 +243,11 @@ impl JobView {
     }
 
     fn move_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.tab != Tab::Resume {
+            return;
+        }
         let library = self.library.read(cx);
-        let Some(resume) = self.current_resume(library) else {
+        let Some(resume) = self.shown_resume(library) else {
             return;
         };
         let lines: Vec<LineId> = resume.lines().map(|line| line.id).collect();
@@ -258,19 +316,96 @@ impl JobView {
             .line_at(page, f32::from(local.x) / scale, f32::from(local.y) / scale)
     }
 
-    fn current_resume<'a>(&self, library: &'a Library) -> Option<&'a TailoredResume> {
-        self.job
-            .and_then(|job| library.job(job))
-            .and_then(Job::current_resume)
+    /// The résumé on screen: the current one, or the older one sent.
+    fn shown_resume<'a>(&self, library: &'a Library) -> Option<&'a TailoredResume> {
+        let job = self.job.and_then(|job| library.job(job))?;
+        match self.showing_sent {
+            Some(resume) => job.resume(resume),
+            None => job.current_resume(),
+        }
+    }
+
+    fn render_header(&self, job: &Job, cx: &Context<Self>) -> impl IntoElement {
+        h_flex()
+            .flex_none()
+            .justify_between()
+            .gap_4()
+            .pr_3()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(job_header(job, self.shown_resume(self.library.read(cx)), cx))
+            .child(
+                TabBar::new("job-tabs")
+                    .segmented()
+                    .small()
+                    .selected_index(match self.tab {
+                        Tab::Resume => 0,
+                        Tab::Application => 1,
+                    })
+                    .child(KitTab::new().label("Résumé"))
+                    .child(KitTab::new().label("Application"))
+                    .on_click(cx.listener(|this, index: &usize, window, cx| {
+                        let tab = if *index == 0 {
+                            Tab::Resume
+                        } else {
+                            Tab::Application
+                        };
+                        this.set_tab(tab, window, cx)
+                    })),
+            )
+    }
+
+    fn render_resume_tab(
+        &self,
+        job: &Job,
+        library: &Library,
+        render: Option<PageRender>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let shown = self.shown_resume(library);
+        let current = job.current_resume().map(|resume| resume.id);
+        let showing_current = shown.map(|resume| resume.id) == current;
+        h_resizable("job-view")
+            .with_state(&self.layout)
+            .child(
+                resizable_panel().child(
+                    v_flex()
+                        .size_full()
+                        .when_some(sent_notice(job, self.showing_sent, cx), |this, notice| {
+                            this.child(notice)
+                        })
+                        .when(showing_current, |this| {
+                            this.when_some(outdated_notice(job, library, cx), |this, notice| {
+                                this.child(notice)
+                            })
+                        })
+                        .child(self.render_resume(shown, render, cx)),
+                ),
+            )
+            .child(
+                resizable_panel()
+                    .size(INSPECTOR_WIDTH)
+                    .size_range(INSPECTOR_MIN_WIDTH..INSPECTOR_MAX_WIDTH)
+                    .children(shown.map(|resume| {
+                        Inspector::new(
+                            self.library.clone(),
+                            job.id,
+                            resume.id,
+                            showing_current,
+                            self.selected,
+                        )
+                    })),
+            )
+            .into_any_element()
     }
 
     fn render_resume(
         &self,
-        job: &Job,
+        resume: Option<&TailoredResume>,
         render: Option<PageRender>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let Some(resume) = job.current_resume() else {
+        let Some(resume) = resume else {
             return centered_message("No résumé for this job yet.", cx).into_any_element();
         };
         let pages = match render {
@@ -495,30 +630,22 @@ fn margin_marker(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Di
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
 }
 
-/// A short label for where an application stands, also shown on the grid.
-pub fn status_label(job: &Job) -> SharedString {
-    match job.status() {
-        None => "Not applied".into(),
-        Some(JobEventKind::Applied) => "Applied".into(),
-        Some(JobEventKind::RecruiterReplied) => "Recruiter replied".into(),
-        Some(JobEventKind::InterviewScheduled { at }) => {
-            format!("Interview {}", at.with_timezone(&Local).format("%b %-d")).into()
-        }
-        Some(JobEventKind::Rejected) => "Rejected".into(),
-        Some(JobEventKind::Offer) => "Offer".into(),
-        Some(JobEventKind::Withdrawn) => "Withdrawn".into(),
-        Some(JobEventKind::Note(_)) => "Note".into(),
-    }
-}
-
 /// Pixels on screen per typographic point.
 fn scale(page: PageSize) -> f32 {
     f32::from(PAGE_WIDTH) / page.width
 }
 
-fn job_header(job: &Job, cx: &Context<JobView>) -> impl IntoElement {
-    let mut details = vec![job.company.clone(), status_label(job).to_string()];
-    if let Some(resume) = job.current_resume() {
+/// `shown` is the résumé version on screen.
+fn job_header(
+    job: &Job,
+    shown: Option<&TailoredResume>,
+    cx: &Context<JobView>,
+) -> impl IntoElement {
+    let mut details = vec![
+        job.company.clone(),
+        application_view::status_label(job, Utc::now()),
+    ];
+    if let Some(resume) = shown {
         details.push(format!(
             "Generated {}",
             resume
@@ -560,6 +687,62 @@ fn job_header(job: &Job, cx: &Context<JobView>) -> impl IntoElement {
                         .child(details.join(" · ")),
                 ),
         )
+}
+
+/// Says when the résumé sent is older than the current one, and switches
+/// between them.
+fn sent_notice(
+    job: &Job,
+    showing_sent: Option<ResumeId>,
+    cx: &Context<JobView>,
+) -> Option<impl IntoElement> {
+    let sent = job.sent_older_resume()?;
+    let sent_id = sent.id;
+    let theme = cx.theme();
+    let generated = sent.generated_at.with_timezone(&Local).format("%b %-d");
+    let (text, label) = match showing_sent {
+        Some(_) => (
+            format!("Showing the version you sent, generated {generated}. It's read-only."),
+            "Show current",
+        ),
+        None => (
+            format!(
+                "You sent an older version of this résumé, generated {generated}, before \
+                 regenerating it."
+            ),
+            "Show the version sent",
+        ),
+    };
+    Some(
+        h_flex()
+            .flex_none()
+            .gap_3()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.secondary)
+            .text_sm()
+            .child(Icon::new(IconName::Info).small().text_color(theme.muted_foreground))
+            .child(div().flex_1().child(text))
+            .child(
+                Button::new("toggle-sent")
+                    .label(label)
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let current = this
+                            .job
+                            .and_then(|job| this.library.read(cx).job(job))
+                            .and_then(Job::current_resume)
+                            .map(|resume| resume.id);
+                        match (this.showing_sent, current) {
+                            (Some(_), Some(current)) => this.show_version(current, cx),
+                            _ => this.show_version(sent_id, cx),
+                        }
+                    })),
+            ),
+    )
 }
 
 /// Shown when facts the résumé was generated from changed since.
@@ -606,6 +789,12 @@ fn outdated_notice(job: &Job, library: &Library, cx: &App) -> Option<impl IntoEl
                     .tooltip("Regenerating isn't available yet"),
             ),
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tab {
+    Resume,
+    Application,
 }
 
 fn centered_message(text: &'static str, cx: &App) -> impl IntoElement {

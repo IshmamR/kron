@@ -13,7 +13,7 @@ use crate::typeset::{ResumeLayout, Typesetter, resume_markup};
 /// Width of a US Letter page, the template's paper, in typographic points.
 const PAGE_WIDTH_POINTS: f32 = 612.;
 
-/// Typst renders of each job's current résumé, made off the main thread on
+/// Typst renders of each job's résumés, made off the main thread on
 /// request and kept until the résumé's markup changes.
 pub struct Previews {
     library: Entity<Library>,
@@ -66,8 +66,20 @@ impl Previews {
         pixels_per_point: f32,
         cx: &mut Context<Self>,
     ) -> Option<Render> {
+        let resume = self.library.read(cx).job(job).and_then(Job::current_resume)?.id;
+        self.get_version(job, resume, pixels_per_point, cx)
+    }
+
+    /// Like `get`, for any version of the job's résumé.
+    pub fn get_version(
+        &mut self,
+        job: JobId,
+        resume: ResumeId,
+        pixels_per_point: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<Render> {
         let library = self.library.read(cx);
-        let resume = library.job(job).and_then(Job::current_resume)?;
+        let resume = library.job(job).and_then(|job| job.resume(resume))?;
         let markup = resume_markup(resume, library);
         let key = SlotKey {
             resume: resume.id,
