@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use gpui::{
+use gpui_kit::{
     App, Context, Global, Hsla, IntoElement, KeyBinding, SharedString, Subscription, Task, Window,
     actions, div, prelude::*, px, rgb,
 };
@@ -155,7 +155,9 @@ impl Render for DevOverlay {
             .p_3()
             .min_w(px(280.))
             .rounded_md()
-            .bg(Hsla::black().opacity(0.8))
+            // See-through enough to show what's under it; at 60% the light text
+            // still reads over a white page.
+            .bg(Hsla::black().opacity(0.6))
             .border_1()
             .border_color(rgb(0x3c3c3c))
             .text_xs()

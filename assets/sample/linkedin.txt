@@ -1,0 +1,13 @@
+Alex Rahman
+Senior Software Engineer at Northwind Logistics · Dhaka, Bangladesh
+
+About
+I like boring, reliable backend systems and the tooling that keeps them that way.
+
+Experience
+Senior Software Engineer
+Northwind Logistics
+Migrated 12 backend services from Python to Rust, one service at a time.
+
+Talks
+Tracing async Rust in production, RustConf 2024.

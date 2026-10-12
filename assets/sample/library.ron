@@ -1,0 +1,266 @@
+#![enable(implicit_some)]
+// Sample library for building the UI before import and generation exist.
+// Loaded by `src/model/sample.rs`. Facts are named by `key`, and résumé lines
+// cite them by key:
+//
+//   Fact("key")                        the fact's text, citing it
+//   Heading("entry")                   "Title, Organization · Dates" of an entry
+//   Reworded(text: …, cites: [keys])   generated wording that differs from the facts
+//   Edited(fact: "key", text: …)       generated as the fact's text, then edited by the user
+//
+// Every fact's text (or `source`, when extraction mangled it) must appear
+// verbatim in its document: `from`, or its entry's, or "cv". `also_in` lists
+// other documents it was found in, as if duplicates had been merged.
+// `edited` is the user's rewording. Résumés are generated from the facts as
+// extracted and not hidden, so edits and hiding came after.
+//
+// The data covers every state the facts screen shows: unreviewed, confirmed,
+// hidden, flagged, edited, merged from two documents, a likely duplicate,
+// facts from notes, and facts changed after a résumé used them.
+(
+    documents: [
+        (key: "cv", kind: File("alex_rahman_cv.pdf"), text_file: "cv.txt", added_days_ago: 12),
+        (key: "linkedin", kind: File("linkedin_profile.pdf"), text_file: "linkedin.txt", added_days_ago: 5),
+        (
+            key: "fest_note", kind: Note, added_days_ago: 2,
+            text: "Organizer, Code Fest 2019, University of Dhaka Programming Club\nRan a volunteer team of 15 students over the three days.\nFound sponsors who covered the whole budget.",
+        ),
+        (
+            key: "lecture_note", kind: Note, added_days_ago: 1,
+            text: "Gave a guest lecture on async Rust to final-year students at BRAC University.",
+        ),
+    ],
+
+    facts: [
+        (key: "name", kind: Name, text: "Alex Rahman"),
+        (key: "email", kind: Contact, text: "alex.rahman@example.com"),
+        (key: "github", kind: Contact, text: "github.com/alexr"),
+        (key: "summary", kind: Summary, text: "Backend engineer with eight years of experience building reliable services in Rust, Go and Python, most recently leading the routing platform at a logistics company."),
+        (key: "skills", kind: Skill, text: "Rust, Go, Python, PostgreSQL, Kafka, Kubernetes", status: Unreviewed),
+        (key: "rustconf", text: "Tracing async Rust in production, RustConf 2024.", also_in: ["linkedin"]),
+        (key: "meetup", text: "Moving a Python monolith to Rust one service at a time, Rust Dhaka meetup 2023."),
+        (key: "lecture", from: "lecture_note", text: "Gave a guest lecture on async Rust to final-year students at BRAC University.", status: Unreviewed),
+    ],
+
+    entries: [
+        (
+            key: "northwind", kind: Experience,
+            title: "Senior Software Engineer", organization: "Northwind Logistics", dates: "2021 – present",
+            bullets: [
+                (key: "migration", text: "Led the migration of 12 backend services from Python to Rust."),
+                (key: "latency", text: "Cut p99 latency of the routing API from 480 ms to 95 ms."),
+                (
+                    key: "mentoring",
+                    text: "Mentored four junior engineers through their first production launches.",
+                    edited: "Mentored four junior engineers through their first production launches; two now lead teams of their own.",
+                ),
+                (key: "migration_linkedin", from: "linkedin", text: "Migrated 12 backend services from Python to Rust, one service at a time.", status: Unreviewed),
+                (
+                    key: "pipeline",
+                    text: "Designed the event pipeline that processes shipment updates.",
+                    source: "Designed the event pipe-\nline that processes shipment updates.",
+                    status: Unreviewed,
+                    flag: "A word was split across two lines in the PDF.",
+                ),
+                (key: "on_call", text: "Ran the on-call rotation for the routing team and wrote the runbooks that new engineers still start from."),
+                (key: "tracing", text: "Introduced structured logging and distributed tracing across the routing services, so most incidents can now be diagnosed from a single dashboard."),
+                (key: "multi_depot", text: "Worked with product managers to scope the multi-depot routing project and delivered it across two quarters."),
+                (key: "capacity", text: "Built a capacity model for the routing cluster that the infrastructure team now uses for quarterly budgeting."),
+                (key: "rust_guide", text: "Wrote the internal guide to building Rust services at Northwind, covering error handling, testing and observability."),
+            ],
+        ),
+        (
+            key: "brightline", kind: Experience,
+            title: "Backend Engineer", organization: "Brightline Health", dates: "2018 – 2021",
+            bullets: [
+                (key: "scheduling", text: "Built the appointment scheduling service used by 40 clinics."),
+                (key: "postgres", text: "Maintained the Postgres schema and wrote its migration tooling."),
+                (key: "property_tests", text: "Introduced property-based tests to the billing module.", status: Hidden),
+                (key: "kubernetes", text: "Moved the scheduling service from a single virtual machine to Kubernetes, with zero-downtime deploys.", status: Hidden),
+                (key: "audit_log", text: "Built the audit log the compliance team uses to review who accessed patient records and when."),
+                (key: "streaming", text: "Led the move from nightly batch exports to a streaming integration with three partner clinic systems."),
+            ],
+        ),
+        (
+            key: "kite", kind: Experience,
+            title: "Junior Developer", organization: "Kite Analytics", dates: "2016 – 2018",
+            bullets: [
+                (key: "etl", text: "Wrote the nightly ETL jobs that loaded customer usage data into the reporting warehouse."),
+                (key: "dashboard", text: "Replaced a hand-maintained spreadsheet of client reports with a self-service dashboard used by the sales team."),
+                (key: "deploys", text: "Fixed and documented the deploy scripts, cutting a typical release from half a day to under an hour."),
+            ],
+        ),
+        (
+            key: "meghna", kind: Experience,
+            title: "Software Engineering Intern", organization: "Meghna Telecom", dates: "2015",
+            bullets: [
+                (key: "sim_stock", text: "Built an internal tool for tracking SIM card stock across regional warehouses."),
+                (key: "billing_tests", text: "Wrote unit tests for the billing reconciliation scripts and fixed the bugs they found."),
+            ],
+        ),
+        (
+            key: "tracewire", kind: Project, title: "tracewire",
+            bullets: [
+                (key: "tracewire_about", text: "An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars."),
+                (key: "tracewire_maintain", text: "Maintain the crate, review contributions from other companies and publish its releases."),
+            ],
+        ),
+        (
+            key: "simulator", kind: Project, title: "Shipment simulator",
+            bullets: [
+                (key: "simulator_about", text: "A load-testing tool that replays a day of real shipment events against the staging environment."),
+                (key: "simulator_bottlenecks", text: "Found two capacity bottlenecks in the routing API before the 2023 peak season."),
+            ],
+        ),
+        (
+            key: "degree", kind: Education,
+            title: "B.Sc. Computer Science", organization: "University of Dhaka", dates: "2014 – 2018",
+        ),
+        // What extraction would make of the note: a role with its bullets.
+        (
+            key: "fest", kind: Other, from: "fest_note", status: Unreviewed,
+            title: "Organizer", organization: "University of Dhaka Programming Club", dates: "2019",
+            bullets: [
+                (key: "volunteers", text: "Ran a volunteer team of 15 students over the three days."),
+                (key: "sponsors", text: "Found sponsors who covered the whole budget."),
+            ],
+        ),
+    ],
+
+    jobs: [
+        (
+            title: "Senior Rust Engineer",
+            company: "Cinder Labs",
+            description: "We're looking for a senior engineer to own our Rust services, mentor the team and improve reliability.",
+            created_days_ago: 1,
+            resume: (
+                generated_hours_ago: 3,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Reworded(text: "Reduced the routing API's p99 latency from 480 ms to 95 ms.", cites: ["latency"]),
+                        Fact("pipeline"),
+                        Edited(fact: "mentoring", text: "Mentored four junior engineers through their first launches."),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Reworded(text: "Wrote the migration tooling for the Postgres schema.", cites: ["postgres"]),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [
+                        Reworded(text: "Rust, Go, PostgreSQL, Kafka, Kubernetes", cites: ["skills"]),
+                    ]),
+                ],
+                unsupported: [
+                    (text: "Improved the team's delivery speed by 30%.", reason: InventedFigure("30%")),
+                    (text: "Writing production Rust since 2016.", reason: InventedYear(2016)),
+                    (text: "Experience with embedded, no_std Rust.", reason: NoSupportingFact),
+                ],
+            ),
+        ),
+        (
+            title: "Backend Engineer, Payments",
+            company: "Ledgerly",
+            description: "Build and operate the services that move money for thousands of small businesses.",
+            url: "https://example.com/jobs/ledgerly-backend",
+            created_days_ago: 9,
+            events: [
+                (days_ago: 8, kind: Applied),
+                (days_ago: 5, kind: RecruiterReplied),
+                (days_ago: 4, kind: InterviewScheduled(in_days: 3)),
+            ],
+            resume: (
+                generated_hours_ago: 216,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Fact("latency"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("postgres"),
+                    ]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [
+                        Reworded(text: "Go, PostgreSQL, Kafka", cites: ["skills"]),
+                    ]),
+                ],
+                unsupported: [
+                    (text: "Introduced property-based tests to the billing module.", reason: UsesHiddenFact("property_tests")),
+                    (text: "Processed $2M in payments a day.", reason: InventedFigure("$2M")),
+                ],
+            ),
+        ),
+        // Long enough to run onto a second page.
+        (
+            title: "Staff Engineer, Routing",
+            company: "Atlas Freight",
+            description: "Lead the technical direction of our routing platform: reliability, observability and the next generation of route planning.",
+            created_days_ago: 3,
+            events: [(days_ago: 1, kind: Applied)],
+            resume: (
+                generated_hours_ago: 48,
+                sections: [
+                    (lines: [
+                        Fact("name"),
+                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    ]),
+                    (title: "Summary", lines: [Fact("summary")]),
+                    (title: "Experience", lines: [
+                        Heading("northwind"),
+                        Fact("migration"),
+                        Fact("latency"),
+                        Fact("tracing"),
+                        Fact("on_call"),
+                        Fact("multi_depot"),
+                        Fact("capacity"),
+                        Fact("rust_guide"),
+                        Fact("pipeline"),
+                        Fact("mentoring"),
+                        Heading("brightline"),
+                        Fact("scheduling"),
+                        Fact("kubernetes"),
+                        Fact("audit_log"),
+                        Fact("streaming"),
+                        Fact("postgres"),
+                        Heading("kite"),
+                        Fact("etl"),
+                        Fact("dashboard"),
+                        Fact("deploys"),
+                        Heading("meghna"),
+                        Fact("sim_stock"),
+                        Fact("billing_tests"),
+                    ]),
+                    (title: "Projects", lines: [
+                        Heading("tracewire"),
+                        Fact("tracewire_about"),
+                        Fact("tracewire_maintain"),
+                        Heading("simulator"),
+                        Fact("simulator_about"),
+                        Fact("simulator_bottlenecks"),
+                    ]),
+                    (title: "Talks", lines: [Fact("rustconf"), Fact("meetup")]),
+                    (title: "Education", lines: [Heading("degree")]),
+                    (title: "Skills", lines: [Fact("skills")]),
+                ],
+                unsupported: [
+                    (text: "Designed routing algorithms that cut fuel costs by 12%.", reason: InventedFigure("12%")),
+                ],
+            ),
+        ),
+        (
+            title: "Platform Engineer",
+            company: "Halcyon Cloud",
+            description: "Help us build the internal platform our product teams deploy on.",
+            created_days_ago: 0,
+        ),
+    ],
+)

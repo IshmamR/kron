@@ -1,46 +1,75 @@
-mod assets;
-mod center;
+mod appearance;
 mod dev_overlay;
-mod title_bar;
-mod window_frame;
+#[allow(dead_code)] // Parts of it aren't used by the UI yet.
+mod model;
+mod typeset;
+mod window;
+mod workspace;
 
-use gpui::{
-    App, Application, Bounds, Context, Decorations, Entity, Pixels, Size, TitlebarOptions, Window,
+use gpui_kit::component::sidebar::SidebarToggleButton;
+use gpui_kit::component::{TitleBar, h_flex, v_flex};
+use gpui_kit::{
+    App, Bounds, Context, Decorations, Entity, Pixels, Size, Subscription, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*,
-    px, rgb, size,
+    px, size,
 };
 
 use dev_overlay::DevOverlay;
-use title_bar::TitleBar;
-use window_frame::window_frame;
+use workspace::Workspace;
 
 const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
 /// Same as Zed.
 const MIN_WINDOW_SIZE: Size<Pixels> = size(px(360.), px(240.));
 
-const TITLE: &str = "carear";
+const TITLE: &str = "Kron";
 
-struct Root {
-    title_bar: Entity<TitleBar>,
+/// The window's content. gpui-component's `Root` wraps it and draws the window
+/// border and shadow.
+struct MainWindow {
+    workspace: Entity<Workspace>,
     dev_overlay: Entity<DevOverlay>,
+    /// Re-renders the title bar's sidebar button when the sidebar is toggled.
+    _workspace_observer: Subscription,
 }
 
-impl Render for Root {
-    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+impl Render for MainWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Without a compositor gpui falls back to the window manager's frame,
         // which already has a title bar.
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
 
-        window_frame(
-            window,
-            div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .bg(rgb(0x1e1e1e))
-                .when(client_decorations, |div| div.child(self.title_bar.clone()))
-                .child(div().flex_1().relative().child(self.dev_overlay.clone())),
-        )
+        v_flex()
+            .size_full()
+            .when(client_decorations, |this| {
+                let workspace = self.workspace.clone();
+                this.child(
+                    TitleBar::new().child(
+                        h_flex()
+                            .gap_1()
+                            // So the sidebar can be brought back without
+                            // knowing Ctrl+B.
+                            .child(
+                                SidebarToggleButton::new()
+                                    .collapsed(!self.workspace.read(cx).sidebar_visible())
+                                    .accessibility_label("Toggle sidebar")
+                                    .on_click(move |_, _, cx| {
+                                        workspace.update(cx, |workspace, cx| {
+                                            workspace.toggle_sidebar(cx)
+                                        })
+                                    }),
+                            )
+                            .child(div().text_sm().child(TITLE)),
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(self.workspace.clone())
+                    .child(self.dev_overlay.clone()),
+            )
     }
 }
 
@@ -70,39 +99,51 @@ fn window_bounds(cx: &App) -> (Bounds<Pixels>, bool) {
 }
 
 fn main() {
-    Application::new()
-        .with_assets(assets::Assets)
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
         .run(|cx: &mut App| {
+            gpui_kit::init(cx);
+            appearance::init(cx);
             dev_overlay::init(cx);
+            workspace::init(cx);
             let (bounds, maximize) = window_bounds(cx);
-            let opened = cx.open_window(
+            let opened = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     titlebar: Some(TitlebarOptions {
                         title: Some(TITLE.into()),
-                        appears_transparent: true,
-                        ..Default::default()
+                        ..TitleBar::title_bar_options()
                     }),
                     window_min_size: Some(MIN_WINDOW_SIZE),
                     window_decorations: Some(WindowDecorations::Client),
                     // Lets the shadow area around the window show what's behind it.
                     window_background: WindowBackgroundAppearance::Transparent,
-                    ..Default::default()
+                    ..TitleBar::window_options()
                 },
+                cx,
                 |window, cx| {
                     // Position and maximize requests are applied once the window is
                     // mapped; X11 window managers ignore them before that.
                     window.on_next_frame(move |window, _| {
-                        center::center_window();
+                        window::center_window();
                         // Maximize a frame later so the window manager records the
                         // centered position as the one to restore to.
                         if maximize {
                             window.on_next_frame(|window, _| window.zoom_window());
                         }
                     });
-                    cx.new(|cx| Root {
-                        title_bar: cx.new(|_| TitleBar::new(TITLE)),
-                        dev_overlay: cx.new(DevOverlay::new),
+                    let library = model::sample::library().unwrap_or_else(|error| {
+                        eprintln!("couldn't load the sample library: {error}");
+                        model::Library::default()
+                    });
+                    let library = cx.new(|_| library);
+                    cx.new(|cx| {
+                        let workspace = cx.new(|cx| Workspace::new(library, window, cx));
+                        MainWindow {
+                            _workspace_observer: cx.observe(&workspace, |_, _, cx| cx.notify()),
+                            workspace,
+                            dev_overlay: cx.new(DevOverlay::new),
+                        }
                     })
                 },
             );

@@ -1,11 +1,27 @@
 [package]
-name = "carear"
+name = "kron"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-gpui = "0.2.2"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+# Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
+# re-exports gpui, gpui-base, gpui-component and the Lucide icons.
+gpui-kit = "0.7.1"
+ron = "0.12.2"
+serde = { version = "1.0.229", features = ["derive"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+typst = "0.15.1"
+typst-kit = { version = "0.15.1", features = ["scan-fonts", "embedded-fonts"] }
+typst-layout = "0.15.1"
+typst-render = "0.15.1"
+uuid = { version = "1.28.0", features = ["v7", "serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
+
+# Debug builds leave dependencies unoptimized, and the UI framework and Typst
+# are then far slower than in release. Optimize every dependency while our
+# own code stays in debug; first builds get slower, `cargo run` doesn't.
+[profile.dev.package."*"]
+opt-level = 2
