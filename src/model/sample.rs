@@ -7,9 +7,10 @@ use chrono::{DateTime, Duration, DurationRound, Local, TimeZone, Utc};
 use serde::Deserialize;
 
 use crate::model::{
-    DocumentId, DocumentKind, Entry, EntryId, EntryKind, Extraction, Fact, FactId, FactKind,
-    FactSource, FactStatus, FactVersion, InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId,
-    Section, SourceDocument, TailoredResume, UnsupportedClaim, UnsupportedReason,
+    Block, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind, Extraction, Fact,
+    FactId, FactKind, FactSource, FactStatus, FactVersion, InterviewKind, Job, JobEvent,
+    JobEventKind, JobId, Library, Line, LineId, ResumeId, Section, SectionKind, SourceDocument,
+    TailoredResume, UnsupportedClaim, UnsupportedReason,
 };
 
 const LIBRARY: &str = include_str!("../../assets/sample/library.ron");
@@ -27,13 +28,13 @@ pub fn library() -> Result<Library, String> {
         library: Library::default(),
         documents: HashMap::new(),
         facts: HashMap::new(),
-        headings: HashMap::new(),
+        entries: HashMap::new(),
     };
     for document in data.documents {
         loader.add_document(document)?;
     }
     for fact in data.facts {
-        loader.add_fact(fact, None, None, None)?;
+        loader.add_fact(fact, None, None, None, 0)?;
     }
     for entry in data.entries {
         loader.add_entry(entry)?;
@@ -52,8 +53,16 @@ struct Loader {
     /// Each fact's id and extracted text, by key. Résumés are generated from
     /// the extracted text: edits in the sample came after generation.
     facts: HashMap<String, (FactId, String)>,
-    /// Each entry's heading line and the facts it cites, by key.
-    headings: HashMap<String, (String, Vec<FactId>)>,
+    /// The facts that head each entry, by key.
+    entries: HashMap<String, EntryFacts>,
+}
+
+struct EntryFacts {
+    title: FactId,
+    organization: Option<FactId>,
+    dates: Option<FactId>,
+    location: Option<FactId>,
+    skills: Vec<FactId>,
 }
 
 impl Loader {
@@ -86,8 +95,9 @@ impl Loader {
         Ok(())
     }
 
-    /// Where `text` is in the document called `key`.
-    fn source(&self, key: &str, text: &str) -> Result<FactSource, String> {
+    /// Where `text` first is in the document called `key`, from byte `after`
+    /// on.
+    fn source(&self, key: &str, text: &str, after: usize) -> Result<FactSource, String> {
         let document = self
             .documents
             .get(key)
@@ -95,7 +105,9 @@ impl Loader {
             .ok_or_else(|| format!("no document is called {key:?}"))?;
         let start = document
             .text
-            .find(text)
+            .get(after..)
+            .and_then(|rest| rest.find(text))
+            .map(|offset| after + offset)
             .ok_or_else(|| format!("{text:?} isn't in document {key:?}"))?;
         Ok(FactSource {
             document: document.id,
@@ -105,18 +117,22 @@ impl Loader {
     }
 
     /// `from` and `status` default to the entry's, when the fact is in one.
+    /// It's looked for in its document from byte `after` on, so a fact like
+    /// "Dhaka, Bangladesh" is found where its own entry says it.
     fn add_fact(
         &mut self,
         fact: SampleFact,
         entry: Option<EntryId>,
         from: Option<&str>,
         status: Option<FactStatus>,
+        after: usize,
     ) -> Result<FactId, String> {
+        let after = if fact.from.is_some() { 0 } else { after };
         let from = fact.from.as_deref().or(from).unwrap_or(DEFAULT_DOCUMENT);
         let original_text = fact.source.unwrap_or_else(|| fact.text.clone());
-        let mut sources = vec![self.source(from, &original_text)?];
+        let mut sources = vec![self.source(from, &original_text, after)?];
         for key in &fact.also_in {
-            sources.push(self.source(key, &fact.text)?);
+            sources.push(self.source(key, &fact.text, 0)?);
         }
         let id = FactId::new();
         self.library.facts.push(Fact {
@@ -151,36 +167,49 @@ impl Loader {
         let from = entry.from.as_deref();
         let status = entry.status;
 
-        let mut heading = entry.title.clone();
-        let mut cites = vec![self.add_fact(
-            SampleFact::new(FactKind::Title, &entry.title),
+        let title_kind = match entry.kind {
+            EntryKind::Skills => FactKind::SkillGroup,
+            _ => FactKind::Title,
+        };
+        let title = self.add_fact(
+            SampleFact::new(&entry.key, title_kind, &entry.title),
             Some(id),
             from,
             status,
-        )?];
-        if let Some(organization) = entry.organization {
-            heading.push_str(&format!(", {organization}"));
-            cites.push(self.add_fact(
-                SampleFact::new(FactKind::Organization, &organization),
-                Some(id),
-                from,
-                status,
-            )?);
-        }
-        if let Some(dates) = entry.dates {
-            heading.push_str(&format!(" · {dates}"));
-            cites.push(self.add_fact(
-                SampleFact::new(FactKind::Date, &dates),
-                Some(id),
-                from,
-                status,
-            )?);
-        }
-        self.headings.insert(entry.key, (heading, cites));
-
+            0,
+        )?;
+        let after = self
+            .library
+            .fact(title)
+            .and_then(|fact| fact.sources.first())
+            .map_or(0, |source| source.span.start);
+        let mut add = |kind: FactKind, text: Option<String>| {
+            text.map(|text| self.add_fact(SampleFact::new(&entry.key, kind, &text), Some(id), from, status, after))
+                .transpose()
+        };
+        let organization = add(FactKind::Organization, entry.organization)?;
+        let location = add(FactKind::Location, entry.location)?;
+        let dates = add(FactKind::Date, entry.dates)?;
+        let skills = entry
+            .skills
+            .into_iter()
+            .map(|skill| {
+                self.add_fact(SampleFact::new(&entry.key, FactKind::Skill, &skill), Some(id), from, status, after)
+            })
+            .collect::<Result<_, String>>()?;
         for bullet in entry.bullets {
-            self.add_fact(bullet, Some(id), from, status)?;
+            self.add_fact(bullet, Some(id), from, status, after)?;
         }
+        self.entries.insert(
+            entry.key,
+            EntryFacts {
+                title,
+                organization,
+                dates,
+                location,
+                skills,
+            },
+        );
         Ok(())
     }
 
@@ -214,16 +243,7 @@ impl Loader {
         let sections: Vec<Section> = resume
             .sections
             .into_iter()
-            .map(|section| {
-                Ok(Section {
-                    title: section.title,
-                    lines: section
-                        .lines
-                        .into_iter()
-                        .map(|line| self.line(line))
-                        .collect::<Result<_, String>>()?,
-                })
-            })
+            .map(|section| self.section(section))
             .collect::<Result<_, String>>()?;
         let unsupported_claims: Vec<UnsupportedClaim> = resume
             .unsupported
@@ -250,7 +270,8 @@ impl Loader {
         // the sample, except the hidden facts its claims needed.
         let cited = sections
             .iter()
-            .flat_map(|section| &section.lines)
+            .flat_map(|section| &section.blocks)
+            .flat_map(Block::lines)
             .flat_map(|line| line.cites.iter().map(|&fact| (fact, false)));
         let needed_hidden = unsupported_claims
             .iter()
@@ -277,10 +298,135 @@ impl Loader {
             generated_at: (Utc::now() - Duration::hours(resume.generated_hours_ago))
                 .duration_trunc(Duration::hours(1))
                 .unwrap_or_else(|_| Utc::now()),
+            template: resume.template,
             sections,
             unsupported_claims,
             basis,
         })
+    }
+
+    fn section(&self, section: SampleSection) -> Result<Section, String> {
+        let (kind, title, blocks) = match section {
+            SampleSection::Header { contacts } => {
+                let contacts = contacts
+                    .iter()
+                    .map(|key| Ok(self.fact_line(self.fact(key)?.0)))
+                    .collect::<Result<_, String>>()?;
+                let name = self.fact_line(self.fact("name")?.0);
+                (SectionKind::Header, "", vec![Block::Header { name, contacts }])
+            }
+            SampleSection::Summary(line) => (
+                SectionKind::Summary,
+                "Summary",
+                vec![Block::Text(self.line(line)?)],
+            ),
+            SampleSection::Experience(entries) => {
+                (SectionKind::Experience, "Experience", self.entry_blocks(entries)?)
+            }
+            SampleSection::Projects(entries) => {
+                (SectionKind::Projects, "Projects", self.entry_blocks(entries)?)
+            }
+            SampleSection::Education(entries) => {
+                (SectionKind::Education, "Education", self.entry_blocks(entries)?)
+            }
+            SampleSection::Skills(groups) => {
+                let blocks = groups
+                    .into_iter()
+                    .map(|group| self.skills_block(group))
+                    .collect::<Result<_, String>>()?;
+                (SectionKind::Skills, "Skills", blocks)
+            }
+            SampleSection::List { title, items } => {
+                let blocks = items
+                    .into_iter()
+                    .map(|line| Ok(Block::Item(self.line(line)?)))
+                    .collect::<Result<_, String>>()?;
+                return Ok(Section {
+                    kind: SectionKind::Other,
+                    title,
+                    blocks,
+                });
+            }
+        };
+        Ok(Section {
+            kind,
+            title: title.to_string(),
+            blocks,
+        })
+    }
+
+    /// Each entry with all of its heading facts, and the bullets chosen.
+    fn entry_blocks(&self, entries: Vec<SampleEntryBlock>) -> Result<Vec<Block>, String> {
+        entries
+            .into_iter()
+            .map(|block| {
+                let facts = self.entry(&block.entry)?;
+                let stack = (!facts.skills.is_empty()).then(|| self.joined_line(&facts.skills));
+                Ok(Block::Entry(Box::new(EntryBlock {
+                    title: self.fact_line(facts.title),
+                    organization: facts.organization.map(|id| self.fact_line(id)),
+                    dates: facts.dates.map(|id| self.fact_line(id)),
+                    location: facts.location.map(|id| self.fact_line(id)),
+                    stack,
+                    bullets: block
+                        .bullets
+                        .into_iter()
+                        .map(|line| self.line(line))
+                        .collect::<Result<_, String>>()?,
+                })))
+            })
+            .collect()
+    }
+
+    fn skills_block(&self, group: SampleSkills) -> Result<Block, String> {
+        let facts = self.entry(&group.group)?;
+        let skills: Vec<FactId> = if group.only.is_empty() {
+            facts.skills.clone()
+        } else {
+            group
+                .only
+                .iter()
+                .map(|skill| {
+                    facts
+                        .skills
+                        .iter()
+                        .copied()
+                        .find(|&id| self.library.fact(id).is_some_and(|fact| fact.extracted == *skill))
+                        .ok_or_else(|| format!("{:?} has no skill {skill:?}", group.group))
+                })
+                .collect::<Result<_, String>>()?
+        };
+        Ok(Block::Skills {
+            label: Some(self.fact_line(facts.title)),
+            items: self.joined_line(&skills),
+        })
+    }
+
+    fn entry(&self, key: &str) -> Result<&EntryFacts, String> {
+        self.entries
+            .get(key)
+            .ok_or_else(|| format!("no entry is called {key:?}"))
+    }
+
+    /// A line that's the fact's text as extracted, citing it.
+    fn fact_line(&self, id: FactId) -> Line {
+        self.joined_line(&[id])
+    }
+
+    /// "Rust, Tokio": the facts' texts in a list, citing them.
+    fn joined_line(&self, ids: &[FactId]) -> Line {
+        let text = ids
+            .iter()
+            .filter_map(|&id| self.library.fact(id))
+            .map(|fact| fact.extracted.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Line {
+            id: LineId::new(),
+            generated: text.clone(),
+            text,
+            cites: ids.to_vec(),
+        }
     }
 
     fn line(&self, line: SampleLine) -> Result<Line, String> {
@@ -288,13 +434,6 @@ impl Loader {
             SampleLine::Fact(key) => {
                 let (id, text) = self.fact(&key)?;
                 (text.clone(), text.clone(), vec![*id])
-            }
-            SampleLine::Heading(key) => {
-                let (heading, cites) = self
-                    .headings
-                    .get(&key)
-                    .ok_or_else(|| format!("no entry is called {key:?}"))?;
-                (heading.clone(), heading.clone(), cites.clone())
             }
             SampleLine::Reworded { text, cites } => {
                 let cites = cites
@@ -373,10 +512,10 @@ struct SampleFact {
 }
 
 impl SampleFact {
-    /// A fact without a key, for an entry's title, organization and dates.
-    fn new(kind: FactKind, text: &str) -> Self {
+    /// A fact the data file gives no key, like an entry's title or dates.
+    fn new(entry: &str, kind: FactKind, text: &str) -> Self {
         Self {
-            key: format!("{kind:?}: {text}"),
+            key: format!("{entry} {kind:?}: {text}"),
             kind,
             text: text.into(),
             from: None,
@@ -402,6 +541,11 @@ struct SampleEntry {
     organization: Option<String>,
     #[serde(default)]
     dates: Option<String>,
+    #[serde(default)]
+    location: Option<String>,
+    /// A project's stack, or a skill group's skills.
+    #[serde(default)]
+    skills: Vec<String>,
     #[serde(default)]
     bullets: Vec<SampleFact>,
 }
@@ -491,22 +635,44 @@ fn sample_time(days_ago: i64, hour: Option<u32>) -> DateTime<Utc> {
 #[derive(Deserialize)]
 struct SampleResume {
     generated_hours_ago: i64,
+    #[serde(default = "default_template")]
+    template: String,
     sections: Vec<SampleSection>,
     #[serde(default)]
     unsupported: Vec<SampleClaim>,
 }
 
 #[derive(Deserialize)]
-struct SampleSection {
+enum SampleSection {
+    /// The name, then the contacts, by fact key.
+    Header { contacts: Vec<String> },
+    Summary(SampleLine),
+    Experience(Vec<SampleEntryBlock>),
+    Projects(Vec<SampleEntryBlock>),
+    Education(Vec<SampleEntryBlock>),
+    Skills(Vec<SampleSkills>),
+    List { title: String, items: Vec<SampleLine> },
+}
+
+#[derive(Deserialize)]
+struct SampleEntryBlock {
+    entry: String,
     #[serde(default)]
-    title: String,
-    lines: Vec<SampleLine>,
+    bullets: Vec<SampleLine>,
+}
+
+#[derive(Deserialize)]
+struct SampleSkills {
+    /// The skill group's entry key.
+    group: String,
+    /// Which of its skills, by text; all of them when empty.
+    #[serde(default)]
+    only: Vec<String>,
 }
 
 #[derive(Deserialize)]
 enum SampleLine {
     Fact(String),
-    Heading(String),
     Reworded { text: String, cites: Vec<String> },
     Edited { fact: String, text: String },
 }
@@ -527,6 +693,10 @@ enum SampleReason {
 
 fn bullet() -> FactKind {
     FactKind::Bullet
+}
+
+fn default_template() -> String {
+    crate::typeset::DEFAULT_TEMPLATE.to_string()
 }
 
 #[cfg(test)]

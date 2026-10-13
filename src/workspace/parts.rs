@@ -55,9 +55,11 @@ pub fn fact_kind_label(kind: FactKind) -> &'static str {
         FactKind::Title => "Title",
         FactKind::Organization => "Organization",
         FactKind::Date => "Dates",
-        FactKind::Skill => "Skills",
+        FactKind::Skill => "Skill",
         FactKind::Contact => "Contact",
         FactKind::Summary => "Summary",
+        FactKind::Location => "Location",
+        FactKind::SkillGroup => "Skill group",
     }
 }
 

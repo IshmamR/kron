@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use chrono::{Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
@@ -11,7 +12,7 @@ use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
+    Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, Image, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
     Point, ScrollHandle, Stateful, Subscription, Window, actions, canvas, div, img, point,
     prelude::*, px, rgb,
@@ -21,7 +22,7 @@ use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::Inspector;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::model::{Job, JobId, Library, LineId, ResumeId, TailoredResume};
-use crate::typeset::{LineBox, PageSize};
+use crate::typeset::{self, LineBox, PageSize};
 
 const KEY_CONTEXT: &str = "JobView";
 /// Pages are shown this wide: a bit over US Letter at 96 dpi.
@@ -37,7 +38,8 @@ const SCROLL_MARGIN: f32 = 48.;
 // Drawn on the page, which is paper and stays light in both themes.
 const PAPER: u32 = 0xfafafa;
 const SELECTION: u32 = 0x2f6fde;
-const EDITED_MARKER: u32 = 0xbf8700;
+const EDITED_MARKER: u32 = 0x2f6fde;
+const OUTDATED_MARKER: u32 = 0xbf8700;
 
 actions!(
     job_view,
@@ -53,6 +55,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT)),
     ]);
     application_view::init(cx);
+}
+
+/// Lays the current résumé out with one of `typeset::TEMPLATES`.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = job_view, no_json)]
+struct UseTemplate {
+    key: &'static str,
 }
 
 pub enum JobViewEvent {
@@ -131,6 +140,15 @@ impl Render for JobView {
             }))
             .on_action(cx.listener(|this, _: &ShowApplicationTab, window, cx| {
                 this.set_tab(Tab::Application, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &UseTemplate, _, cx| {
+                if let Some(job) = this.job {
+                    this.library
+                        .update(cx, |library, cx| {
+                            library.set_template(job, action.key);
+                            cx.notify();
+                        });
+                }
             }))
             .size_full()
             .child(content)
@@ -250,7 +268,18 @@ impl JobView {
         let Some(resume) = self.shown_resume(library) else {
             return;
         };
-        let lines: Vec<LineId> = resume.lines().map(|line| line.id).collect();
+        // As the template placed them, so ↓ goes where the eye goes; lines
+        // the page doesn't show come last.
+        let mut lines = self
+            .pages
+            .as_ref()
+            .map(|pages| pages.layout.reading_order())
+            .unwrap_or_default();
+        for line in resume.lines() {
+            if !lines.contains(&line.id) {
+                lines.push(line.id);
+            }
+        }
         let current = self
             .selected
             .and_then(|selected| lines.iter().position(|&line| line == selected));
@@ -371,6 +400,7 @@ impl JobView {
                 resizable_panel().child(
                     v_flex()
                         .size_full()
+                        .children(shown.map(|resume| template_bar(resume, !showing_current, cx)))
                         .when_some(sent_notice(job, self.showing_sent, cx), |this, notice| {
                             this.child(notice)
                         })
@@ -542,8 +572,8 @@ impl JobView {
             // Not part of the printed page: marks in the margin beside the
             // lines the user edited, and the lines that use changed facts.
             .children(boxes.iter().enumerate().flat_map(|(box_index, line_box)| {
-                let middle = (line_box.top + line_box.bottom) / 2. * scale;
-                let left = line_box.left * scale;
+                let middle = line_box.mark_middle * scale;
+                let left = line_box.mark_left * scale;
                 let edited = markers.edited.contains(&line_box.line);
                 let outdated = markers.outdated.contains(&line_box.line);
                 let edited_marker = edited.then(|| {
@@ -568,7 +598,7 @@ impl JobView {
                     .child(
                         Icon::new(IconName::TriangleAlert)
                             .xsmall()
-                            .text_color(rgb(EDITED_MARKER)),
+                            .text_color(rgb(OUTDATED_MARKER)),
                     )
                     .into_any_element()
                 });
@@ -633,6 +663,67 @@ fn margin_marker(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Di
 /// Pixels on screen per typographic point.
 fn scale(page: PageSize) -> f32 {
     f32::from(PAGE_WIDTH) / page.width
+}
+
+/// Above the page, as it's about the page: which template lays the résumé
+/// out, and a menu to pick another. Its content stays as it is, so switching
+/// is only a new layout. A version that was sent keeps its template, so for
+/// one it's only named.
+fn template_bar(resume: &TailoredResume, read_only: bool, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let current = typeset::template(&resume.template);
+    let picker = if read_only {
+        div()
+            .text_sm()
+            .child(current.name)
+            .into_any_element()
+    } else {
+        template_menu(current).into_any_element()
+    };
+    h_flex()
+        .flex_none()
+        .gap_2()
+        .px_4()
+        .py_1()
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            Icon::new(IconName::LayoutDashboard)
+                .small()
+                .text_color(theme.muted_foreground),
+        )
+        .child(div().text_sm().text_color(theme.muted_foreground).child("Template"))
+        .child(picker)
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(if read_only {
+                    "Kept as it was sent"
+                } else {
+                    "Changes the look, not what it says"
+                }),
+        )
+}
+
+fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
+    let current = current.key;
+    Button::new("template")
+        .label(typeset::template(current).name)
+        .dropdown_caret(true)
+        .outline()
+        .small()
+        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
+            for template in &typeset::TEMPLATES {
+                menu = menu.menu_with_check(
+                    template.name,
+                    template.key == current,
+                    Box::new(UseTemplate { key: template.key }),
+                );
+            }
+            menu
+        })
+        .into_any_element()
 }
 
 /// `shown` is the résumé version on screen.
@@ -702,7 +793,11 @@ fn sent_notice(
     let generated = sent.generated_at.with_timezone(&Local).format("%b %-d");
     let (text, label) = match showing_sent {
         Some(_) => (
-            format!("Showing the version you sent, generated {generated}. It's read-only."),
+            format!(
+                "Showing the version you sent, generated {generated}, in the {} template. \
+                 It's read-only.",
+                typeset::template(&sent.template).name
+            ),
             "Show current",
         ),
         None => (

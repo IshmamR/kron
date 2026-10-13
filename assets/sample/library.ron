@@ -1,18 +1,32 @@
 #![enable(implicit_some)]
 // Sample library for building the UI before import and generation exist.
-// Loaded by `src/model/sample.rs`. Facts are named by `key`, and résumé lines
-// cite them by key:
+// Loaded by `src/model/sample.rs`. Facts are named by `key`, and résumés cite
+// them by key. A résumé is a list of sections:
+//
+//   Header(contacts: [keys])                 the name, then these contact facts
+//   Summary(line)                            a paragraph
+//   Experience / Projects / Education([(entry: "key", bullets: [lines])])
+//                                            each entry with its title,
+//                                            organization, dates, location and
+//                                            stack, then the bullets chosen
+//   Skills([(group: "key", only: [skills])]) a skill group, all of it unless
+//                                            `only` picks some
+//   List(title: …, items: [lines])           a titled list outside any entry
+//
+// and a line is one of:
 //
 //   Fact("key")                        the fact's text, citing it
-//   Heading("entry")                   "Title, Organization · Dates" of an entry
 //   Reworded(text: …, cites: [keys])   generated wording that differs from the facts
 //   Edited(fact: "key", text: …)       generated as the fact's text, then edited by the user
 //
+// `template` picks the résumé's template, from `typeset::TEMPLATES`.
+//
 // Every fact's text (or `source`, when extraction mangled it) must appear
-// verbatim in its document: `from`, or its entry's, or "cv". `also_in` lists
-// other documents it was found in, as if duplicates had been merged.
-// `edited` is the user's rewording. Résumés are generated from the facts as
-// extracted and not hidden, so edits and hiding came after.
+// verbatim in its document: `from`, or its entry's, or "cv". An entry's facts
+// are looked for after its title. `also_in` lists other documents a fact was
+// found in, as if duplicates had been merged. `edited` is the user's
+// rewording. Résumés are generated from the facts as extracted and not
+// hidden, so edits and hiding came after.
 //
 // The data covers every state the facts screen shows: unreviewed, confirmed,
 // hidden, flagged, edited, merged from two documents, a likely duplicate,
@@ -34,9 +48,10 @@
     facts: [
         (key: "name", kind: Name, text: "Alex Rahman"),
         (key: "email", kind: Contact, text: "alex.rahman@example.com"),
+        (key: "phone", kind: Contact, text: "+880 1711 555 210"),
         (key: "github", kind: Contact, text: "github.com/alexr"),
+        (key: "linkedin", kind: Contact, text: "linkedin.com/in/alexrahman"),
         (key: "summary", kind: Summary, text: "Backend engineer with eight years of experience building reliable services in Rust, Go and Python, most recently leading the routing platform at a logistics company."),
-        (key: "skills", kind: Skill, text: "Rust, Go, Python, PostgreSQL, Kafka, Kubernetes", status: Unreviewed),
         (key: "rustconf", text: "Tracing async Rust in production, RustConf 2024.", also_in: ["linkedin"]),
         (key: "meetup", text: "Moving a Python monolith to Rust one service at a time, Rust Dhaka meetup 2023."),
         (key: "lecture", from: "lecture_note", text: "Gave a guest lecture on async Rust to final-year students at BRAC University.", status: Unreviewed),
@@ -45,7 +60,8 @@
     entries: [
         (
             key: "northwind", kind: Experience,
-            title: "Senior Software Engineer", organization: "Northwind Logistics", dates: "2021 – present",
+            title: "Senior Software Engineer", organization: "Northwind Logistics",
+            location: "Dhaka, Bangladesh", dates: "2021 – present",
             bullets: [
                 (key: "migration", text: "Led the migration of 12 backend services from Python to Rust."),
                 (key: "latency", text: "Cut p99 latency of the routing API from 480 ms to 95 ms."),
@@ -71,7 +87,8 @@
         ),
         (
             key: "brightline", kind: Experience,
-            title: "Backend Engineer", organization: "Brightline Health", dates: "2018 – 2021",
+            title: "Backend Engineer", organization: "Brightline Health",
+            location: "Remote", dates: "2018 – 2021",
             bullets: [
                 (key: "scheduling", text: "Built the appointment scheduling service used by 40 clinics."),
                 (key: "postgres", text: "Maintained the Postgres schema and wrote its migration tooling."),
@@ -83,7 +100,8 @@
         ),
         (
             key: "kite", kind: Experience,
-            title: "Junior Developer", organization: "Kite Analytics", dates: "2016 – 2018",
+            title: "Junior Developer", organization: "Kite Analytics",
+            location: "Chattogram, Bangladesh", dates: "2016 – 2018",
             bullets: [
                 (key: "etl", text: "Wrote the nightly ETL jobs that loaded customer usage data into the reporting warehouse."),
                 (key: "dashboard", text: "Replaced a hand-maintained spreadsheet of client reports with a self-service dashboard used by the sales team."),
@@ -92,7 +110,8 @@
         ),
         (
             key: "meghna", kind: Experience,
-            title: "Software Engineering Intern", organization: "Meghna Telecom", dates: "2015",
+            title: "Software Engineering Intern", organization: "Meghna Telecom",
+            location: "Dhaka, Bangladesh", dates: "2015",
             bullets: [
                 (key: "sim_stock", text: "Built an internal tool for tracking SIM card stock across regional warehouses."),
                 (key: "billing_tests", text: "Wrote unit tests for the billing reconciliation scripts and fixed the bugs they found."),
@@ -100,6 +119,7 @@
         ),
         (
             key: "tracewire", kind: Project, title: "tracewire",
+            skills: ["Rust", "Tokio", "OpenTelemetry"], dates: "2022 – present",
             bullets: [
                 (key: "tracewire_about", text: "An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars."),
                 (key: "tracewire_maintain", text: "Maintain the crate, review contributions from other companies and publish its releases."),
@@ -107,6 +127,7 @@
         ),
         (
             key: "simulator", kind: Project, title: "Shipment simulator",
+            skills: ["Rust", "Kafka"], dates: "2023",
             bullets: [
                 (key: "simulator_about", text: "A load-testing tool that replays a day of real shipment events against the staging environment."),
                 (key: "simulator_bottlenecks", text: "Found two capacity bottlenecks in the routing API before the 2023 peak season."),
@@ -114,8 +135,15 @@
         ),
         (
             key: "degree", kind: Education,
-            title: "B.Sc. Computer Science", organization: "University of Dhaka", dates: "2014 – 2018",
+            title: "B.Sc. Computer Science", organization: "University of Dhaka",
+            location: "Dhaka, Bangladesh", dates: "2014 – 2018",
         ),
+        (key: "languages", kind: Skills, title: "Languages", skills: ["Rust", "Go", "Python", "SQL"]),
+        (
+            key: "infrastructure", kind: Skills, title: "Infrastructure", status: Unreviewed,
+            skills: ["PostgreSQL", "Kafka", "Kubernetes", "Docker"],
+        ),
+        (key: "tools", kind: Skills, title: "Tools", skills: ["Git", "Grafana", "Terraform", "OpenTelemetry"]),
         // What extraction would make of the note: a role with its bullets.
         (
             key: "fest", kind: Other, from: "fest_note", status: Unreviewed,
@@ -138,24 +166,28 @@
             ],
             resumes: [(
                 generated_hours_ago: 3,
+                template: "classic",
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "phone", "github", "linkedin"]),
+                    Experience([
+                        (entry: "northwind", bullets: [
+                            Fact("migration"),
+                            Reworded(text: "Reduced the routing API's p99 latency from 480 ms to 95 ms.", cites: ["latency"]),
+                            Fact("pipeline"),
+                            Edited(fact: "mentoring", text: "Mentored four junior engineers through their first launches."),
+                        ]),
+                        (entry: "brightline", bullets: [
+                            Fact("scheduling"),
+                            Reworded(text: "Wrote the migration tooling for the Postgres schema.", cites: ["postgres"]),
+                        ]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Reworded(text: "Reduced the routing API's p99 latency from 480 ms to 95 ms.", cites: ["latency"]),
-                        Fact("pipeline"),
-                        Edited(fact: "mentoring", text: "Mentored four junior engineers through their first launches."),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Reworded(text: "Wrote the migration tooling for the Postgres schema.", cites: ["postgres"]),
+                    Projects([
+                        (entry: "tracewire", bullets: [Fact("tracewire_about"), Fact("tracewire_maintain")]),
                     ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [
-                        Reworded(text: "Rust, Go, PostgreSQL, Kafka, Kubernetes", cites: ["skills"]),
+                    Education([(entry: "degree")]),
+                    Skills([
+                        (group: "languages", only: ["Rust", "Go"]),
+                        (group: "infrastructure", only: ["PostgreSQL", "Kafka", "Kubernetes"]),
                     ]),
                 ],
                 unsupported: [
@@ -181,44 +213,32 @@
                 (
                     generated_hours_ago: 216,
                     sections: [
-                        (lines: [
-                            Fact("name"),
-                            Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                        Header(contacts: ["email", "github"]),
+                        Experience([
+                            (entry: "northwind", bullets: [Fact("migration"), Fact("latency")]),
+                            (entry: "brightline", bullets: [Fact("scheduling")]),
                         ]),
-                        (title: "Experience", lines: [
-                            Heading("northwind"),
-                            Fact("migration"),
-                            Fact("latency"),
-                            Heading("brightline"),
-                            Fact("scheduling"),
-                        ]),
-                        (title: "Education", lines: [Heading("degree")]),
+                        Education([(entry: "degree")]),
                     ],
                 ),
                 (
-                generated_hours_ago: 24,
-                sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
-                    ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Fact("latency"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
-                    ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [
-                        Reworded(text: "Go, PostgreSQL, Kafka", cites: ["skills"]),
-                    ]),
-                ],
-                unsupported: [
-                    (text: "Introduced property-based tests to the billing module.", reason: UsesHiddenFact("property_tests")),
-                    (text: "Processed $2M in payments a day.", reason: InventedFigure("$2M")),
-                ],
+                    generated_hours_ago: 24,
+                    sections: [
+                        Header(contacts: ["email", "phone", "github"]),
+                        Experience([
+                            (entry: "northwind", bullets: [Fact("migration"), Fact("latency")]),
+                            (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
+                        ]),
+                        Education([(entry: "degree")]),
+                        Skills([
+                            (group: "languages", only: ["Go", "SQL"]),
+                            (group: "infrastructure", only: ["PostgreSQL", "Kafka"]),
+                        ]),
+                    ],
+                    unsupported: [
+                        (text: "Introduced property-based tests to the billing module.", reason: UsesHiddenFact("property_tests")),
+                        (text: "Processed $2M in payments a day.", reason: InventedFigure("$2M")),
+                    ],
                 ),
             ],
         ),
@@ -232,47 +252,37 @@
             resumes: [(
                 generated_hours_ago: 48,
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "phone", "github", "linkedin"]),
+                    Summary(Fact("summary")),
+                    Experience([
+                        (entry: "northwind", bullets: [
+                            Fact("migration"),
+                            Fact("latency"),
+                            Fact("tracing"),
+                            Fact("on_call"),
+                            Fact("multi_depot"),
+                            Fact("capacity"),
+                            Fact("rust_guide"),
+                            Fact("pipeline"),
+                            Fact("mentoring"),
+                        ]),
+                        (entry: "brightline", bullets: [
+                            Fact("scheduling"),
+                            Fact("kubernetes"),
+                            Fact("audit_log"),
+                            Fact("streaming"),
+                            Fact("postgres"),
+                        ]),
+                        (entry: "kite", bullets: [Fact("etl"), Fact("dashboard"), Fact("deploys")]),
+                        (entry: "meghna", bullets: [Fact("sim_stock"), Fact("billing_tests")]),
                     ]),
-                    (title: "Summary", lines: [Fact("summary")]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Fact("latency"),
-                        Fact("tracing"),
-                        Fact("on_call"),
-                        Fact("multi_depot"),
-                        Fact("capacity"),
-                        Fact("rust_guide"),
-                        Fact("pipeline"),
-                        Fact("mentoring"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("kubernetes"),
-                        Fact("audit_log"),
-                        Fact("streaming"),
-                        Fact("postgres"),
-                        Heading("kite"),
-                        Fact("etl"),
-                        Fact("dashboard"),
-                        Fact("deploys"),
-                        Heading("meghna"),
-                        Fact("sim_stock"),
-                        Fact("billing_tests"),
+                    Projects([
+                        (entry: "tracewire", bullets: [Fact("tracewire_about"), Fact("tracewire_maintain")]),
+                        (entry: "simulator", bullets: [Fact("simulator_about"), Fact("simulator_bottlenecks")]),
                     ]),
-                    (title: "Projects", lines: [
-                        Heading("tracewire"),
-                        Fact("tracewire_about"),
-                        Fact("tracewire_maintain"),
-                        Heading("simulator"),
-                        Fact("simulator_about"),
-                        Fact("simulator_bottlenecks"),
-                    ]),
-                    (title: "Talks", lines: [Fact("rustconf"), Fact("meetup")]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    List(title: "Talks", items: [Fact("rustconf"), Fact("meetup")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "languages"), (group: "infrastructure"), (group: "tools")]),
                 ],
                 unsupported: [
                     (text: "Designed routing algorithms that cut fuel costs by 12%.", reason: InventedFigure("12%")),
@@ -289,22 +299,19 @@
             ],
             resumes: [(
                 generated_hours_ago: 528,
+                template: "sidebar",
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "phone", "github", "linkedin"]),
+                    Summary(Fact("summary")),
+                    Experience([
+                        (entry: "northwind", bullets: [Fact("migration"), Fact("latency"), Fact("rust_guide")]),
+                        (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Fact("latency"),
-                        Fact("rust_guide"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
+                    Projects([
+                        (entry: "tracewire", bullets: [Fact("tracewire_about")]),
                     ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "languages"), (group: "infrastructure")]),
                 ],
             )],
         ),
@@ -321,20 +328,13 @@
             resumes: [(
                 generated_hours_ago: 576,
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "github"]),
+                    Experience([
+                        (entry: "northwind", bullets: [Fact("migration"), Fact("on_call")]),
+                        (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Fact("on_call"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
-                    ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "languages"), (group: "infrastructure")]),
                 ],
             )],
         ),
@@ -352,21 +352,18 @@
             ],
             resumes: [(
                 generated_hours_ago: 912,
+                template: "classic",
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "phone", "github"]),
+                    Experience([
+                        (entry: "northwind", bullets: [Fact("tracing"), Fact("capacity")]),
+                        (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("tracing"),
-                        Fact("capacity"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
+                    Projects([
+                        (entry: "tracewire", bullets: [Fact("tracewire_about")]),
                     ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "languages"), (group: "tools")]),
                 ],
             )],
         ),
@@ -384,22 +381,15 @@
             ],
             resumes: [(
                 generated_hours_ago: 1032,
+                template: "sidebar",
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "phone", "github", "linkedin"]),
+                    Experience([
+                        (entry: "northwind", bullets: [Fact("migration"), Fact("latency"), Fact("mentoring")]),
+                        (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("migration"),
-                        Fact("latency"),
-                        Fact("mentoring"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
-                    ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "languages"), (group: "infrastructure")]),
                 ],
             )],
         ),
@@ -416,20 +406,13 @@
             resumes: [(
                 generated_hours_ago: 696,
                 sections: [
-                    (lines: [
-                        Fact("name"),
-                        Reworded(text: "alex.rahman@example.com · github.com/alexr", cites: ["email", "github"]),
+                    Header(contacts: ["email", "github"]),
+                    Experience([
+                        (entry: "northwind", bullets: [Fact("capacity"), Fact("on_call")]),
+                        (entry: "brightline", bullets: [Fact("scheduling"), Fact("postgres")]),
                     ]),
-                    (title: "Experience", lines: [
-                        Heading("northwind"),
-                        Fact("capacity"),
-                        Fact("on_call"),
-                        Heading("brightline"),
-                        Fact("scheduling"),
-                        Fact("postgres"),
-                    ]),
-                    (title: "Education", lines: [Heading("degree")]),
-                    (title: "Skills", lines: [Fact("skills")]),
+                    Education([(entry: "degree")]),
+                    Skills([(group: "infrastructure"), (group: "tools")]),
                 ],
             )],
         ),

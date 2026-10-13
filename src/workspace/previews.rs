@@ -80,7 +80,7 @@ impl Previews {
     ) -> Option<Render> {
         let library = self.library.read(cx);
         let resume = library.job(job).and_then(|job| job.resume(resume))?;
-        let markup = resume_markup(resume, library);
+        let markup = resume_markup(resume);
         let key = SlotKey {
             resume: resume.id,
             pixels_per_point: pixels_per_point.to_bits(),

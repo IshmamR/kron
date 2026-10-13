@@ -73,15 +73,6 @@ impl Library {
         self.jobs.iter_mut().find(|job| job.id == id)
     }
 
-    /// What a generated line is, going by the first fact it cites: a name, a
-    /// role heading, a bullet and so on. Decides how the line is set.
-    pub fn line_kind(&self, line: &Line) -> Option<FactKind> {
-        line.cites
-            .first()
-            .and_then(|&fact| self.fact(fact))
-            .map(|fact| fact.kind)
-    }
-
     /// Saves what the user wrote as a note and extracts facts from it: one
     /// per line, without bullet markers. Lines written together are grouped
     /// as one entry. Facts start unreviewed.
@@ -224,7 +215,7 @@ impl Library {
                 for version in &mut resume.basis {
                     replace(&mut version.fact);
                 }
-                for line in resume.sections.iter_mut().flat_map(|section| &mut section.lines) {
+                for line in resume.lines_mut() {
                     line.cites.iter_mut().for_each(replace);
                     let mut seen = Vec::new();
                     line.cites.retain(|&id| {
@@ -307,6 +298,14 @@ impl Library {
         changed
     }
 
+    /// Lays the job's current résumé out with another template. Its content
+    /// stays as it is.
+    pub fn set_template(&mut self, job: JobId, template: &str) {
+        if let Some(resume) = self.job_mut(job).and_then(|job| job.resumes.last_mut()) {
+            resume.template = template.to_string();
+        }
+    }
+
     pub fn unreviewed_count(&self) -> usize {
         self.facts
             .iter()
@@ -323,7 +322,8 @@ impl Library {
                 .find(|fact| fact.entry == Some(id) && fact.kind == kind)
                 .map(|fact| fact.text.as_str())
         };
-        match (text_of(FactKind::Title), text_of(FactKind::Organization)) {
+        let title = text_of(FactKind::Title).or_else(|| text_of(FactKind::SkillGroup));
+        match (title, text_of(FactKind::Organization)) {
             (Some(title), Some(organization)) => Some(format!("{title}, {organization}")),
             (Some(label), None) | (None, Some(label)) => Some(label.to_string()),
             (None, None) => None,
@@ -416,6 +416,9 @@ pub enum FactKind {
     Skill,
     Contact,
     Summary,
+    Location,
+    /// The name of a group of skills, like "Languages".
+    SkillGroup,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,6 +451,8 @@ pub enum EntryKind {
     Education,
     Project,
     Certification,
+    /// A group of skills, titled like "Languages".
+    Skills,
     Other,
 }
 
@@ -496,6 +501,10 @@ pub enum Inclusion {
 pub struct TailoredResume {
     pub id: ResumeId,
     pub generated_at: DateTime<Utc>,
+    /// Key of the template it's laid out with, one of `typeset::TEMPLATES`.
+    /// Kept with the résumé, so a version that was sent keeps its look.
+    #[serde(default)]
+    pub template: String,
     pub sections: Vec<Section>,
     pub unsupported_claims: Vec<UnsupportedClaim>,
     /// The facts as they were when it was generated, to tell when they've
@@ -504,9 +513,19 @@ pub struct TailoredResume {
 }
 
 impl TailoredResume {
-    /// Every line, top to bottom.
+    /// Every line, in reading order.
     pub fn lines(&self) -> impl Iterator<Item = &Line> {
-        self.sections.iter().flat_map(|section| &section.lines)
+        self.sections
+            .iter()
+            .flat_map(|section| &section.blocks)
+            .flat_map(Block::lines)
+    }
+
+    fn lines_mut(&mut self) -> impl Iterator<Item = &mut Line> {
+        self.sections
+            .iter_mut()
+            .flat_map(|section| &mut section.blocks)
+            .flat_map(Block::lines_mut)
     }
 
     pub fn line(&self, id: LineId) -> Option<&Line> {
@@ -529,10 +548,100 @@ pub enum FactChange {
     Shown,
 }
 
+/// A part of the résumé. Templates lay sections out by kind: an education
+/// entry's school and degree may sit where a job's title and employer would.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Section {
+    pub kind: SectionKind,
+    /// Empty for the header.
     pub title: String,
-    pub lines: Vec<Line>,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SectionKind {
+    Header,
+    Summary,
+    Experience,
+    Education,
+    Projects,
+    Skills,
+    Other,
+}
+
+/// What templates lay out: the résumé's content with its structure, so the
+/// same lines can be set in any design.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Block {
+    Header { name: Line, contacts: Vec<Line> },
+    /// A role, degree or project.
+    Entry(Box<EntryBlock>),
+    /// "Languages: Rust, Go, Python".
+    Skills { label: Option<Line>, items: Line },
+    /// A paragraph, like a summary.
+    Text(Line),
+    /// An item of a list outside any entry, like a talk.
+    Item(Line),
+}
+
+impl Block {
+    /// The block's lines in reading order.
+    pub fn lines(&self) -> Vec<&Line> {
+        match self {
+            Block::Header { name, contacts } => std::iter::once(name).chain(contacts).collect(),
+            Block::Entry(entry) => entry.lines().collect(),
+            Block::Skills { label, items } => label.iter().chain([items]).collect(),
+            Block::Text(line) | Block::Item(line) => vec![line],
+        }
+    }
+
+    fn lines_mut(&mut self) -> Vec<&mut Line> {
+        match self {
+            Block::Header { name, contacts } => std::iter::once(name).chain(contacts).collect(),
+            Block::Entry(entry) => [
+                Some(&mut entry.title),
+                entry.stack.as_mut(),
+                entry.dates.as_mut(),
+                entry.organization.as_mut(),
+                entry.location.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(&mut entry.bullets)
+            .collect(),
+            Block::Skills { label, items } => label.iter_mut().chain([items]).collect(),
+            Block::Text(line) | Block::Item(line) => vec![line],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntryBlock {
+    /// A job title, a degree or a project's name.
+    pub title: Line,
+    /// The employer or school.
+    pub organization: Option<Line>,
+    pub dates: Option<Line>,
+    pub location: Option<Line>,
+    /// What a project was built with: "Rust, Tokio".
+    pub stack: Option<Line>,
+    pub bullets: Vec<Line>,
+}
+
+impl EntryBlock {
+    /// In the order of `Block::lines_mut`.
+    pub fn lines(&self) -> impl Iterator<Item = &Line> {
+        [
+            Some(&self.title),
+            self.stack.as_ref(),
+            self.dates.as_ref(),
+            self.organization.as_ref(),
+            self.location.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(&self.bullets)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

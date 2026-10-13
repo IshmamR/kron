@@ -1,11 +1,11 @@
 Alex Rahman
-alex.rahman@example.com · github.com/alexr
+alex.rahman@example.com · +880 1711 555 210 · github.com/alexr · linkedin.com/in/alexrahman
 
 Backend engineer with eight years of experience building reliable services in Rust, Go and Python, most recently leading the routing platform at a logistics company.
 
 Experience
 
-Senior Software Engineer, Northwind Logistics (2021 – present)
+Senior Software Engineer, Northwind Logistics, Dhaka, Bangladesh (2021 – present)
 - Led the migration of 12 backend services from Python to Rust.
 - Cut p99 latency of the routing API from 480 ms to 95 ms.
 - Mentored four junior engineers through their first production launches.
@@ -17,7 +17,7 @@ line that processes shipment updates.
 - Built a capacity model for the routing cluster that the infrastructure team now uses for quarterly budgeting.
 - Wrote the internal guide to building Rust services at Northwind, covering error handling, testing and observability.
 
-Backend Engineer, Brightline Health (2018 – 2021)
+Backend Engineer, Brightline Health, Remote (2018 – 2021)
 - Built the appointment scheduling service used by 40 clinics.
 - Maintained the Postgres schema and wrote its migration tooling.
 - Introduced property-based tests to the billing module.
@@ -25,22 +25,22 @@ Backend Engineer, Brightline Health (2018 – 2021)
 - Built the audit log the compliance team uses to review who accessed patient records and when.
 - Led the move from nightly batch exports to a streaming integration with three partner clinic systems.
 
-Junior Developer, Kite Analytics (2016 – 2018)
+Junior Developer, Kite Analytics, Chattogram, Bangladesh (2016 – 2018)
 - Wrote the nightly ETL jobs that loaded customer usage data into the reporting warehouse.
 - Replaced a hand-maintained spreadsheet of client reports with a self-service dashboard used by the sales team.
 - Fixed and documented the deploy scripts, cutting a typical release from half a day to under an hour.
 
-Software Engineering Intern, Meghna Telecom (2015)
+Software Engineering Intern, Meghna Telecom, Dhaka, Bangladesh (2015)
 - Built an internal tool for tracking SIM card stock across regional warehouses.
 - Wrote unit tests for the billing reconciliation scripts and fixed the bugs they found.
 
 Projects
 
-tracewire
+tracewire (Rust, Tokio, OpenTelemetry; 2022 – present)
 - An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
 - Maintain the crate, review contributions from other companies and publish its releases.
 
-Shipment simulator
+Shipment simulator (Rust, Kafka; 2023)
 - A load-testing tool that replays a day of real shipment events against the staging environment.
 - Found two capacity bottlenecks in the routing API before the 2023 peak season.
 
@@ -50,7 +50,9 @@ Talks
 
 Education
 
-B.Sc. Computer Science, University of Dhaka (2014 – 2018)
+B.Sc. Computer Science, University of Dhaka, Dhaka, Bangladesh (2014 – 2018)
 
 Skills
-Rust, Go, Python, PostgreSQL, Kafka, Kubernetes
+Languages: Rust, Go, Python, SQL
+Infrastructure: PostgreSQL, Kafka, Kubernetes, Docker
+Tools: Git, Grafana, Terraform, OpenTelemetry

@@ -6,10 +6,9 @@ mod typeset;
 mod window;
 mod workspace;
 
-use gpui_kit::component::sidebar::SidebarToggleButton;
-use gpui_kit::component::{TitleBar, h_flex, v_flex};
+use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
-    App, Bounds, Context, Decorations, Entity, Pixels, Size, Subscription, TitlebarOptions, Window,
+    App, Bounds, Context, Decorations, Entity, Pixels, Size, TitlebarOptions, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*,
     px, size,
 };
@@ -28,12 +27,10 @@ const TITLE: &str = "Kron";
 struct MainWindow {
     workspace: Entity<Workspace>,
     dev_overlay: Entity<DevOverlay>,
-    /// Re-renders the title bar's sidebar button when the sidebar is toggled.
-    _workspace_observer: Subscription,
 }
 
 impl Render for MainWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         // Without a compositor gpui falls back to the window manager's frame,
         // which already has a title bar.
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
@@ -41,26 +38,8 @@ impl Render for MainWindow {
         v_flex()
             .size_full()
             .when(client_decorations, |this| {
-                let workspace = self.workspace.clone();
-                this.child(
-                    TitleBar::new().child(
-                        h_flex()
-                            .gap_1()
-                            // So the sidebar can be brought back without
-                            // knowing Ctrl+B.
-                            .child(
-                                SidebarToggleButton::new()
-                                    .collapsed(!self.workspace.read(cx).sidebar_visible())
-                                    .accessibility_label("Toggle sidebar")
-                                    .on_click(move |_, _, cx| {
-                                        workspace.update(cx, |workspace, cx| {
-                                            workspace.toggle_sidebar(cx)
-                                        })
-                                    }),
-                            )
-                            .child(div().text_sm().child(TITLE)),
-                    ),
-                )
+                // Where the logo will go.
+                this.child(TitleBar::new().child(div().text_sm().child(TITLE)))
             })
             .child(
                 div()
@@ -137,13 +116,9 @@ fn main() {
                         model::Library::default()
                     });
                     let library = cx.new(|_| library);
-                    cx.new(|cx| {
-                        let workspace = cx.new(|cx| Workspace::new(library, window, cx));
-                        MainWindow {
-                            _workspace_observer: cx.observe(&workspace, |_, _, cx| cx.notify()),
-                            workspace,
-                            dev_overlay: cx.new(DevOverlay::new),
-                        }
+                    cx.new(|cx| MainWindow {
+                        workspace: cx.new(|cx| Workspace::new(library, window, cx)),
+                        dev_overlay: cx.new(DevOverlay::new),
                     })
                 },
             );

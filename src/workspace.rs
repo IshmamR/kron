@@ -9,32 +9,33 @@ mod resume_grid;
 mod shortcuts;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::group_box::GroupBoxVariant;
-use gpui_kit::component::sidebar::{Sidebar, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{IconName, Sizable, h_flex};
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
     Subscription, Window, actions, div, prelude::*, px,
 };
 
-use crate::appearance::Appearance;
+use crate::appearance::{Appearance, Motion};
 use crate::model::{FactId, JobId, Library, LineId};
 use facts_page::FactsPage;
 use job_view::{JobView, JobViewEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
 
+/// Fixed rather than resizable: the kit animates a sidebar of fixed width
+/// down to its icons, and three short labels don't need more room.
 const SIDEBAR_WIDTH: Pixels = px(220.);
-/// Narrower clips the footer's shortcut.
-const SIDEBAR_MIN_WIDTH: Pixels = px(210.);
-const SIDEBAR_MAX_WIDTH: Pixels = px(320.);
+/// The collapse toggle's width: a collapsed menu item's, the strip's 48px
+/// less its padding.
+const TOGGLE_WIDTH: Pixels = px(32.);
 
 actions!(workspace, [ToggleSidebar, ShowShortcuts]);
 
@@ -67,12 +68,11 @@ pub struct ShowFact {
 pub struct Workspace {
     library: Entity<Library>,
     page: Page,
-    sidebar_visible: bool,
+    /// Down to its icons, which give their names as tooltips.
+    sidebar_collapsed: bool,
     /// Focused on pages with nothing focusable of their own, so app-wide keys
     /// still arrive.
     focus_handle: FocusHandle,
-    /// The sidebar's width, kept while it's hidden.
-    layout: Entity<ResizableState>,
     resume_grid: Entity<ResumeGrid>,
     job_view: Entity<JobView>,
     facts_page: Entity<FactsPage>,
@@ -108,16 +108,10 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .size_full()
             .child(
-                h_resizable("workspace")
-                    .with_state(&self.layout)
-                    .child(
-                        resizable_panel()
-                            .visible(self.sidebar_visible)
-                            .size(SIDEBAR_WIDTH)
-                            .size_range(SIDEBAR_MIN_WIDTH..SIDEBAR_MAX_WIDTH)
-                            .child(self.render_sidebar(cx)),
-                    )
-                    .child(resizable_panel().child(page)),
+                h_flex()
+                    .size_full()
+                    .child(self.render_sidebar(cx))
+                    .child(div().flex_1().min_w_0().h_full().child(page)),
             )
     }
 }
@@ -162,9 +156,8 @@ impl Workspace {
         Self {
             library,
             page: Page::Resumes,
-            sidebar_visible: true,
+            sidebar_collapsed: false,
             focus_handle: cx.focus_handle(),
-            layout: cx.new(|_| ResizableState::default()),
             resume_grid,
             job_view,
             facts_page,
@@ -172,12 +165,8 @@ impl Workspace {
         }
     }
 
-    pub fn sidebar_visible(&self) -> bool {
-        self.sidebar_visible
-    }
-
-    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_visible = !self.sidebar_visible;
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
     }
 
@@ -235,42 +224,80 @@ impl Workspace {
             });
         }
 
-        Sidebar::new("sidebar").collapsible(false).w_full().child(
-            SidebarMenu::new()
-                .child(
-                    SidebarMenuItem::new("Résumés")
-                        .icon(IconName::FileText)
-                        .active(matches!(self.page, Page::Resumes | Page::Job))
-                        .on_click(cx.listener(|this, _, window, cx| this.open_resumes(window, cx))),
-                )
-                .child(facts)
-                .child(
-                    SidebarMenuItem::new("Settings")
-                        .icon(IconName::Settings)
-                        .active(self.page == Page::Settings)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_page(Page::Settings, window, cx)
-                        })),
-                ),
-        )
-        .footer(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .child(
-                    Button::new("keyboard-shortcuts")
-                        .ghost()
-                        .small()
-                        .label("Keyboard shortcuts")
-                        .on_click(|_, window, cx| shortcuts::open(window, cx)),
-                )
-                .children(
-                    shortcuts::keystrokes_for(&ShowShortcuts, cx)
-                        .into_iter()
-                        .next()
-                        .map(Kbd::new),
-                ),
-        )
+        let collapsed = self.sidebar_collapsed;
+        let footer = h_flex()
+            .w_full()
+            .justify_between()
+            .child(
+                Button::new("keyboard-shortcuts")
+                    .ghost()
+                    .small()
+                    .label("Keyboard shortcuts")
+                    .on_click(|_, window, cx| shortcuts::open(window, cx)),
+            )
+            .children(
+                shortcuts::keystrokes_for(&ShowShortcuts, cx)
+                    .into_iter()
+                    .next()
+                    .map(Kbd::new),
+            );
+
+        let item = |item: SidebarMenuItem| item.h_7();
+        let menu = SidebarMenu::new()
+            .child(item(
+                SidebarMenuItem::new("Résumés")
+                    .icon(IconName::FileText)
+                    .active(matches!(self.page, Page::Resumes | Page::Job))
+                    .on_click(cx.listener(|this, _, window, cx| this.open_resumes(window, cx))),
+            ))
+            .child(item(facts))
+            .child(item(
+                SidebarMenuItem::new("Settings")
+                    .icon(IconName::Settings)
+                    .active(self.page == Page::Settings)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_page(Page::Settings, window, cx)
+                    })),
+            ));
+        // At the top of the sidebar, as in Windows' navigation pane: always
+        // there, its icon in the column of the menu's, so it stays put as
+        // the sidebar collapses. Sized like a menu item.
+        let toggle = Button::new("toggle-sidebar")
+            .ghost()
+            .w(TOGGLE_WIDTH)
+            .h_7()
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            })
+            .tooltip_with_action(
+                if collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                &ToggleSidebar,
+                None,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+
+        // Collapsed, the kit pads the header 4px less, the menu 8px on top
+        // and 8px at the sides against none and 12px expanded, puts a gap
+        // between the two, and centres the icons. Matching that when
+        // expanded keeps every icon where it is on toggling; items are kept
+        // as tall either way above. Both then move the menu up, closing
+        // most of the kit's gap under the toggle: collapsed by shortening the
+        // header, as the menu's own area clips what moves out of it.
+        let (toggle, menu) = if collapsed {
+            (toggle.mb(px(-15.)), menu)
+        } else {
+            (toggle.mt(px(-4.)).ml(px(-4.)), menu.mx(px(-4.)))
+        };
+
+        Sidebar::new("sidebar")
+            .collapsible(SidebarCollapsible::Icon)
+            .collapsed(collapsed)
+            .w(SIDEBAR_WIDTH)
+            .header(toggle)
+            .child(menu)
+            .when(!collapsed, |this| this.footer(footer))
     }
 }
 
@@ -306,6 +333,27 @@ fn settings() -> AnyElement {
                         ),
                     )
                     .description("Match system follows your desktop's light or dark setting."),
+                )
+                .item(
+                    SettingItem::new(
+                        "Motion",
+                        SettingField::dropdown(
+                            Motion::ALL
+                                .into_iter()
+                                .map(|motion| (motion.key(), SharedString::from(motion.label())))
+                                .collect(),
+                            |cx| Motion::current(cx).key(),
+                            |key, cx| {
+                                if let Some(motion) = Motion::from_key(&key) {
+                                    motion.set(cx);
+                                }
+                            },
+                        ),
+                    )
+                    .description(
+                        "Reduced stops things sliding, like the sidebar collapsing. Match system \
+                         follows your desktop's reduce-animation setting.",
+                    ),
                 ),
             ),
         )
