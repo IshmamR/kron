@@ -1,0 +1,3 @@
+# Keep LF on every checkout, Windows included: the sample facts are found in
+# their documents by exact text, and a CRLF checkout made none of them match.
+* text=auto eol=lf

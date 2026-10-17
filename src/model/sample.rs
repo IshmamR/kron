@@ -72,7 +72,9 @@ impl Loader {
             (None, Some(file)) => TEXT_FILES
                 .iter()
                 .find(|(name, _)| *name == file)
-                .map(|(_, text)| text.to_string())
+                // A checkout with Windows line endings would otherwise hide
+                // every fact that spans a line break.
+                .map(|(_, text)| text.replace("\r\n", "\n"))
                 .ok_or_else(|| format!("no text file is called {file:?}"))?,
             _ => {
                 return Err(format!(

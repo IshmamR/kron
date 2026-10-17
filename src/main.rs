@@ -31,13 +31,16 @@ struct MainWindow {
 
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // Without a compositor gpui falls back to the window manager's frame,
-        // which already has a title bar.
-        let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
+        // On Linux without a compositor gpui falls back to the window
+        // manager's frame, which already has a title bar. Windows and macOS
+        // always report server decorations, yet hide their own title bar for
+        // ours, so they always need it.
+        let draws_title_bar = !cfg!(target_os = "linux")
+            || matches!(window.window_decorations(), Decorations::Client { .. });
 
         v_flex()
             .size_full()
-            .when(client_decorations, |this| {
+            .when(draws_title_bar, |this| {
                 // Where the logo will go.
                 this.child(TitleBar::new().child(div().text_sm().child(TITLE)))
             })
