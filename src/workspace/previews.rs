@@ -3,9 +3,10 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Image, ImageFormat, Pixels, SharedString, Subscription,
-    Task, Window,
+    App, AppContext as _, Context, Entity, Pixels, RenderImage, SharedString, Subscription, Task,
+    Window,
 };
+use image::{Frame, RgbaImage};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -16,13 +17,21 @@ use crate::typeset::{self, ResumeLayout, Typesetter, resume_markup};
 
 /// Width of a US Letter page, the template's paper, in typographic points.
 const PAGE_WIDTH_POINTS: f32 = 612.;
+/// The pixels kept of renders no view holds: a few job pages, about 2 MB
+/// each, so going back to one just seen shows it without a blank frame.
+/// Rendering one again takes 3 to 10 ms in release, so keeping more buys
+/// little.
+const MEMORY_BUDGET: usize = 8 * 1024 * 1024;
 
 /// Typst renders of each job's résumés, made off the main thread on
-/// request and kept until the résumé's markup changes.
+/// request. A render is kept until the résumé's markup changes, or until it
+/// goes over `MEMORY_BUDGET`; either way its images leave the GPU too.
 pub struct Previews {
     database: Entity<Database>,
     typesetter: Option<Arc<Typesetter>>,
     slots: HashMap<SlotKey, Slot>,
+    /// Counts `get` calls, to tell which slot was shown least recently.
+    shown: u64,
     /// Each résumé's markup's hash as last read, so a résumé is read once,
     /// and again only after the database changes.
     markup_hashes: HashMap<ResumeId, u64>,
@@ -37,8 +46,12 @@ pub enum Render {
 }
 
 pub struct RenderedPages {
-    pub images: Vec<Arc<Image>>,
+    /// Built here rather than decoded by GPUI, which would keep every image
+    /// in its asset cache for good.
+    pub images: Vec<Arc<RenderImage>>,
     pub layout: ResumeLayout,
+    /// The images' pixels, in bytes.
+    bytes: usize,
 }
 
 impl Previews {
@@ -70,6 +83,7 @@ impl Previews {
             database,
             typesetter: None,
             slots: HashMap::new(),
+            shown: 0,
             markup_hashes: HashMap::new(),
             _loading_fonts: loading_fonts,
         }
@@ -101,7 +115,10 @@ impl Previews {
             }
         };
 
-        let requested = self.slots.get(&key).and_then(|slot| slot.requested);
+        self.shown += 1;
+        let slot = self.slots.entry(key).or_default();
+        slot.last_shown = self.shown;
+        let requested = slot.requested;
         if requested != Some(markup_hash)
             && let Some(typesetter) = self.typesetter.clone()
         {
@@ -142,14 +159,10 @@ impl Previews {
                 })
                 .await;
             let render = match typeset {
-                Ok(typeset) => Render::Ready(Arc::new(RenderedPages {
-                    images: typeset
-                        .pages
-                        .into_iter()
-                        .map(|png| Arc::new(Image::from_bytes(ImageFormat::Png, png)))
-                        .collect(),
-                    layout: typeset.layout,
-                })),
+                Ok(typeset) => Render::Ready(Arc::new(RenderedPages::new(
+                    typeset.pages,
+                    typeset.layout,
+                ))),
                 Err(error) => {
                     eprintln!("couldn't render résumé {:?}: {error}", key.resume);
                     Render::Failed(error.into())
@@ -157,19 +170,83 @@ impl Previews {
             };
             // An error only means the previews were dropped meanwhile.
             this.update(cx, |this, cx| {
-                let Some(slot) = this.slots.get_mut(&key) else {
+                // A render of content that has since changed, or of a slot
+                // evicted meanwhile, is dropped: it was never drawn.
+                let Some(slot) = this
+                    .slots
+                    .get_mut(&key)
+                    .filter(|slot| slot.requested == Some(markup_hash))
+                else {
                     return;
                 };
-                // A render of content that has since changed is dropped; the
-                // newer one is on its way.
-                if slot.requested == Some(markup_hash) {
-                    slot.latest = Some(render);
-                    cx.notify();
+                if let Some(replaced) = slot.latest.replace(render) {
+                    drop_images(&replaced, cx);
                 }
+                this.evict(key, cx);
+                cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Drops the renders shown least recently until those no view holds fit
+    /// `MEMORY_BUDGET`, keeping `newest`.
+    fn evict(&mut self, newest: SlotKey, cx: &mut App) {
+        let mut used: usize = self
+            .slots
+            .values()
+            .filter(|slot| !slot.held())
+            .map(Slot::bytes)
+            .sum();
+        while used > MEMORY_BUDGET {
+            let oldest = self
+                .slots
+                .iter()
+                .filter(|(key, slot)| **key != newest && slot.bytes() > 0 && !slot.held())
+                .min_by_key(|(_, slot)| slot.last_shown)
+                .map(|(key, _)| *key);
+            let Some(slot) = oldest.and_then(|key| self.slots.remove(&key)) else {
+                break;
+            };
+            used -= slot.bytes();
+            if let Some(render) = &slot.latest {
+                drop_images(render, cx);
+            }
+        }
+    }
+}
+
+impl RenderedPages {
+    fn new(pages: Vec<typeset::Pixels>, layout: ResumeLayout) -> Self {
+        let bytes = pages.iter().map(|page| page.rgba.len()).sum();
+        let images = pages
+            .into_iter()
+            .filter_map(|page| {
+                let mut bgra = page.rgba;
+                // GPUI draws BGRA.
+                for pixel in bgra.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                let buffer = RgbaImage::from_raw(page.width, page.height, bgra)?;
+                Some(Arc::new(RenderImage::new([Frame::new(buffer)])))
+            })
+            .collect();
+        Self {
+            images,
+            layout,
+            bytes,
+        }
+    }
+}
+
+/// Frees the render's images from every window's GPU atlas. A view that
+/// draws one again uploads it again.
+fn drop_images(render: &Render, cx: &mut App) {
+    if let Render::Ready(pages) = render {
+        for image in &pages.images {
+            cx.drop_image(image.clone(), None);
+        }
     }
 }
 
@@ -191,6 +268,22 @@ struct Slot {
     /// Hash of the markup last sent to be rendered.
     requested: Option<u64>,
     latest: Option<Render>,
+    /// `Previews::shown` when last asked for.
+    last_shown: u64,
+}
+
+impl Slot {
+    fn bytes(&self) -> usize {
+        match &self.latest {
+            Some(Render::Ready(pages)) => pages.bytes,
+            _ => 0,
+        }
+    }
+
+    /// A view keeps the pages it shows, like the job view its résumé's.
+    fn held(&self) -> bool {
+        matches!(&self.latest, Some(Render::Ready(pages)) if Arc::strong_count(pages) > 1)
+    }
 }
 
 /// The résumé laid out with its template version; `None` when there's no
@@ -223,7 +316,7 @@ mod tests {
     use gpui_kit::TestAppContext;
 
     use super::*;
-    use crate::database::Write;
+    use crate::database::{TemporaryDirectory, Write};
     use crate::model::{JobId, commands};
     use crate::workspace::testing;
 
@@ -287,5 +380,152 @@ mod tests {
 
         run(&mut app, &database, |write| write.erase_everything());
         assert_eq!(read(&mut app), 0);
+    }
+
+    /// Every current résumé rendered at `pixels_per_point`, waiting for the
+    /// fonts and the renders.
+    fn render_all(
+        app: &mut TestAppContext,
+        previews: &Entity<Previews>,
+        resumes: &[ResumeId],
+        pixels_per_point: f32,
+    ) -> Vec<Option<Render>> {
+        // The first pass starts nothing until the fonts load.
+        for _ in 0..2 {
+            for &resume in resumes {
+                previews.update(app, |previews, cx| previews.get(resume, pixels_per_point, cx));
+                app.run_until_parked();
+            }
+        }
+        resumes
+            .iter()
+            .map(|&resume| previews.update(app, |previews, cx| previews.get(resume, pixels_per_point, cx)))
+            .collect()
+    }
+
+    struct Opened {
+        previews: Entity<Previews>,
+        database: Entity<Database>,
+        resumes: Vec<(JobId, ResumeId)>,
+        _directory: TemporaryDirectory,
+    }
+
+    fn open(app: &mut TestAppContext) -> Opened {
+        let (database, directory) = testing::open_sample(app);
+        let previews = app.new(|cx| Previews::new(database.clone(), cx));
+        let resumes =
+            match database.read_with(app, |database, _| current_resumes(database.connection())) {
+                Ok(resumes) => resumes,
+                Err(error) => panic!("{error}"),
+            };
+        Opened {
+            previews,
+            database,
+            resumes,
+            _directory: directory,
+        }
+    }
+
+    /// The bytes of the renders kept that nobody else holds.
+    fn unheld_bytes(app: &TestAppContext, previews: &Entity<Previews>) -> usize {
+        previews.read_with(app, |previews, _| {
+            previews
+                .slots
+                .values()
+                .filter(|slot| !slot.held())
+                .map(Slot::bytes)
+                .sum()
+        })
+    }
+
+    /// Fixed before: every render was kept, so memory only grew.
+    #[test]
+    fn renders_nobody_holds_are_kept_only_up_to_the_budget() {
+        let mut app = TestAppContext::single();
+        let Opened {
+            previews,
+            resumes,
+            _directory,
+            ..
+        } = open(&mut app);
+        let resumes: Vec<ResumeId> = resumes.into_iter().map(|(_, resume)| resume).collect();
+        // Job view size: the sample's résumés come to about twice the budget.
+        let renders = render_all(&mut app, &previews, &resumes, 1.);
+        let last = renders.last().cloned().flatten();
+        drop(renders);
+        assert!(matches!(last, Some(Render::Ready(_))));
+        drop(last);
+        let largest = previews.read_with(&app, |previews, _| {
+            previews.slots.values().map(Slot::bytes).max().unwrap_or_default()
+        });
+        assert!(unheld_bytes(&app, &previews) <= MEMORY_BUDGET + largest);
+        let kept = previews.read_with(&app, |previews, _| {
+            previews.slots.values().filter(|slot| slot.bytes() > 0).count()
+        });
+        assert!(kept < resumes.len(), "some were evicted");
+    }
+
+    /// As when the window moves to a screen of another scale: the renders
+    /// at the old one go once nothing shows them.
+    #[test]
+    fn renders_at_a_scale_no_longer_shown_go() {
+        let mut app = TestAppContext::single();
+        let Opened {
+            previews,
+            resumes,
+            _directory,
+            ..
+        } = open(&mut app);
+        let resumes: Vec<ResumeId> = resumes.into_iter().map(|(_, resume)| resume).collect();
+        drop(render_all(&mut app, &previews, &resumes, 1.));
+        drop(render_all(&mut app, &previews, &resumes, 1.5));
+        let at_old_scale = previews.read_with(&app, |previews, _| {
+            previews
+                .slots
+                .iter()
+                .filter(|(key, _)| key.pixels_per_point == 1f32.to_bits())
+                .map(|(_, slot)| slot.bytes())
+                .sum::<usize>()
+        });
+        assert_eq!(at_old_scale, 0, "the newer, larger renders fill the budget first");
+    }
+
+    #[test]
+    fn a_render_a_view_holds_is_never_evicted() {
+        let mut app = TestAppContext::single();
+        let Opened {
+            previews,
+            resumes,
+            _directory,
+            ..
+        } = open(&mut app);
+        let resumes: Vec<ResumeId> = resumes.into_iter().map(|(_, resume)| resume).collect();
+        let Some(Some(Render::Ready(held))) = render_all(&mut app, &previews, &resumes[..1], 1.).pop() else {
+            panic!("no render");
+        };
+        render_all(&mut app, &previews, &resumes[1..], 1.);
+        let kept = previews.update(&mut app, |previews, cx| previews.get(resumes[0], 1., cx));
+        assert!(matches!(kept, Some(Render::Ready(pages)) if Arc::ptr_eq(&pages, &held)));
+    }
+
+    #[test]
+    fn a_render_of_changed_markup_replaces_the_old_one() {
+        let mut app = TestAppContext::single();
+        let Opened {
+            previews,
+            database,
+            resumes,
+            _directory,
+        } = open(&mut app);
+        let (job, resume) = resumes[0];
+        let Some(Some(Render::Ready(before))) = render_all(&mut app, &previews, &[resume], 0.25).pop() else {
+            panic!("no render");
+        };
+        run(&mut app, &database, move |write| commands::set_template(write, job, "sidebar"));
+        let Some(Some(Render::Ready(after))) = render_all(&mut app, &previews, &[resume], 0.25).pop() else {
+            panic!("no render");
+        };
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(Arc::strong_count(&before), 1, "only this test still has the old one");
     }
 }

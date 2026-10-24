@@ -13,8 +13,8 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, Image, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, ScrollHandle, Stateful, Subscription, Window, actions, canvas, div, img, point,
+    Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
+    Point, RenderImage, ScrollHandle, Stateful, Subscription, Window, actions, canvas, div, img, point,
     prelude::*, px, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -623,7 +623,7 @@ impl JobView {
     fn render_page(
         &self,
         index: usize,
-        image: Arc<Image>,
+        image: Arc<RenderImage>,
         size: PageSize,
         boxes: &[LineBox],
         markers: &Markers,

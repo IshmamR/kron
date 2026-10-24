@@ -59,6 +59,9 @@ const ROW_GAP: f32 = 4.;
 /// employer; further apart, they're separate, like a sidebar and the main
 /// column.
 const RUN_GAP: f32 = 24.;
+/// How many renders an entry in Typst's cache may go unused before it's
+/// evicted: what the Typst CLI keeps between compiles in watch mode.
+const RENDERS_KEPT_IN_TYPST_CACHE: usize = 10;
 
 /// Compiles Typst markup and renders its pages. Loading the system fonts takes
 /// a moment, so build it once, off the main thread, and share it.
@@ -80,7 +83,7 @@ impl Typesetter {
         }
     }
 
-    /// Lays out `markup` (from `resume_markup`) and renders each page as a PNG,
+    /// Lays out `markup` (from `resume_markup`) and renders each page,
     /// `pixels_per_point` pixels per typographic point (a US Letter page is
     /// 612 points wide).
     pub fn render(&self, markup: &str, pixels_per_point: f32) -> Result<TypesetResume, String> {
@@ -93,15 +96,27 @@ impl Typesetter {
             .pages()
             .iter()
             .map(|page| {
-                typst_render::render(page, &options)
-                    .encode_png()
-                    .map_err(|error| format!("couldn't encode the page: {error}"))
+                let pixmap = typst_render::render(page, &options);
+                Pixels {
+                    width: pixmap.width(),
+                    height: pixmap.height(),
+                    rgba: pixmap
+                        .pixels()
+                        .iter()
+                        .flat_map(|pixel| {
+                            let color = pixel.demultiply();
+                            [color.red(), color.green(), color.blue(), color.alpha()]
+                        })
+                        .collect(),
+                }
             })
-            .collect::<Result<_, _>>()?;
-        Ok(TypesetResume {
-            pages,
-            layout: ResumeLayout::of(&document),
-        })
+            .collect();
+        let layout = ResumeLayout::of(&document);
+        // Typst keeps what each compile computed, to reuse it; without this
+        // it grows with every render. Entries unused for this many evictions
+        // go, so what résumés share (fonts, the template) stays.
+        typst::comemo::evict(RENDERS_KEPT_IN_TYPST_CACHE);
+        Ok(TypesetResume { pages, layout })
     }
 
     fn compile(&self, markup: &str) -> Result<PagedDocument, String> {
@@ -122,9 +137,15 @@ impl Typesetter {
 }
 
 pub struct TypesetResume {
-    /// One PNG per page.
-    pub pages: Vec<Vec<u8>>,
+    pub pages: Vec<Pixels>,
     pub layout: ResumeLayout,
+}
+
+/// A rendered page: straight (not premultiplied) RGBA, row by row.
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 /// Where each line landed, in typographic points from each page's top left.
@@ -963,4 +984,3 @@ mod tests {
         assert_eq!(template("gone").key, DEFAULT_TEMPLATE);
     }
 }
-

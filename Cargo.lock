@@ -4209,6 +4209,7 @@ dependencies = [
  "dirs 7.0.0",
  "futures",
  "gpui-kit",
+ "image",
  "rusqlite",
  "sysinfo 0.39.6",
  "typst",

@@ -88,6 +88,8 @@ pub struct ResumeGrid {
     focus_handle: FocusHandle,
     /// Width available to the cards at the last layout.
     grid_width: Rc<Cell<Pixels>>,
+    /// The thumbnails shown, held so `Previews` never evicts one on screen.
+    thumbnails: Vec<PageRender>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -108,6 +110,7 @@ impl Render for ResumeGrid {
                     .update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
             })
             .collect();
+        self.thumbnails = renders.iter().flatten().cloned().collect();
 
         let applications = self.applications.as_deref().unwrap_or_default();
         let job_count = applications.len();
@@ -270,6 +273,7 @@ impl ResumeGrid {
             filter: JobFilter::default(),
             focus_handle: cx.focus_handle(),
             grid_width: Rc::new(Cell::new(px(0.))),
+            thumbnails: Vec::new(),
         }
     }
 

@@ -104,6 +104,8 @@ fn saved_window(database: &Entity<Database>, cx: &App) -> Option<SavedWindow> {
 }
 
 fn main() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    return_freed_memory();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(|cx: &mut App| {
@@ -190,4 +192,25 @@ fn main() {
             }
             cx.activate(true);
         });
+}
+
+/// glibc raises its mmap threshold to the size of each large block freed
+/// (mallopt(3)), so once a 2 MB page image is freed, the next ones come from
+/// the heap, which keeps what's freed. Setting the threshold turns that off:
+/// at glibc's initial 128 KiB, each page image gets a mapping of its own,
+/// returned when it's freed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn return_freed_memory() {
+    use std::ffi::c_int;
+    // From glibc's malloc.h.
+    const M_MMAP_THRESHOLD: c_int = -3;
+    const MMAP_THRESHOLD: c_int = 128 * 1024;
+    unsafe extern "C" {
+        fn mallopt(parameter: c_int, value: c_int) -> c_int;
+    }
+    // SAFETY: mallopt only sets an allocator parameter, and runs before any
+    // other thread starts.
+    if unsafe { mallopt(M_MMAP_THRESHOLD, MMAP_THRESHOLD) } == 0 {
+        eprintln!("couldn't set glibc's mmap threshold");
+    }
 }

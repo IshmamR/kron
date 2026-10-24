@@ -11,6 +11,8 @@ futures = "0.3.34"
 # Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
 # re-exports gpui, gpui-base, gpui-component and the Lucide icons.
 gpui-kit = "0.7.1"
+# GPUI's own, for building its images from rendered pages.
+image = { version = "0.25.10", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 typst = "0.15.1"
