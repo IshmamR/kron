@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{EventId, Job, JobId, Library, ResumeId, TailoredResume};
+use super::{EventId, Job, ResumeId, TailoredResume};
 
 /// After this long with no answer to an application, it's worth a follow-up,
 /// or closing it.
@@ -222,26 +222,6 @@ impl Job {
     }
 }
 
-impl Library {
-    /// Adds the event, or replaces the one with its id.
-    pub fn save_event(&mut self, job: JobId, event: JobEvent) {
-        let Some(job) = self.job_mut(job) else {
-            return;
-        };
-        match job.events.iter_mut().find(|each| each.id == event.id) {
-            Some(existing) => *existing = event,
-            None => job.events.push(event),
-        }
-    }
-
-    /// Removes the event and returns it, to restore on undo.
-    pub fn delete_event(&mut self, job: JobId, event: EventId) -> Option<JobEvent> {
-        let job = self.job_mut(job)?;
-        let index = job.events.iter().position(|each| each.id == event)?;
-        Some(job.events.remove(index))
-    }
-}
-
 /// An event kind without its details, to pick from before filling them in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepKind {
@@ -284,6 +264,7 @@ impl StepKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::JobId;
     use chrono::Duration;
 
     fn job_with(events: Vec<(i64, JobEventKind)>) -> (Job, DateTime<Utc>) {

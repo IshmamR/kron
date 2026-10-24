@@ -17,7 +17,9 @@ use super::fact_list::{FactList, Filter};
 use super::parts::{
     caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt, source_label,
 };
-use crate::model::{Extraction, Fact, FactId, FactStatus, Library};
+use crate::database::Database;
+use crate::model::commands::{self, Merge};
+use crate::model::{Fact, FactId, Library};
 
 const KEY_CONTEXT: &str = "FactsPage";
 /// Keys meant for the list itself, so they don't fire while typing.
@@ -83,11 +85,15 @@ pub fn init(cx: &mut App) {
 /// and add to.
 pub struct FactsPage {
     library: Entity<Library>,
+    database: Entity<Database>,
     list: Entity<ListState<FactList>>,
     search: Entity<InputState>,
     /// The list's width.
     layout: Entity<ResizableState>,
     selected: Option<FactId>,
+    /// A fact to select once the list has it: one just added, which the
+    /// library has once it's reloaded after the write.
+    select_when_listed: Option<FactId>,
     adding: bool,
     /// The wording picked to keep when merging.
     keep: Option<FactId>,
@@ -95,9 +101,9 @@ pub struct FactsPage {
     /// The fact `fact_editor` holds.
     editing: Option<FactId>,
     note_editor: Entity<TextareaState>,
-    /// The library before the last merge, and the fact it merged into. Undo
-    /// is offered while that fact is selected and nothing else has changed.
-    undo_merge: Option<(FactId, Library)>,
+    /// The last merge, to undo. Undo is offered while the fact it merged
+    /// into is selected and nothing else has changed.
+    undo_merge: Option<Merge>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -195,7 +201,12 @@ impl Focusable for FactsPage {
 }
 
 impl FactsPage {
-    pub fn new(library: Entity<Library>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        library: Entity<Library>,
+        database: Entity<Database>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let list = cx.new(|cx| ListState::new(FactList::new(library.clone(), cx), window, cx));
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search facts (Ctrl+F)"));
@@ -253,10 +264,12 @@ impl FactsPage {
 
         Self {
             library,
+            database,
             list,
             search,
             layout: cx.new(|_| ResizableState::default()),
             selected: None,
+            select_when_listed: None,
             adding: false,
             keep: None,
             fact_editor,
@@ -319,6 +332,12 @@ impl FactsPage {
             self.save_fact_text(cx);
             self.selected = selected;
         }
+        if let Some(fact) = self.select_when_listed
+            && self.list.read(cx).delegate().index_of(fact).is_some()
+        {
+            self.select_when_listed = None;
+            self.select(fact, window, cx);
+        }
     }
 
     /// Moves to the list, selecting the first fact if none is.
@@ -360,13 +379,11 @@ impl FactsPage {
         let Some(fact) = self.selected else {
             return;
         };
-        let next = self.next_unreviewed(fact, cx);
+        let next = self.next_to_review(fact, cx);
         self.undo_merge = None;
-        self.library.update(cx, |library, cx| {
-            library.set_fact_status(fact, FactStatus::Confirmed);
-            cx.notify();
-        });
-        self.rebuild_list(window, cx);
+        self.database
+            .read(cx)
+            .queue(move |write| commands::confirm_fact(write, fact));
         if let Some(next) = next {
             self.select(next, window, cx);
         }
@@ -377,15 +394,13 @@ impl FactsPage {
         let Some(fact) = self.selected else {
             return;
         };
+        let Some(hidden) = self.library.read(cx).fact(fact).map(|fact| fact.hidden) else {
+            return;
+        };
         self.undo_merge = None;
-        self.library.update(cx, |library, cx| {
-            let status = match library.fact(fact).map(|fact| fact.status) {
-                Some(FactStatus::Hidden) => FactStatus::Confirmed,
-                _ => FactStatus::Hidden,
-            };
-            library.set_fact_status(fact, status);
-            cx.notify();
-        });
+        self.database
+            .read(cx)
+            .queue(move |write| commands::set_hidden(write, fact, !hidden));
     }
 
     /// Esc: closes the add form, then drops merge marks.
@@ -419,7 +434,7 @@ impl FactsPage {
         cx.notify();
     }
 
-    fn next_unreviewed(&self, after: FactId, cx: &App) -> Option<FactId> {
+    fn next_to_review(&self, after: FactId, cx: &App) -> Option<FactId> {
         let library = self.library.read(cx);
         self.list
             .read(cx)
@@ -430,7 +445,7 @@ impl FactsPage {
             .find(|&id| {
                 library
                     .fact(id)
-                    .is_some_and(|fact| fact.status == FactStatus::Unreviewed)
+                    .is_some_and(|fact| fact.review.is_some())
             })
     }
 
@@ -465,31 +480,52 @@ impl FactsPage {
             return;
         }
         self.undo_merge = None;
+        // Shown now, so the editor doesn't flash the old text until the
+        // library is reloaded after the write.
         self.library.update(cx, |library, cx| {
-            library.edit_fact(fact, &text);
-            cx.notify();
+            if let Some(fact) = library.facts.iter_mut().find(|each| each.id == fact) {
+                fact.text = text.trim().to_string();
+                cx.notify();
+            }
         });
+        let text = text.to_string();
+        self.database
+            .read(cx)
+            .queue(move |write| commands::edit_fact(write, fact, &text));
     }
 
     fn add_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.note_editor.read(cx).value();
-        let added = self
-            .library
-            .update(cx, |library, _| library.add_note(&text));
-        let Some(&first) = added.first() else {
+        let text = self.note_editor.read(cx).value().to_string();
+        if text.trim().is_empty() {
             return;
-        };
+        }
         self.undo_merge = None;
         self.close_add_form(window, cx);
         if self.list.read(cx).delegate().filter() == Filter::Hidden {
-            self.list
-                .update(cx, |list, cx| list.delegate_mut().set_filter(Filter::All, cx));
+            self.set_filter(Filter::All, window, cx);
         }
-        // Rebuild now rather than when the library's observers run, so the
-        // new fact can be selected.
-        self.rebuild_list(window, cx);
-        self.select(first, window, cx);
-        self.library.update(cx, |_, cx| cx.notify());
+        let added = self
+            .database
+            .read(cx)
+            .write(cx, move |write| commands::add_note(write, &text));
+        cx.spawn_in(window, async move |this, cx| {
+            let first = match added.await {
+                Ok(added) => added.first().copied(),
+                Err(error) => {
+                    eprintln!("couldn't add the note: {error}");
+                    None
+                }
+            };
+            if let Some(first) = first
+                && let Err(error) = this.update_in(cx, |this, window, cx| {
+                    this.select_when_listed = Some(first);
+                    this.rebuild_list(window, cx);
+                })
+            {
+                eprintln!("facts page: {error}");
+            }
+        })
+        .detach();
     }
 
     fn merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -497,31 +533,40 @@ impl FactsPage {
         let Some(keep) = self.kept_wording(&marked, cx) else {
             return;
         };
-        self.library.update(cx, |library, cx| {
-            self.undo_merge = Some((keep, library.clone()));
-            library.merge_facts(keep, &marked);
-            cx.notify();
-        });
+        self.undo_merge = None;
         self.set_marked(Vec::new(), cx);
         self.keep = None;
-        self.rebuild_list(window, cx);
         self.select(keep, window, cx);
+        let merged = self
+            .database
+            .read(cx)
+            .write(cx, move |write| commands::merge_facts(write, keep, &marked));
+        cx.spawn(async move |this, cx| match merged.await {
+            Ok(merge) => {
+                if let Err(error) = this.update(cx, |this, cx| {
+                    this.undo_merge = Some(merge);
+                    cx.notify();
+                }) {
+                    eprintln!("facts page: {error}");
+                }
+            }
+            Err(error) => eprintln!("couldn't merge the facts: {error}"),
+        })
+        .detach();
     }
 
     fn undo_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((fact, before)) = self.undo_merge.take() else {
+        let Some(merge) = self.undo_merge.take() else {
             return;
         };
-        self.library.update(cx, |library, cx| {
-            *library = before;
-            cx.notify();
-        });
-        self.rebuild_list(window, cx);
-        self.select(fact, window, cx);
+        let keep = merge.keep;
+        self.database
+            .read(cx)
+            .queue(move |write| commands::undo_merge(write, &merge));
+        self.select(keep, window, cx);
     }
 
-    /// The wording picked to keep, or else the first confirmed one: the
-    /// user has already checked it.
+    /// The wording picked to keep, or else the first that needs no review.
     fn kept_wording(&self, marked: &[FactId], cx: &App) -> Option<FactId> {
         let library = self.library.read(cx);
         self.keep
@@ -530,7 +575,7 @@ impl FactsPage {
                 marked.iter().copied().find(|&id| {
                     library
                         .fact(id)
-                        .is_some_and(|fact| fact.status == FactStatus::Confirmed)
+                        .is_some_and(|fact| fact.review.is_none())
                 })
             })
             .or(marked.first().copied())
@@ -542,7 +587,7 @@ impl FactsPage {
             library
                 .facts
                 .iter()
-                .filter(|fact| filter.includes(fact.status))
+                .filter(|fact| filter.includes(fact))
                 .count()
         };
         let filter = self.list.read(cx).delegate().filter();
@@ -598,7 +643,7 @@ impl FactsPage {
 
         let actions = h_flex()
             .gap_2()
-            .when(fact.status == FactStatus::Unreviewed, |this| {
+            .when(fact.review.is_some(), |this| {
                 this.child(
                     Button::new("confirm")
                         .label("Confirm")
@@ -612,12 +657,12 @@ impl FactsPage {
             })
             .child(
                 Button::new("toggle-hidden")
-                    .label(if fact.status == FactStatus::Hidden {
+                    .label(if fact.hidden {
                         "Show"
                     } else {
                         "Hide"
                     })
-                    .icon(if fact.status == FactStatus::Hidden {
+                    .icon(if fact.hidden {
                         IconName::Eye
                     } else {
                         IconName::EyeOff
@@ -633,7 +678,7 @@ impl FactsPage {
         let merged_here = self
             .undo_merge
             .as_ref()
-            .is_some_and(|(merged, _)| *merged == id);
+            .is_some_and(|merge| merge.keep == id);
 
         v_flex()
             .gap_4()
@@ -675,8 +720,10 @@ impl FactsPage {
                                     .text_color(theme.muted_foreground)
                                     .child(fact_kind_label(fact.kind)),
                             )
-                            .child(div().text_color(theme.muted_foreground).child("·"))
-                            .child(fact_status(fact.status, cx))
+                            .when(fact.review.is_some() || fact.hidden, |this| {
+                                this.child(div().text_color(theme.muted_foreground).child("·"))
+                                    .child(fact_status(fact, cx))
+                            })
                             .when_some(
                                 fact.entry.and_then(|entry| library.entry_label(entry)),
                                 |this, entry| {
@@ -716,27 +763,23 @@ impl FactsPage {
                                         .xsmall()
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.undo_merge = None;
-                                            this.library.update(cx, |library, cx| {
-                                                library.revert_fact(id);
-                                                cx.notify();
+                                            this.database.read(cx).queue(move |write| {
+                                                commands::revert_fact(write, id)
                                             });
                                         })),
                                 ),
                         )
                     })
-                    .when_some(
-                        match &fact.extraction {
-                            Extraction::Flagged { reason } => Some(reason.clone()),
-                            Extraction::Clean => None,
-                        },
-                        |this, reason| {
-                            this.child(notice(
-                                format!("Flagged: {reason} Fix the text if it's wrong, then confirm."),
-                                theme.warning,
-                            ))
-                        },
-                    )
-                    .when(fact.status == FactStatus::Hidden, |this| {
+                    .when_some(fact.review.as_ref(), |this, review| {
+                        this.child(notice(
+                            format!(
+                                "Needs review: {} Fix the text if it's wrong, then confirm.",
+                                review.description()
+                            ),
+                            theme.warning,
+                        ))
+                    })
+                    .when(fact.hidden, |this| {
                         this.child(notice(
                             "Hidden. Résumés generated from now on won't use it.",
                             theme.muted_foreground,
@@ -920,11 +963,14 @@ impl FactsPage {
                                                 h_flex()
                                                     .gap_1()
                                                     .text_xs()
-                                                    .child(fact_status(fact.status, cx))
-                                                    .child(caption(
-                                                        format!("· {}", sources.join(", ")),
-                                                        cx,
-                                                    )),
+                                                    .when(
+                                                        fact.review.is_some() || fact.hidden,
+                                                        |this| {
+                                                            this.child(fact_status(fact, cx))
+                                                                .child(caption("·", cx))
+                                                        },
+                                                    )
+                                                    .child(caption(sources.join(", "), cx)),
                                             ),
                                     ),
                             ),
@@ -991,9 +1037,8 @@ impl FactsPage {
             )
             .child(caption(
                 SharedString::from(
-                    "Each line becomes a fact, and lines written together are grouped. They \
-                     start unreviewed, and the note is kept as their source. Ctrl+↩ adds them, \
-                     Esc cancels.",
+                    "Each line becomes a fact, and lines written together are grouped. The note \
+                     is kept as their source. Ctrl+↩ adds them, Esc cancels.",
                 ),
                 cx,
             ))

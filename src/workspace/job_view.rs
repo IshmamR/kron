@@ -21,6 +21,8 @@ use gpui_kit::{
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::Inspector;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
+use crate::database::Database;
+use crate::model::commands;
 use crate::model::{Job, JobId, Library, LineId, ResumeId, TailoredResume};
 use crate::typeset::{self, LineBox, PageSize};
 
@@ -71,6 +73,7 @@ pub enum JobViewEvent {
 /// One job: its tailored résumé as typeset pages, next to the inspector.
 pub struct JobView {
     library: Entity<Library>,
+    database: Entity<Database>,
     previews: Entity<Previews>,
     job: Option<JobId>,
     tab: Tab,
@@ -143,11 +146,10 @@ impl Render for JobView {
             }))
             .on_action(cx.listener(|this, action: &UseTemplate, _, cx| {
                 if let Some(job) = this.job {
-                    this.library
-                        .update(cx, |library, cx| {
-                            library.set_template(job, action.key);
-                            cx.notify();
-                        });
+                    let key = action.key;
+                    this.database
+                        .read(cx)
+                        .queue(move |write| commands::set_template(write, job, key));
                 }
             }))
             .size_full()
@@ -164,11 +166,14 @@ impl Focusable for JobView {
 impl JobView {
     pub fn new(
         library: Entity<Library>,
+        database: Entity<Database>,
         previews: Entity<Previews>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let application = cx.new(|cx| ApplicationView::new(library.clone(), window, cx));
+        let application = cx.new(|cx| {
+            ApplicationView::new(library.clone(), database.clone(), window, cx)
+        });
         Self {
             _subscriptions: vec![
                 cx.observe(&library, |_, _, cx| cx.notify()),
@@ -184,6 +189,7 @@ impl JobView {
                 }),
             ],
             library,
+            database,
             previews,
             job: None,
             tab: Tab::Resume,
@@ -419,6 +425,7 @@ impl JobView {
                     .children(shown.map(|resume| {
                         Inspector::new(
                             self.library.clone(),
+                            self.database.clone(),
                             job.id,
                             resume.id,
                             showing_current,

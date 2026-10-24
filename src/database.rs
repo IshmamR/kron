@@ -93,6 +93,12 @@ impl Database {
         let outcome = self.writer.submit(command);
         cx.background_spawn(async move { outcome.await.unwrap_or(Err(Error::WriterStopped)) })
     }
+
+    /// `write` for a command whose result nobody needs: views hear of its
+    /// changes through `Changed`, and the writer logs a failure.
+    pub fn queue(&self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
+        drop(self.writer.submit(command));
+    }
 }
 
 /// What a committed command changed, so each view can tell whether it shows

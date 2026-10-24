@@ -107,8 +107,9 @@ impl Writer {
 }
 
 /// What a command writes through. Every write to a synced table goes through
-/// `insert`, `set`, `clear` or `delete`, which also note the change for sync
-/// and for the views. Reads use `prepare`, which refuses anything that writes.
+/// `insert`, `set`, `update`, `clear` or `delete`, which also note the change
+/// for sync and for the views. Reads use `prepare`, which refuses anything
+/// that writes.
 ///
 /// Tables and columns are the ones `build.rs` generates from the migrations,
 /// so a wrong name, a value of the wrong type, a key of the wrong shape or
@@ -180,7 +181,22 @@ impl Write<'_> {
         key: impl Key<T::Key>,
         value: &impl Fits<V>,
     ) -> Result<(), Error> {
-        self.update::<T>(&key.values(), column.name(), value)
+        self.update_fields::<T>(&key.values(), &[(column.name(), value)])
+    }
+
+    /// Sets several columns of the row with this key in one statement, so
+    /// CHECKs that tie them together see them change at once.
+    pub fn update<T: Table>(
+        &mut self,
+        _table: T,
+        key: impl Key<T::Key>,
+        values: &[Assignment<T>],
+    ) -> Result<(), Error> {
+        let fields: Vec<_> = values
+            .iter()
+            .map(|assignment| (assignment.column, assignment.value))
+            .collect();
+        self.update_fields::<T>(&key.values(), &fields)
     }
 
     /// Sets a column that may be NULL to NULL.
@@ -189,13 +205,13 @@ impl Write<'_> {
         column: Column<T, Nullable<V>>,
         key: impl Key<T::Key>,
     ) -> Result<(), Error> {
-        self.update::<T>(&key.values(), column.name(), &Null)
+        self.update_fields::<T>(&key.values(), &[(column.name(), &Null)])
     }
 
     /// Marks the row deleted.
     pub fn delete<T: SoftDelete>(&mut self, _table: T, key: impl Key<T::Key>) -> Result<(), Error> {
         let now = self.now;
-        self.update::<T>(&key.values(), "deleted_at", &now)
+        self.update_fields::<T>(&key.values(), &[("deleted_at", &now)])
     }
 
     /// Saves `bytes` as `files/ab/abcd…`, named by their BLAKE3 hash, and adds
@@ -236,7 +252,7 @@ impl Write<'_> {
 
     /// Deletes every row, for resetting development data. Not a sync change:
     /// the outbox is emptied too.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     pub fn erase_everything(&mut self) -> Result<(), Error> {
         // Checked at commit, so the order tables empty in doesn't matter.
         self.transaction
@@ -260,43 +276,61 @@ impl Write<'_> {
 
     /// Prepares a read inside the command's transaction, so it sees what the
     /// command has written so far. Refuses a statement that writes: those go
-    /// through `insert`, `set`, `clear` and `delete`.
+    /// through `insert`, `set`, `update`, `clear` and `delete`.
     pub fn prepare(&self, sql: &str) -> Result<CachedStatement<'_>, Error> {
         let statement = self.transaction.prepare_cached(sql)?;
         if !statement.readonly() {
             return Err(Error::Misuse(format!(
-                "writes go through insert, set, clear or delete: {sql}"
+                "writes go through insert, set, update, clear or delete: {sql}"
             )));
         }
         Ok(statement)
     }
 
-    fn update<T: Table>(
+    fn update_fields<T: Table>(
         &mut self,
         key: &[&dyn ToSql],
-        field: &'static str,
-        value: &dyn ToSql,
+        fields: &[(&'static str, &dyn ToSql)],
     ) -> Result<(), Error> {
+        if fields.is_empty() {
+            return Ok(());
+        }
         let row_key = row_key(key)?;
+        let assignments = fields
+            .iter()
+            .zip(1..)
+            .map(|((field, _), index)| format!("\"{field}\" = ?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         let condition = T::KEY
             .iter()
-            .zip(2..)
+            .zip(fields.len() + 1..)
             .map(|(column, index)| format!("\"{column}\" = ?{index}"))
             .collect::<Vec<_>>()
             .join(" AND ");
-        let mut parameters: Vec<&dyn ToSql> = vec![value];
+        let mut parameters: Vec<&dyn ToSql> = fields.iter().map(|(_, value)| *value).collect();
         parameters.extend_from_slice(key);
         let updated = self
             .transaction
             .prepare_cached(&format!(
-                "UPDATE \"{}\" SET \"{field}\" = ?1 WHERE {condition}",
+                "UPDATE \"{}\" SET {assignments} WHERE {condition}",
                 T::NAME
             ))?
             .execute(parameters.as_slice())?;
         if updated == 0 {
             return Err(Error::RowNotFound { table: T::NAME });
         }
+        for (field, _) in fields {
+            self.note_field_change::<T>(&row_key, field)?;
+        }
+        Ok(())
+    }
 
+    fn note_field_change<T: Table>(
+        &mut self,
+        row_key: &[u8],
+        field: &'static str,
+    ) -> Result<(), Error> {
         if let Some(clock) = self.clock {
             // Entries hold no values: the sender reads them from the row. So
             // a field needs one entry, with its latest clock, and none while
@@ -308,14 +342,14 @@ impl Write<'_> {
                 .prepare_cached(
                     "UPDATE outbox SET clock = ?3 WHERE table_name = ?1 AND row_key = ?2 AND field = ''",
                 )?
-                .execute((T::NAME, &row_key, clock))?;
+                .execute((T::NAME, row_key, clock))?;
             if unsent == 0 {
                 self.transaction
                     .prepare_cached(
                         "INSERT INTO outbox (table_name, row_key, field, clock) VALUES (?1, ?2, ?3, ?4)
                          ON CONFLICT (table_name, row_key, field) DO UPDATE SET clock = excluded.clock",
                     )?
-                    .execute((T::NAME, &row_key, field, clock))?;
+                    .execute((T::NAME, row_key, field, clock))?;
             }
         }
         self.changes.push(Change {
@@ -529,6 +563,37 @@ mod tests {
             .map(|(_, field, _)| field)
             .collect();
         assert_eq!(fields, ["deleted_at"]);
+        Ok(())
+    }
+
+    #[test]
+    fn update_changes_columns_a_check_ties_together_at_once() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        turn_sync_on(&writer)?;
+        let (job, fact) = (Uuid::now_v7(), Uuid::now_v7());
+        writer.execute(|write| {
+            add_job(write, job)?;
+            add_fact(write, fact, "Led the Rust rewrite")?;
+            write.insert(
+                FactOverrides,
+                (job, fact),
+                &[fact_overrides::INCLUSION.value(&Some("exclude"))],
+            )
+        })?;
+        // One column at a time, the row would briefly have neither, which
+        // its CHECK refuses.
+        let ((), changes) = writer.execute(|write| {
+            write.update(
+                FactOverrides,
+                (job, fact),
+                &[
+                    fact_overrides::INCLUSION.value(&None::<&str>),
+                    fact_overrides::TEXT.value(&Some("Led the Go rewrite")),
+                ],
+            )
+        })?;
+        let fields: Vec<_> = changes.iter().map(|change| change.field).collect();
+        assert_eq!(fields, [Some("inclusion"), Some("text")]);
         Ok(())
     }
 

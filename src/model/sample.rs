@@ -9,18 +9,19 @@ use serde::Deserialize;
 use uuid::{NoContext, Timestamp, Uuid};
 
 use crate::database::schema::{
-    Blocks, CustomSections, DocumentTexts, Documents, Entries, Events, FactOverrides, FactSources,
+    Blocks, DocumentTexts, Documents, Entries, Events, FactOverrides, FactSources,
     FactVersions, Facts, Generations, JobDescriptions, Jobs, LineCitations, Lines, Sections,
-    UnsupportedClaims, blocks, custom_sections, document_texts, documents, entries, events,
+    UnsupportedClaims, blocks, document_texts, documents, entries, events,
     fact_overrides, fact_sources, fact_versions, facts, generations, job_descriptions, jobs,
     line_citations, lines, sections, unsupported_claims,
 };
 use crate::database::{self, Write};
 use crate::typeset;
 
+use crate::model::commands;
 use crate::model::{
-    Block, CoverLetter, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind,
-    Extraction, Fact, FactId, FactKind, FactSource, FactStatus, FactVersion, Inclusion,
+    Block, ClaimId, CoverLetter, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind,
+    Fact, FactId, FactKind, FactSource, FactVersion, Inclusion, Review, ReviewReason,
     InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId, Section,
     SectionKind, SourceDocument, TailoredResume, UnsupportedClaim, UnsupportedReason,
 };
@@ -85,39 +86,16 @@ pub fn write_library(write: &mut Write) -> Result<(), database::Error> {
     for document in &library.documents {
         write_document(write, document)?;
     }
-    let mut custom_section = None;
     for entry in &library.entries {
-        let kind = match entry.kind {
-            EntryKind::Experience => "experience",
-            EntryKind::Education => "education",
-            EntryKind::Project => "project",
-            EntryKind::Certification => "certification",
-            EntryKind::Skills => "skills",
-            EntryKind::Other => "custom",
-        };
-        let section = match (entry.kind, custom_section) {
-            (EntryKind::Other, None) => {
-                let id = Uuid::now_v7();
-                let now = write.now();
-                write.insert(
-                    CustomSections,
-                    id,
-                    &[
-                        custom_sections::NAME.value(&CUSTOM_SECTION),
-                        custom_sections::ADDED_AT.value(&now),
-                    ],
-                )?;
-                custom_section = Some(id);
-                custom_section
-            }
-            (EntryKind::Other, section) => section,
+        let section = match entry.kind {
+            EntryKind::Other => Some(commands::other_section(write)?),
             _ => None,
         };
         write.insert(
             Entries,
             entry.id.0,
             &[
-                entries::KIND.value(&kind),
+                entries::KIND.value(&entry.kind.stored()),
                 entries::CUSTOM_SECTION_ID.value(&section),
             ],
         )?;
@@ -211,7 +189,7 @@ impl Loader {
         fact: SampleFact,
         entry: Option<EntryId>,
         from: Option<&str>,
-        status: Option<FactStatus>,
+        status: Option<SampleStatus>,
         after: usize,
     ) -> Result<FactId, String> {
         let after = if fact.from.is_some() { 0 } else { after };
@@ -229,11 +207,12 @@ impl Loader {
             extracted: fact.text.clone(),
             sources,
             entry,
-            extraction: match fact.flag {
-                Some(reason) => Extraction::Flagged { reason },
-                None => Extraction::Clean,
-            },
-            status: fact.status.or(status).unwrap_or(FactStatus::Confirmed),
+            hidden: fact.status.or(status) == Some(SampleStatus::Hidden),
+            // Every flag in the sample is text the extraction had to clean up.
+            review: fact.flag.map(|note| Review {
+                reason: ReviewReason::Cleaned,
+                note: Some(note),
+            }),
         });
         if self
             .facts
@@ -337,6 +316,7 @@ impl Loader {
             .into_iter()
             .map(|claim| {
                 Ok(UnsupportedClaim {
+                    id: ClaimId::new(),
                     text: claim.text,
                     reason: match claim.reason {
                         SampleReason::InventedFigure(figure) => {
@@ -592,7 +572,7 @@ struct SampleFact {
     #[serde(default)]
     edited: Option<String>,
     #[serde(default)]
-    status: Option<FactStatus>,
+    status: Option<SampleStatus>,
     /// Why the extraction was flagged for a look.
     #[serde(default)]
     flag: Option<String>,
@@ -623,7 +603,7 @@ struct SampleEntry {
     #[serde(default)]
     from: Option<String>,
     #[serde(default)]
-    status: Option<FactStatus>,
+    status: Option<SampleStatus>,
     #[serde(default)]
     organization: Option<String>,
     #[serde(default)]
@@ -770,6 +750,14 @@ struct SampleClaim {
     reason: SampleReason,
 }
 
+/// Only hidden still means something: facts need review only when flagged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+enum SampleStatus {
+    Unreviewed,
+    Confirmed,
+    Hidden,
+}
+
 #[derive(Deserialize)]
 enum SampleReason {
     InventedFigure(String),
@@ -811,32 +799,19 @@ fn write_document(write: &mut Write, document: &SourceDocument) -> Result<(), da
 }
 
 fn write_fact(write: &mut Write, fact: &Fact) -> Result<(), database::Error> {
-    let kind = match fact.kind {
-        FactKind::Name => "name",
-        FactKind::Bullet => "bullet",
-        FactKind::Title => "title",
-        FactKind::Organization => "organization",
-        FactKind::Date => "date",
-        FactKind::Skill => "skill",
-        FactKind::Contact => "contact",
-        FactKind::Summary => "summary",
-        FactKind::Location => "location",
-        FactKind::SkillGroup => "skill_group",
-    };
-    // Every flag in the sample is text the extraction had to clean up.
-    let (review, review_note) = match &fact.extraction {
-        Extraction::Clean => (None, None),
-        Extraction::Flagged { reason } => (Some("cleaned"), Some(reason.as_str())),
+    let (review, review_note) = match &fact.review {
+        Some(review) => (Some(review.reason.stored()), review.note.as_deref()),
+        None => (None, None),
     };
     write.insert(
         Facts,
         fact.id.0,
         &[
-            facts::KIND.value(&kind),
+            facts::KIND.value(&fact.kind.stored()),
             facts::TEXT.value(&fact.text),
             facts::EXTRACTED.value(&fact.extracted),
             facts::ENTRY_ID.value(&fact.entry.map(|entry| entry.0)),
-            facts::HIDDEN.value(&(fact.status == FactStatus::Hidden)),
+            facts::HIDDEN.value(&fact.hidden),
             facts::REVIEW.value(&review),
             facts::REVIEW_NOTE.value(&review_note),
         ],
@@ -876,10 +851,7 @@ fn write_job(write: &mut Write, job: &Job, position: usize) -> Result<(), databa
         &[job_descriptions::TEXT.value(&job.description)],
     )?;
     for override_ in &job.overrides {
-        let inclusion = override_.inclusion.map(|inclusion| match inclusion {
-            Inclusion::Include => "include",
-            Inclusion::Exclude => "exclude",
-        });
+        let inclusion = override_.inclusion.map(Inclusion::stored);
         write.insert(
             FactOverrides,
             (job.id.0, override_.fact.0),
@@ -913,35 +885,7 @@ fn write_job(write: &mut Write, job: &Job, position: usize) -> Result<(), databa
         ],
     )?;
     for event in &job.events {
-        let (kind, resume, interview) = match &event.kind {
-            JobEventKind::Applied { resume } => ("applied", *resume, None),
-            JobEventKind::RecruiterReplied => ("recruiter_replied", None, None),
-            JobEventKind::Interview { kind, with } => ("interview", None, Some((*kind, with))),
-            JobEventKind::Offer => ("offer", None, None),
-            JobEventKind::Rejected => ("rejected", None, None),
-            JobEventKind::Withdrawn => ("withdrawn", None, None),
-            JobEventKind::NoResponse => ("no_response", None, None),
-            JobEventKind::Note => ("note", None, None),
-        };
-        let interview_kind = interview.map(|(kind, _)| match kind {
-            InterviewKind::Phone => "phone",
-            InterviewKind::Technical => "technical",
-            InterviewKind::Onsite => "onsite",
-            InterviewKind::Other => "other",
-        });
-        write.insert(
-            Events,
-            event.id.0,
-            &[
-                events::JOB_ID.value(&job.id.0),
-                events::AT.value(&event.at.timestamp_millis()),
-                events::KIND.value(&kind),
-                events::RESUME_ID.value(&resume.map(|resume| resume.0)),
-                events::INTERVIEW_KIND.value(&interview_kind),
-                events::INTERVIEW_WITH.value(&interview.map(|(_, with)| with.as_str())),
-                events::NOTE.value(&event.note),
-            ],
-        )?;
+        commands::save_event(write, job.id, event)?;
     }
     Ok(())
 }
@@ -964,15 +908,7 @@ fn write_resume(
         ],
     )?;
     for (position, section) in resume.sections.iter().enumerate() {
-        let kind = match section.kind {
-            SectionKind::Header => "header",
-            SectionKind::Summary => "summary",
-            SectionKind::Experience => "experience",
-            SectionKind::Education => "education",
-            SectionKind::Projects => "projects",
-            SectionKind::Skills => "skills",
-            SectionKind::Other => "custom",
-        };
+        let kind = section.kind.stored();
         let section_id = write_section(write, resume.id.0, position, kind, &section.title)?;
         for (position, block) in section.blocks.iter().enumerate() {
             let (kind, lines): (_, Vec<(&str, &Line)>) = match block {
@@ -1136,7 +1072,7 @@ fn write_claims(
         };
         write.insert(
             UnsupportedClaims,
-            Uuid::now_v7(),
+            claim.id.0,
             &[
                 unsupported_claims::GENERATION_ID.value(&generation),
                 unsupported_claims::SORT_KEY.value(&sort_key(position)?),

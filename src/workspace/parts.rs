@@ -9,7 +9,7 @@ use gpui_kit::{
     prelude::*, px,
 };
 
-use crate::model::{DocumentKind, FactKind, FactSource, FactStatus, Library};
+use crate::model::{DocumentKind, Fact, FactKind, FactSource, Library};
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
@@ -63,22 +63,26 @@ pub fn fact_kind_label(kind: FactKind) -> &'static str {
     }
 }
 
-/// The status as a coloured dot and plain text: coloured text, yellow
-/// especially, is hard to read on a light background.
-pub fn fact_status(status: FactStatus, cx: &App) -> impl IntoElement {
+/// Whether the fact needs review and whether it's hidden, each as a coloured
+/// dot and plain text: coloured text, yellow especially, is hard to read on a
+/// light background. Nothing for a fact that's fine as it is.
+pub fn fact_status(fact: &Fact, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    let (label, color) = match status {
-        FactStatus::Confirmed => ("Confirmed", theme.success),
-        FactStatus::Unreviewed => ("Not reviewed", theme.warning),
-        FactStatus::Hidden => ("Hidden", theme.muted_foreground),
-    };
+    let states = [
+        fact.review.is_some().then_some(("Needs review", theme.warning)),
+        fact.hidden.then_some(("Hidden", theme.muted_foreground)),
+    ];
     h_flex()
         .flex_none()
-        .gap_1()
+        .gap_2()
         .text_xs()
         .text_color(theme.muted_foreground)
-        .child(div().size(px(6.)).rounded_full().bg(color))
-        .child(label)
+        .children(states.into_iter().flatten().map(|(label, color)| {
+            h_flex()
+                .gap_1()
+                .child(div().size(px(6.)).rounded_full().bg(color))
+                .child(label)
+        }))
 }
 
 /// "From alex_rahman_cv.pdf", or "From your note, Oct 9".

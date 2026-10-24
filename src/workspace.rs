@@ -24,7 +24,7 @@ use gpui_kit::{
 };
 
 use crate::appearance::{Appearance, Motion};
-use crate::database::Database;
+use crate::database::{Changed, Database};
 use crate::model::{FactId, JobId, Library, LineId};
 use facts_page::FactsPage;
 use job_view::{JobView, JobViewEvent};
@@ -68,9 +68,6 @@ pub struct ShowFact {
 /// The sidebar and whichever page it has open.
 pub struct Workspace {
     library: Entity<Library>,
-    /// Handed to each view as it moves off `Library` (storage.md, step 4).
-    #[allow(dead_code)]
-    database: Entity<Database>,
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
@@ -132,12 +129,19 @@ impl Workspace {
 
         let previews = cx.new(|cx| Previews::new(library.clone(), cx));
         let resume_grid = cx.new(|cx| ResumeGrid::new(library.clone(), previews.clone(), cx));
-        let job_view = cx.new(|cx| JobView::new(library.clone(), previews, window, cx));
-        let facts_page = cx.new(|cx| FactsPage::new(library.clone(), window, cx));
+        let job_view = cx.new(|cx| {
+            JobView::new(library.clone(), database.clone(), previews, window, cx)
+        });
+        let facts_page =
+            cx.new(|cx| FactsPage::new(library.clone(), database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
+        reload(&library, &database, cx);
 
         let subscriptions = vec![
             cx.observe(&library, |_, _, cx| cx.notify()),
+            cx.subscribe(&database, |this, database, _: &Changed, cx| {
+                reload(&this.library, &database, cx)
+            }),
             cx.subscribe_in(
                 &resume_grid,
                 window,
@@ -165,7 +169,6 @@ impl Workspace {
 
         Self {
             library,
-            database,
             page: Page::Resumes,
             sidebar_collapsed: false,
             focus_handle: cx.focus_handle(),
@@ -213,23 +216,23 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let unreviewed = self.library.read(cx).unreviewed_count();
+        let needs_review = self.library.read(cx).needs_review_count();
         let mut facts = SidebarMenuItem::new("Facts")
             .icon(IconName::BookOpen)
             .active(self.page == Page::Facts)
             .on_click(cx.listener(|this, _, window, cx| this.open_page(Page::Facts, window, cx)));
-        if unreviewed > 0 {
+        if needs_review > 0 {
             facts = facts.suffix(move |_, _| {
-                let tooltip = SharedString::from(if unreviewed == 1 {
+                let tooltip = SharedString::from(if needs_review == 1 {
                     "1 fact to review".to_string()
                 } else {
-                    format!("{unreviewed} facts to review")
+                    format!("{needs_review} facts to review")
                 });
                 div()
-                    .id("unreviewed-facts")
+                    .id("facts-to-review")
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     // Neutral, like Mail's unread counts: a count isn't an alarm.
-                    .child(Tag::secondary().xsmall().child(unreviewed.to_string()))
+                    .child(Tag::secondary().xsmall().child(needs_review.to_string()))
             });
         }
 
@@ -371,4 +374,16 @@ fn settings() -> AnyElement {
             ),
         )
         .into_any_element()
+}
+
+/// Loads the library from the database again, after a change or on start.
+/// Until views query the database themselves (storage.md, step 4).
+fn reload(library: &Entity<Library>, database: &Entity<Database>, cx: &mut App) {
+    match Library::load(database.read(cx).connection()) {
+        Ok(loaded) => library.update(cx, |library, cx| {
+            *library = loaded;
+            cx.notify();
+        }),
+        Err(error) => eprintln!("couldn't load the library: {error}"),
+    }
 }

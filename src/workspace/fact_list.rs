@@ -6,7 +6,7 @@ use gpui_kit::{
 };
 
 use super::parts::fact_kind_label;
-use crate::model::{DocumentKind, EntryId, Extraction, Fact, FactId, FactKind, FactStatus, Library};
+use crate::model::{DocumentKind, EntryId, Fact, FactId, FactKind, Library};
 
 /// Which facts the list shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,11 +28,11 @@ impl Filter {
         }
     }
 
-    pub fn includes(self, status: FactStatus) -> bool {
+    pub fn includes(self, fact: &Fact) -> bool {
         match self {
             Filter::All => true,
-            Filter::NeedsReview => status == FactStatus::Unreviewed,
-            Filter::Hidden => status == FactStatus::Hidden,
+            Filter::NeedsReview => fact.review.is_some(),
+            Filter::Hidden => fact.hidden,
         }
     }
 }
@@ -95,8 +95,7 @@ impl ListDelegate for FactList {
         let library = self.library.read(cx);
         let fact = library.fact(id)?;
         let theme = cx.theme();
-        let hidden = fact.status == FactStatus::Hidden;
-        let flagged = matches!(fact.extraction, Extraction::Flagged { .. });
+        let hidden = fact.hidden;
 
         Some(
             ListItem::new(index)
@@ -122,7 +121,7 @@ impl ListDelegate for FactList {
                                                 .xsmall()
                                                 .text_color(theme.foreground),
                                         )
-                                    } else if fact.status == FactStatus::Unreviewed {
+                                    } else if fact.review.is_some() {
                                         this.child(
                                             div().size(px(7.)).rounded_full().bg(theme.blue),
                                         )
@@ -141,13 +140,6 @@ impl ListDelegate for FactList {
                                 })
                                 .child(fact.text.clone()),
                         )
-                        .when(flagged, |this| {
-                            this.child(
-                                Icon::new(IconName::TriangleAlert)
-                                    .xsmall()
-                                    .text_color(theme.warning),
-                            )
-                        })
                         .when(fact.kind != FactKind::Bullet, |this| {
                             this.child(
                                 div()
@@ -297,7 +289,7 @@ struct Group {
 
 fn groups(library: &Library, filter: Filter, query: &str) -> Vec<Group> {
     let listed = |fact: &&Fact| {
-        filter.includes(fact.status) && (query.is_empty() || fact.text.to_lowercase().contains(query))
+        filter.includes(fact) && (query.is_empty() || fact.text.to_lowercase().contains(query))
     };
     let entry_of = |fact: &Fact| fact.entry.filter(|&entry| library.entry(entry).is_some());
     let collect = |belongs: &dyn Fn(&Fact) -> bool| -> Vec<FactId> {

@@ -136,14 +136,8 @@ fn main() {
                             window.on_next_frame(|window, _| window.zoom_window());
                         }
                     });
-                    #[cfg(debug_assertions)]
-                    let library = model::sample::library().unwrap_or_else(|error| {
-                        eprintln!("couldn't load the sample library: {error}");
-                        model::Library::default()
-                    });
-                    #[cfg(not(debug_assertions))]
-                    let library = model::Library::default();
-                    let library = cx.new(|_| library);
+                    // The workspace loads it from the database.
+                    let library = cx.new(|_| model::Library::default());
                     let dev_overlay = cx.new(|cx| DevOverlay::new(database.clone(), cx));
                     cx.new(|cx| MainWindow {
                         workspace: cx.new(|cx| Workspace::new(library, database, window, cx)),

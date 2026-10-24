@@ -9,9 +9,11 @@ use super::ShowFact;
 use super::parts::{
     caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
 };
+use crate::database::Database;
+use crate::model::commands;
 use crate::model::{
-    Extraction, Fact, FactChange, FactId, FactStatus, JobId, Library, Line, LineId, ResumeId,
-    TailoredResume, UnsupportedClaim, UnsupportedReason,
+    Fact, FactChange, FactId, JobId, Library, Line, LineId, ResumeId, TailoredResume,
+    UnsupportedClaim, UnsupportedReason,
 };
 
 /// The job view's right-hand panel: where the selected line came from, and
@@ -19,6 +21,7 @@ use crate::model::{
 #[derive(IntoElement)]
 pub struct Inspector {
     library: Entity<Library>,
+    database: Entity<Database>,
     job: JobId,
     resume: ResumeId,
     /// False for an older version, whose claims can't be acted on.
@@ -101,6 +104,7 @@ impl RenderOnce for Inspector {
 impl Inspector {
     pub fn new(
         library: Entity<Library>,
+        database: Entity<Database>,
         job: JobId,
         resume: ResumeId,
         current: bool,
@@ -108,6 +112,7 @@ impl Inspector {
     ) -> Self {
         Self {
             library,
+            database,
             job,
             resume,
             current,
@@ -121,7 +126,6 @@ impl Inspector {
     fn unsupported_claim(&self, index: usize, claim: &UnsupportedClaim, cx: &App) -> AnyElement {
         let theme = cx.theme();
         let library = self.library.read(cx);
-        let job = self.job;
         let hidden_fact = match claim.reason {
             UnsupportedReason::UsesHiddenFact(fact) => Some(fact),
             _ => None,
@@ -129,12 +133,12 @@ impl Inspector {
         let resolved = claim.added_as.or(hidden_fact.filter(|&fact| {
             library
                 .fact(fact)
-                .is_some_and(|fact| fact.status != FactStatus::Hidden)
+                .is_some_and(|fact| !fact.hidden)
         }));
 
         let (reason, reason_color) = match (resolved, claim.added_as) {
             (Some(_), Some(_)) => (
-                "Added to your facts. Review it, then regenerate to use it.".into(),
+                "Added to your facts. Regenerate to use it.".into(),
                 theme.muted_foreground,
             ),
             (Some(_), None) => (
@@ -146,7 +150,7 @@ impl Inspector {
         let action = match (resolved, hidden_fact) {
             (Some(fact), _) => show_in_facts_button(("show-claim-fact", index), fact),
             (None, Some(fact)) => {
-                let library = self.library.clone();
+                let database = self.database.clone();
                 Button::new(("show-hidden-fact", index))
                     .label("Show fact")
                     .icon(IconName::Eye)
@@ -154,22 +158,21 @@ impl Inspector {
                     .xsmall()
                     .tooltip("Lets résumés use it again")
                     .on_click(move |_, _, cx| {
-                        library.update(cx, |library, cx| {
-                            library.set_fact_status(fact, FactStatus::Confirmed);
-                            cx.notify();
-                        });
+                        database
+                            .read(cx)
+                            .queue(move |write| commands::set_hidden(write, fact, false));
                     })
             }
             (None, None) => {
-                let library = self.library.clone();
+                let database = self.database.clone();
+                let claim = claim.id;
                 Button::new(("add-fact", index))
                     .label("Add as fact")
                     .outline()
                     .xsmall()
                     .on_click(move |_, _, cx| {
-                        library.update(cx, |library, cx| {
-                            library.add_unsupported_claim_as_fact(job, index);
-                            cx.notify();
+                        database.read(cx).queue(move |write| {
+                            commands::add_claim_as_fact(write, claim).map(drop)
                         });
                     })
             }
@@ -225,10 +228,6 @@ fn fact_card(
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let flag = match &fact.extraction {
-        Extraction::Flagged { reason } => Some(reason.clone()),
-        Extraction::Clean => None,
-    };
     let changed = library
         .fact_change(resume, fact.id)
         .map(|change| match change {
@@ -252,7 +251,7 @@ fn fact_card(
             h_flex()
                 .justify_between()
                 .child(caption(fact_kind_label(fact.kind), cx))
-                .child(fact_status(fact.status, cx)),
+                .child(fact_status(fact, cx)),
         )
         .child(div().text_sm().child(fact.text.clone()))
         .when_some(
@@ -262,8 +261,11 @@ fn fact_card(
         .when_some(changed, |this, changed| {
             this.child(notice(changed, theme.warning))
         })
-        .when_some(flag, |this, reason| {
-            this.child(notice(format!("Flagged: {reason}"), theme.warning))
+        .when_some(fact.review.as_ref(), |this, review| {
+            this.child(notice(
+                format!("Needs review: {}", review.description()),
+                theme.warning,
+            ))
         })
         .children(
             fact.sources

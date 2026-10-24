@@ -17,6 +17,8 @@ use gpui_kit::{
 };
 
 use super::parts::{caption, card, heading};
+use crate::database::Database;
+use crate::model::commands;
 use crate::model::{
     EventId, InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Nudge, ResumeId, Stage,
     StepKind,
@@ -61,6 +63,7 @@ pub enum ApplicationViewEvent {
 /// and the job itself.
 pub struct ApplicationView {
     library: Entity<Library>,
+    database: Entity<Database>,
     job: Option<JobId>,
     form: Option<EventForm>,
     date: Entity<DatePickerState>,
@@ -146,7 +149,12 @@ impl Render for ApplicationView {
 }
 
 impl ApplicationView {
-    pub fn new(library: Entity<Library>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        library: Entity<Library>,
+        database: Entity<Database>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             date: cx.new(|cx| {
                 DatePickerState::new(window, cx)
@@ -162,6 +170,7 @@ impl ApplicationView {
                     .placeholder("Anything worth remembering")
             }),
             library,
+            database,
             job: None,
             form: None,
             deleted: None,
@@ -301,35 +310,43 @@ impl ApplicationView {
         };
         self.form = None;
         self.deleted = None;
-        self.library.update(cx, |library, cx| {
-            library.save_event(job, event);
-            cx.notify();
-        });
+        self.database
+            .read(cx)
+            .queue(move |write| commands::save_event(write, job, &event));
         self.focus_handle.focus(window, cx);
     }
 
-    fn delete(&mut self, event: EventId, cx: &mut Context<Self>) {
+    /// Focuses the timeline too, so Ctrl+Z undoes it: the click left focus
+    /// on the button.
+    fn delete(&mut self, event: EventId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(job) = self.job else {
             return;
         };
-        self.deleted = self.library.update(cx, |library, cx| {
-            cx.notify();
-            library.delete_event(job, event)
-        });
+        self.deleted = self
+            .library
+            .read(cx)
+            .job(job)
+            .and_then(|job| job.events.iter().find(|each| each.id == event))
+            .cloned();
+        self.database
+            .read(cx)
+            .queue(move |write| commands::delete_event(write, event));
+        self.focus_handle.focus(window, cx);
+        cx.notify();
         if self.form.as_ref().is_some_and(|form| form.editing == Some(event)) {
             self.form = None;
         }
     }
 
     fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(event), Some(job)) = (self.deleted.take(), self.job) else {
+        let Some(event) = self.deleted.take() else {
             return;
         };
         self.focus_handle.focus(window, cx);
-        self.library.update(cx, |library, cx| {
-            library.save_event(job, event);
-            cx.notify();
-        });
+        self.database
+            .read(cx)
+            .queue(move |write| commands::restore_event(write, event.id));
+        cx.notify();
     }
 
     fn log_now(&mut self, kind: JobEventKind, cx: &mut Context<Self>) {
@@ -337,10 +354,10 @@ impl ApplicationView {
             return;
         };
         self.deleted = None;
-        self.library.update(cx, |library, cx| {
-            library.save_event(job, JobEvent::new(Utc::now(), kind));
-            cx.notify();
-        });
+        let event = JobEvent::new(Utc::now(), kind);
+        self.database
+            .read(cx)
+            .queue(move |write| commands::save_event(write, job, &event));
     }
 
     fn render_status(&self, job: &Job, now: DateTime<Utc>, cx: &Context<Self>) -> impl IntoElement {
@@ -699,9 +716,11 @@ impl ApplicationView {
                                                 .label("Delete")
                                                 .ghost()
                                                 .xsmall()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.delete(id, cx)
-                                                })),
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.delete(id, window, cx)
+                                                    },
+                                                )),
                                             ),
                                     )
                                     .child(caption(

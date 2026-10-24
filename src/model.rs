@@ -1,6 +1,9 @@
 mod application;
+pub mod commands;
+mod load;
 #[cfg(any(debug_assertions, test))]
 pub mod sample;
+mod stored;
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -39,8 +42,11 @@ id!(JobId);
 id!(ResumeId);
 id!(LineId);
 id!(EventId);
+id!(ClaimId);
 
-/// Everything the app knows about the user. Held in memory for now.
+/// Everything the app knows about the user, as loaded from the database.
+/// Reloaded after every change until views query the database themselves
+/// (storage.md, step 4).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Library {
     pub documents: Vec<SourceDocument>,
@@ -58,180 +64,12 @@ impl Library {
         self.facts.iter().find(|fact| fact.id == id)
     }
 
-    fn fact_mut(&mut self, id: FactId) -> Option<&mut Fact> {
-        self.facts.iter_mut().find(|fact| fact.id == id)
-    }
-
     pub fn entry(&self, id: EntryId) -> Option<&Entry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
 
     pub fn job(&self, id: JobId) -> Option<&Job> {
         self.jobs.iter().find(|job| job.id == id)
-    }
-
-    pub fn job_mut(&mut self, id: JobId) -> Option<&mut Job> {
-        self.jobs.iter_mut().find(|job| job.id == id)
-    }
-
-    /// Saves what the user wrote as a note and extracts facts from it: one
-    /// per line, without bullet markers. Lines written together are grouped
-    /// as one entry. Facts start unreviewed.
-    pub fn add_note(&mut self, text: &str) -> Vec<FactId> {
-        let document = DocumentId::new();
-        let mut facts = Vec::new();
-        let mut line_start = 0;
-        for line in text.split_inclusive('\n') {
-            let trimmed = line
-                .trim()
-                .trim_start_matches(['-', '•', '*'])
-                .trim_start();
-            if let Some(offset) = line.find(trimmed).filter(|_| !trimmed.is_empty()) {
-                let start = line_start + offset;
-                facts.push(Fact::new(
-                    FactKind::Bullet,
-                    trimmed,
-                    FactSource {
-                        document,
-                        span: start..start + trimmed.len(),
-                        original_text: trimmed.to_string(),
-                    },
-                ));
-            }
-            line_start += line.len();
-        }
-        if facts.is_empty() {
-            return Vec::new();
-        }
-        self.documents.push(SourceDocument {
-            id: document,
-            kind: DocumentKind::Note,
-            text: text.to_string(),
-            added_at: Utc::now(),
-        });
-        if facts.len() > 1 {
-            let entry = EntryId::new();
-            self.entries.push(Entry {
-                id: entry,
-                kind: EntryKind::Other,
-            });
-            for fact in &mut facts {
-                fact.entry = Some(entry);
-            }
-        }
-        let ids = facts.iter().map(|fact| fact.id).collect();
-        self.facts.extend(facts);
-        ids
-    }
-
-    /// Turns the job's `index`th unsupported claim into a note, and so a fact
-    /// the user reviews before it's used.
-    pub fn add_unsupported_claim_as_fact(&mut self, job: JobId, index: usize) -> Vec<FactId> {
-        let Some(resume) = self.job(job).and_then(Job::current_resume) else {
-            return Vec::new();
-        };
-        let Some(claim) = resume
-            .unsupported_claims
-            .get(index)
-            .filter(|claim| claim.added_as.is_none())
-        else {
-            return Vec::new();
-        };
-        let text = claim.text.clone();
-        let added = self.add_note(&text);
-        if let Some(claim) = self
-            .job_mut(job)
-            .and_then(|job| job.resumes.last_mut())
-            .and_then(|resume| resume.unsupported_claims.get_mut(index))
-        {
-            claim.added_as = added.first().copied();
-        }
-        added
-    }
-
-    pub fn set_fact_status(&mut self, id: FactId, status: FactStatus) {
-        let Some(fact) = self.fact_mut(id) else {
-            return;
-        };
-        // Confirming says the text came out right.
-        if status == FactStatus::Confirmed {
-            fact.extraction = Extraction::Clean;
-        }
-        fact.status = status;
-    }
-
-    /// Rewording a fact is reviewing it, so it becomes confirmed, and its
-    /// text is no longer as extracted, so no longer flagged.
-    pub fn edit_fact(&mut self, id: FactId, text: &str) {
-        let text = text.trim();
-        let Some(fact) = self.fact_mut(id) else {
-            return;
-        };
-        if text.is_empty() || text == fact.text {
-            return;
-        }
-        fact.text = text.to_string();
-        fact.status = FactStatus::Confirmed;
-        fact.extraction = Extraction::Clean;
-    }
-
-    pub fn revert_fact(&mut self, id: FactId) {
-        if let Some(fact) = self.fact_mut(id).filter(|fact| fact.is_edited()) {
-            fact.text = fact.extracted.clone();
-        }
-    }
-
-    /// Folds `others` into `keep`, which keeps its wording and gains their
-    /// sources. Everything that cited them cites `keep` instead.
-    pub fn merge_facts(&mut self, keep: FactId, others: &[FactId]) {
-        let others: Vec<FactId> = others.iter().copied().filter(|&id| id != keep).collect();
-        if others.is_empty() || self.fact(keep).is_none() {
-            return;
-        }
-        let (merged, facts): (Vec<Fact>, Vec<Fact>) = std::mem::take(&mut self.facts)
-            .into_iter()
-            .partition(|fact| others.contains(&fact.id));
-        self.facts = facts;
-        let Some(fact) = self.fact_mut(keep) else {
-            return;
-        };
-        for other in merged {
-            fact.sources.extend(other.sources);
-            fact.entry = fact.entry.or(other.entry);
-        }
-        // Merging is reviewing.
-        fact.status = FactStatus::Confirmed;
-        fact.extraction = Extraction::Clean;
-
-        let replace = |id: &mut FactId| {
-            if others.contains(id) {
-                *id = keep;
-            }
-        };
-        for job in &mut self.jobs {
-            for fact_override in &mut job.overrides {
-                replace(&mut fact_override.fact);
-            }
-            for resume in &mut job.resumes {
-                for version in &mut resume.basis {
-                    replace(&mut version.fact);
-                }
-                for line in resume.lines_mut() {
-                    line.cites.iter_mut().for_each(replace);
-                    let mut seen = Vec::new();
-                    line.cites.retain(|&id| {
-                        let first = !seen.contains(&id);
-                        seen.push(id);
-                        first
-                    });
-                }
-                for claim in &mut resume.unsupported_claims {
-                    if let UnsupportedReason::UsesHiddenFact(id) = &mut claim.reason {
-                        replace(id);
-                    }
-                }
-            }
-        }
     }
 
     /// The lines of each job's current résumé that cite the fact.
@@ -272,7 +110,7 @@ impl Library {
     /// if it does.
     pub fn fact_change(&self, resume: &TailoredResume, id: FactId) -> Option<FactChange> {
         let fact = self.fact(id)?;
-        let hidden = fact.status == FactStatus::Hidden;
+        let hidden = fact.hidden;
         resume
             .basis
             .iter()
@@ -299,18 +137,10 @@ impl Library {
         changed
     }
 
-    /// Lays the job's current résumé out with another template. Its content
-    /// stays as it is.
-    pub fn set_template(&mut self, job: JobId, template: &str) {
-        if let Some(resume) = self.job_mut(job).and_then(|job| job.resumes.last_mut()) {
-            resume.template = template.to_string();
-        }
-    }
-
-    pub fn unreviewed_count(&self) -> usize {
+    pub fn needs_review_count(&self) -> usize {
         self.facts
             .iter()
-            .filter(|fact| fact.status == FactStatus::Unreviewed)
+            .filter(|fact| fact.review.is_some())
             .count()
     }
 
@@ -375,24 +205,13 @@ pub struct Fact {
     pub sources: Vec<FactSource>,
     /// The role, project or degree it belongs to, if any.
     pub entry: Option<EntryId>,
-    pub extraction: Extraction,
-    pub status: FactStatus,
+    /// Never used in generated output.
+    pub hidden: bool,
+    /// `None`: nothing to check.
+    pub review: Option<Review>,
 }
 
 impl Fact {
-    pub fn new(kind: FactKind, text: &str, source: FactSource) -> Self {
-        Self {
-            id: FactId::new(),
-            kind,
-            text: text.to_string(),
-            extracted: text.to_string(),
-            sources: vec![source],
-            entry: None,
-            extraction: Extraction::Clean,
-            status: FactStatus::Unreviewed,
-        }
-    }
-
     pub fn is_edited(&self) -> bool {
         self.text != self.extracted
     }
@@ -422,21 +241,38 @@ pub enum FactKind {
     SkillGroup,
 }
 
+/// Why a person should look at a fact. Review is the exception: verbatim
+/// facts and the user's own notes have none.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Extraction {
-    Clean,
-    /// The text didn't copy cleanly from the source and needs a look.
-    Flagged {
-        reason: String,
-    },
+pub struct Review {
+    pub reason: ReviewReason,
+    /// The details, like "hyphenated across a line break".
+    pub note: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FactStatus {
-    Unreviewed,
-    Confirmed,
-    /// Never used in generated output.
-    Hidden,
+pub enum ReviewReason {
+    /// The text didn't copy cleanly from the source and was cleaned up.
+    Cleaned,
+    /// The extraction wasn't sure it read the fact right.
+    Unsure,
+    /// It may belong to another entry, or be split or joined wrongly.
+    Structure,
+    /// It may say the same as another fact.
+    Duplicate,
+}
+
+impl Review {
+    /// The note, or else what the reason means.
+    pub fn description(&self) -> &str {
+        match (&self.note, self.reason) {
+            (Some(note), _) => note,
+            (None, ReviewReason::Cleaned) => "The text was cleaned up from the source.",
+            (None, ReviewReason::Unsure) => "The extraction wasn't sure about it.",
+            (None, ReviewReason::Structure) => "It may belong somewhere else.",
+            (None, ReviewReason::Duplicate) => "It may repeat another fact.",
+        }
+    }
 }
 
 /// A role, degree or project that groups facts.
@@ -677,6 +513,7 @@ impl Line {
 /// Not called a "refusal": in a job app that reads as a rejection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UnsupportedClaim {
+    pub id: ClaimId,
     pub text: String,
     pub reason: UnsupportedReason,
     /// The fact the user added from it, if they did.
@@ -722,30 +559,6 @@ mod tests {
     }
 
     #[test]
-    fn a_note_becomes_one_fact_per_line_grouped_together() {
-        let mut library = Library::default();
-        let added = library.add_note("- Organized Code Fest 2019.\n\n  • Ran a team of 15.\n");
-        assert_eq!(added.len(), 2);
-        let facts: Vec<&Fact> = added.iter().filter_map(|&id| library.fact(id)).collect();
-        assert_eq!(facts[0].text, "Organized Code Fest 2019.");
-        assert_eq!(facts[1].text, "Ran a team of 15.");
-        assert!(facts[0].entry.is_some() && facts[0].entry == facts[1].entry);
-        let document = &library.documents[0];
-        for fact in facts {
-            assert_eq!(fact.status, FactStatus::Unreviewed);
-            assert_eq!(&document.text[fact.sources[0].span.clone()], fact.text);
-        }
-    }
-
-    #[test]
-    fn a_one_line_note_needs_no_entry() {
-        let mut library = Library::default();
-        let added = library.add_note("Gave a guest lecture.");
-        assert_eq!(library.fact(added[0]).and_then(|fact| fact.entry), None);
-        assert!(library.add_note("  \n").is_empty());
-    }
-
-    #[test]
     fn the_sample_linkedin_bullet_is_a_possible_duplicate() {
         let library = sample();
         let migration = fact_with_text(&library, "Led the migration");
@@ -753,88 +566,5 @@ mod tests {
         assert_eq!(library.possible_duplicates(migration), vec![linkedin]);
         let latency = fact_with_text(&library, "Cut p99 latency");
         assert!(library.possible_duplicates(latency).is_empty());
-    }
-
-    #[test]
-    fn merging_moves_sources_and_citations_to_the_kept_fact() {
-        let mut library = sample();
-        let keep = fact_with_text(&library, "Migrated 12 backend");
-        let merged = fact_with_text(&library, "Led the migration");
-        let uses = library.fact_uses(merged).len();
-        assert!(uses > 0);
-
-        library.merge_facts(keep, &[keep, merged]);
-
-        assert!(library.fact(merged).is_none());
-        let Some(fact) = library.fact(keep) else {
-            panic!("the kept fact is gone");
-        };
-        assert_eq!(fact.sources.len(), 2);
-        assert_eq!(fact.status, FactStatus::Confirmed);
-        assert_eq!(library.fact_uses(keep).len(), uses);
-    }
-
-    #[test]
-    fn editing_or_hiding_a_fact_outdates_the_resumes_that_use_it() {
-        let mut library = sample();
-        let ledgerly = |library: &Library| {
-            library
-                .jobs
-                .iter()
-                .find(|job| job.company == "Ledgerly")
-                .and_then(Job::current_resume)
-                .map(|resume| library.changed_facts(resume))
-        };
-        assert_eq!(ledgerly(&library), Some(Vec::new()));
-
-        let latency = fact_with_text(&library, "Cut p99 latency");
-        library.set_fact_status(latency, FactStatus::Confirmed);
-        assert_eq!(ledgerly(&library), Some(Vec::new()), "confirming changes nothing");
-
-        library.edit_fact(latency, "Cut p99 latency of the routing API by 80%.");
-        assert_eq!(ledgerly(&library), Some(vec![latency]));
-        library.revert_fact(latency);
-        assert_eq!(library.fact(latency).map(Fact::is_edited), Some(false));
-        assert_eq!(ledgerly(&library), Some(Vec::new()), "reverting undoes the change");
-
-        library.set_fact_status(latency, FactStatus::Hidden);
-        assert_eq!(ledgerly(&library), Some(vec![latency]));
-        library.set_fact_status(latency, FactStatus::Confirmed);
-        assert_eq!(ledgerly(&library), Some(Vec::new()), "showing it again undoes hiding");
-    }
-
-    #[test]
-    fn showing_a_hidden_fact_a_resume_needed_outdates_it() {
-        let mut library = sample();
-        let property_tests = fact_with_text(&library, "Introduced property-based tests");
-        library.set_fact_status(property_tests, FactStatus::Confirmed);
-        let Some(resume) = library
-            .jobs
-            .iter()
-            .find(|job| job.company == "Ledgerly")
-            .and_then(Job::current_resume)
-        else {
-            panic!("no Ledgerly résumé");
-        };
-        assert_eq!(
-            library.fact_change(resume, property_tests),
-            Some(FactChange::Shown)
-        );
-    }
-
-    #[test]
-    fn adding_a_claim_as_a_fact_keeps_the_claim_to_point_at_it() {
-        let mut library = sample();
-        let Some(job) = library.jobs.first().map(|job| job.id) else {
-            panic!("no jobs");
-        };
-        let added = library.add_unsupported_claim_as_fact(job, 0);
-        assert_eq!(added.len(), 1);
-        let claim = library
-            .job(job)
-            .and_then(Job::current_resume)
-            .and_then(|resume| resume.unsupported_claims.first());
-        assert_eq!(claim.and_then(|claim| claim.added_as), added.first().copied());
-        assert!(library.add_unsupported_claim_as_fact(job, 0).is_empty(), "only once");
     }
 }
