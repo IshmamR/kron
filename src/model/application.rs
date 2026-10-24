@@ -1,9 +1,14 @@
 // Where an application stands: its events, and what follows from them.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use super::{EventId, Job, ResumeId, TailoredResume};
+use chrono::{DateTime, Utc};
+use rusqlite::{Connection, Row};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{EventId, Job, JobId, ResumeId, TailoredResume};
+use crate::database::Error;
 
 /// After this long with no answer to an application, it's worth a follow-up,
 /// or closing it.
@@ -100,7 +105,87 @@ pub enum Nudge {
     NoNewsSinceInterview { at: DateTime<Utc>, days: i64 },
 }
 
-impl Job {
+/// A job, and the events of its application.
+#[derive(Clone, Debug)]
+pub struct Application {
+    pub job: JobId,
+    /// Short summarized title, shown as the grid caption.
+    pub title: String,
+    pub company: String,
+    pub created_at: DateTime<Utc>,
+    /// In the order they were logged.
+    pub events: Vec<JobEvent>,
+}
+
+impl Application {
+    /// The job's application, unless the job is deleted.
+    pub fn read(connection: &Connection, job: JobId) -> Result<Option<Self>, Error> {
+        Ok(Self::read_where(connection, Some(job))?.into_iter().next())
+    }
+
+    /// Every job's application, in the board's order.
+    pub fn read_all(connection: &Connection) -> Result<Vec<Self>, Error> {
+        Self::read_where(connection, None)
+    }
+
+    /// One job's, or with `None` every job's. Separate statements, so one
+    /// job's are found by its index rather than by reading every job's.
+    fn read_where(connection: &Connection, job: Option<JobId>) -> Result<Vec<Self>, Error> {
+        let (jobs, events) = match job {
+            Some(_) => (
+                "SELECT id, title, company, created_at FROM jobs
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                // The steps the model doesn't have yet (wishlisted, tailoring,
+                // ready) are left out: without them a job hasn't been applied to.
+                "SELECT job_id, id, at, kind, resume_id, interview_kind, interview_with, note
+                 FROM events
+                 WHERE job_id = ?1 AND deleted_at IS NULL
+                   AND kind NOT IN ('wishlisted', 'tailoring', 'ready')
+                 ORDER BY id",
+            ),
+            None => (
+                "SELECT id, title, company, created_at FROM jobs
+                 WHERE deleted_at IS NULL
+                 ORDER BY board_sort_key, id",
+                "SELECT job_id, id, at, kind, resume_id, interview_kind, interview_with, note
+                 FROM events
+                 WHERE deleted_at IS NULL AND kind NOT IN ('wishlisted', 'tailoring', 'ready')
+                 ORDER BY id",
+            ),
+        };
+        let parameters = rusqlite::params_from_iter(job.map(|job| job.0));
+        let mut applications: Vec<Self> = connection
+            .prepare_cached(jobs)?
+            .query_map(parameters.clone(), |row| {
+                Ok(Self {
+                    job: JobId(row.get(0)?),
+                    title: row.get(1)?,
+                    company: row.get(2)?,
+                    created_at: time(row.get(3)?),
+                    events: Vec::new(),
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        let events: Vec<(Uuid, JobEvent)> = connection
+            .prepare_cached(events)?
+            .query_map(parameters, |row| Ok((row.get(0)?, event(row)?)))?
+            .collect::<Result<_, _>>()?;
+        let positions: HashMap<Uuid, usize> = applications
+            .iter()
+            .enumerate()
+            .map(|(position, application)| (application.job.0, position))
+            .collect();
+        for (job, event) in events {
+            if let Some(application) = positions
+                .get(&job)
+                .and_then(|&position| applications.get_mut(position))
+            {
+                application.events.push(event);
+            }
+        }
+        Ok(applications)
+    }
+
     /// The events, latest first; of events at the same moment, the one
     /// logged last first.
     pub fn timeline(&self) -> Vec<&JobEvent> {
@@ -200,6 +285,22 @@ impl Job {
             .unwrap_or(self.created_at)
     }
 
+    /// The résumé sent with the latest application, if one was recorded.
+    pub fn sent_resume(&self) -> Option<ResumeId> {
+        self.events
+            .iter()
+            .filter_map(|event| match event.kind {
+                JobEventKind::Applied {
+                    resume: Some(resume),
+                } => Some((event.at, resume)),
+                _ => None,
+            })
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, resume)| resume)
+    }
+}
+
+impl Job {
     /// The résumé sent with the latest application.
     pub fn sent_resume(&self) -> Option<&TailoredResume> {
         self.events
@@ -220,6 +321,44 @@ impl Job {
         let current = self.current_resume()?;
         (sent.id != current.id).then_some(sent)
     }
+}
+
+/// An event from its row: job_id, id, at, kind, resume_id, interview_kind,
+/// interview_with, note.
+fn event(row: &Row) -> rusqlite::Result<JobEvent> {
+    let kind: String = row.get(3)?;
+    let kind = match kind.as_str() {
+        "applied" => JobEventKind::Applied {
+            resume: row.get::<_, Option<Uuid>>(4)?.map(ResumeId),
+        },
+        "recruiter_replied" => JobEventKind::RecruiterReplied,
+        "interview" => JobEventKind::Interview {
+            kind: row.get(5)?,
+            with: row.get(6)?,
+        },
+        "offer" => JobEventKind::Offer,
+        "rejected" => JobEventKind::Rejected,
+        "withdrawn" => JobEventKind::Withdrawn,
+        "no_response" => JobEventKind::NoResponse,
+        "note" => JobEventKind::Note,
+        other => {
+            return Err(rusqlite::Error::InvalidColumnType(
+                3,
+                format!("events.kind: {other}"),
+                rusqlite::types::Type::Text,
+            ));
+        }
+    };
+    Ok(JobEvent {
+        id: EventId(row.get(1)?),
+        at: time(row.get(2)?),
+        kind,
+        note: row.get(7)?,
+    })
+}
+
+fn time(milliseconds: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(milliseconds).unwrap_or_default()
 }
 
 /// An event kind without its details, to pick from before filling them in.
@@ -264,61 +403,53 @@ impl StepKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::JobId;
     use chrono::Duration;
 
-    fn job_with(events: Vec<(i64, JobEventKind)>) -> (Job, DateTime<Utc>) {
+    fn application_with(events: Vec<(i64, JobEventKind)>) -> (Application, DateTime<Utc>) {
         let now = Utc::now();
-        let job = Job {
-            id: JobId::new(),
+        let application = Application {
+            job: JobId::new(),
             title: String::new(),
             company: String::new(),
-            description: String::new(),
-            url: None,
             created_at: now - Duration::days(60),
-            overrides: Vec::new(),
-            resumes: Vec::new(),
-            cover_letter: None,
             events: events
                 .into_iter()
                 .map(|(days_ago, kind)| JobEvent::new(now - Duration::days(days_ago), kind))
                 .collect(),
         };
-        (job, now)
+        (application, now)
     }
 
     #[test]
     fn the_latest_step_sets_the_stage_and_notes_dont() {
-        let (job, _) = job_with(vec![
+        let (application, _) = application_with(vec![
             (10, JobEventKind::Applied { resume: None }),
             (5, JobEventKind::Rejected),
             (1, JobEventKind::Note),
         ]);
         let now = Utc::now();
-        assert_eq!(job.stage(now), Stage::Rejected);
-        assert!(job.stage(now).is_closed());
+        assert_eq!(application.stage(now), Stage::Rejected);
+        assert!(application.stage(now).is_closed());
     }
 
     #[test]
     fn a_quiet_application_gets_a_nudge() {
-        let (job, now) = job_with(vec![(20, JobEventKind::Applied { resume: None })]);
-        assert_eq!(job.nudge(now), Some(Nudge::NoReply { days: 20 }));
-        let (job, now) = job_with(vec![(3, JobEventKind::Applied { resume: None })]);
-        assert_eq!(job.nudge(now), None);
+        let (application, now) =
+            application_with(vec![(20, JobEventKind::Applied { resume: None })]);
+        assert_eq!(application.nudge(now), Some(Nudge::NoReply { days: 20 }));
+        let (application, now) =
+            application_with(vec![(3, JobEventKind::Applied { resume: None })]);
+        assert_eq!(application.nudge(now), None);
     }
 
     #[test]
     fn an_interview_to_come_is_the_nudge() {
-        let interview = JobEventKind::Interview {
-            kind: InterviewKind::Phone,
-            with: String::new(),
-        };
-        let (job, now) = job_with(vec![
+        let (application, now) = application_with(vec![
             (30, JobEventKind::Applied { resume: None }),
-            (-3, interview),
+            (-3, interview()),
         ]);
-        assert!(matches!(job.nudge(now), Some(Nudge::InterviewSoon { .. })));
-        assert!(job.stage(now).is_interviewing());
+        assert!(matches!(application.nudge(now), Some(Nudge::InterviewSoon { .. })));
+        assert!(application.stage(now).is_interviewing());
     }
 
     fn interview() -> JobEventKind {
@@ -330,21 +461,24 @@ mod tests {
 
     #[test]
     fn a_rejection_outranks_an_interview_still_to_come() {
-        let (job, now) = job_with(vec![
+        let (application, now) = application_with(vec![
             (10, JobEventKind::Applied { resume: None }),
             (-3, interview()),
             (0, JobEventKind::Rejected),
         ]);
-        assert_eq!(job.stage(now), Stage::Rejected);
-        assert_eq!(job.nudge(now), None);
-        let called_off = job.events.iter().any(|event| job.is_called_off(event, now));
+        assert_eq!(application.stage(now), Stage::Rejected);
+        assert_eq!(application.nudge(now), None);
+        let called_off = application
+            .events
+            .iter()
+            .any(|event| application.is_called_off(event, now));
         assert!(called_off);
     }
 
     #[test]
     fn the_soonest_interview_is_the_next_one() {
-        let (job, now) = job_with(vec![(-8, interview()), (-3, interview())]);
-        let Some(Nudge::InterviewSoon { at }) = job.nudge(now) else {
+        let (application, now) = application_with(vec![(-8, interview()), (-3, interview())]);
+        let Some(Nudge::InterviewSoon { at }) = application.nudge(now) else {
             panic!("no interview nudge");
         };
         assert_eq!((at - now).num_days(), 3);
@@ -352,9 +486,48 @@ mod tests {
 
     #[test]
     fn of_two_steps_at_the_same_moment_the_one_logged_last_counts() {
-        let (mut job, now) = job_with(vec![(1, JobEventKind::NoResponse), (1, JobEventKind::Offer)]);
-        let at = job.events[0].at;
-        job.events[1].at = at;
-        assert_eq!(job.stage(now), Stage::Offer);
+        let (mut application, now) =
+            application_with(vec![(1, JobEventKind::NoResponse), (1, JobEventKind::Offer)]);
+        let at = application.events[0].at;
+        application.events[1].at = at;
+        assert_eq!(application.stage(now), Stage::Offer);
+    }
+
+    #[test]
+    fn the_applications_read_back_as_the_sample_wrote_them() -> Result<(), Error> {
+        let mut writer = crate::database::Writer::open_in_memory()?;
+        writer.execute(|write| {
+            crate::typeset::install_templates(write)?;
+            super::super::sample::write_library(write)
+        })?;
+        let library = super::super::Library::load(writer.kron())?;
+        let applications = Application::read_all(writer.kron())?;
+        assert_eq!(
+            applications.iter().map(|each| each.job).collect::<Vec<_>>(),
+            library.jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
+            "in the board's order"
+        );
+        for (application, job) in applications.iter().zip(&library.jobs) {
+            assert_eq!(application.title, job.title);
+            assert_eq!(application.company, job.company);
+            assert_eq!(application.created_at, job.created_at);
+            let ids = |events: &[JobEvent]| events.iter().map(|event| event.id).collect::<Vec<_>>();
+            assert_eq!(ids(&application.events), ids(&job.events));
+            for (read, expected) in application.events.iter().zip(&job.events) {
+                assert_eq!(read.at, expected.at);
+                assert_eq!(read.kind, expected.kind);
+                assert_eq!(read.note, expected.note);
+            }
+            assert_eq!(
+                application.sent_resume(),
+                job.sent_resume().map(|resume| resume.id),
+                "{}",
+                job.company
+            );
+            let one = Application::read(writer.kron(), job.id)?;
+            assert_eq!(one.map(|one| one.events.len()), Some(job.events.len()));
+        }
+        assert!(Application::read(writer.kron(), JobId::new())?.is_none());
+        Ok(())
     }
 }

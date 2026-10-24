@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 pub use section::citations;
 pub use application::{
-    InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
+    Application, InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
 };
 
 /// Share of the shorter fact's words the longer must contain to be offered as

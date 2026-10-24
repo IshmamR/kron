@@ -23,10 +23,10 @@ use super::inspector::{Inspection, Inspector};
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
-    Generations, LineCitations, Lines, Sections, UnsupportedClaims,
+    Generations, Jobs, LineCitations, Lines, Sections, UnsupportedClaims,
 };
 use crate::database::{Changed, Database, Error};
-use crate::model::{self, FactChange, FactId, Job, JobId, Library, LineId, ResumeId, commands};
+use crate::model::{self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands};
 use crate::typeset::{self, LineBox, PageSize, Template};
 
 const KEY_CONTEXT: &str = "JobView";
@@ -74,10 +74,7 @@ pub enum JobViewEvent {
 }
 
 /// One job: its tailored résumé as typeset pages, next to the inspector.
-/// The header, the Application tab and the pages still come from `Library`
-/// until the timeline and previews read the database (storage.md, step 4).
 pub struct JobView {
-    library: Entity<Library>,
     database: Entity<Database>,
     previews: Entity<Previews>,
     job: Option<JobId>,
@@ -85,8 +82,10 @@ pub struct JobView {
     /// The older résumé that was sent, when showing it instead of the
     /// current one.
     showing_sent: Option<ResumeId>,
-    /// The job's versions, the one shown, and what the inspector shows of
-    /// it: read when first shown, and again after the database changes.
+    /// The job's title, company and events for the header, its versions,
+    /// the one shown, and what the inspector shows of it: read when first
+    /// shown, and again after the database changes.
+    summary: Option<Application>,
     versions: Option<Versions>,
     shown: Option<Rc<ShownResume>>,
     inspection: Option<Rc<Inspection>>,
@@ -127,8 +126,7 @@ impl Render for JobView {
             self.scroll_to_selected();
         }
 
-        let library = self.library.read(cx);
-        let content = match self.job.and_then(|job| library.job(job)) {
+        let content = match &self.summary {
             Some(job) => v_flex()
                 .size_full()
                 .child(self.render_header(job, cx))
@@ -175,26 +173,25 @@ impl Focusable for JobView {
 
 impl JobView {
     pub fn new(
-        library: Entity<Library>,
         database: Entity<Database>,
         previews: Entity<Previews>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let application = cx.new(|cx| {
-            ApplicationView::new(library.clone(), database.clone(), window, cx)
+            ApplicationView::new(database.clone(), window, cx)
         });
         Self {
             _subscriptions: vec![
                 cx.subscribe(&database, |this, _, changed: &Changed, cx| {
                     if shows(changed) {
+                        this.summary = None;
                         this.versions = None;
                         this.shown = None;
                         this.inspection = None;
                         cx.notify();
                     }
                 }),
-                cx.observe(&library, |_, _, cx| cx.notify()),
                 cx.observe(&previews, |_, _, cx| cx.notify()),
                 cx.observe(&application, |_, _, cx| cx.notify()),
                 cx.subscribe_in(&application, window, |this, _, event, window, cx| {
@@ -206,12 +203,12 @@ impl JobView {
                     }
                 }),
             ],
-            library,
             database,
             previews,
             job: None,
             tab: Tab::Resume,
             showing_sent: None,
+            summary: None,
             versions: None,
             shown: None,
             inspection: None,
@@ -244,6 +241,11 @@ impl JobView {
             self.scroll_handle.set_offset(point(px(0.), px(0.)));
             cx.notify();
         }
+    }
+
+    #[cfg(test)]
+    pub fn selected_line(&self) -> Option<LineId> {
+        self.selected
     }
 
     pub fn select_line(&mut self, line: LineId, cx: &mut Context<Self>) {
@@ -401,6 +403,12 @@ impl JobView {
             return;
         };
         let connection = self.database.read(cx).connection();
+        if self.summary.as_ref().is_none_or(|summary| summary.job != job) {
+            self.summary = Application::read(connection, job).unwrap_or_else(|error| {
+                eprintln!("job view: couldn't read the job: {error}");
+                None
+            });
+        }
         if self.versions.as_ref().is_none_or(|versions| versions.job != job) {
             self.versions = Some(Versions::read(connection, job).unwrap_or_else(|error| {
                 eprintln!("job view: couldn't read the job's résumés: {error}");
@@ -441,7 +449,7 @@ impl JobView {
         }
     }
 
-    fn render_header(&self, job: &Job, cx: &Context<Self>) -> impl IntoElement {
+    fn render_header(&self, job: &Application, cx: &Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_none()
             .justify_between()
@@ -814,7 +822,7 @@ fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
 
 /// `generated_at` is the résumé version's on screen.
 fn job_header(
-    job: &Job,
+    job: &Application,
     generated_at: Option<DateTime<Utc>>,
     cx: &Context<JobView>,
 ) -> impl IntoElement {
@@ -1129,7 +1137,8 @@ fn changes(connection: &Connection, resume: ResumeId) -> Result<Vec<(FactId, Fac
 
 /// Whether the change is to anything the view or its inspector shows.
 fn shows(changed: &Changed) -> bool {
-    changed.touches(Generations)
+    changed.touches(Jobs)
+        || changed.touches(Generations)
         || changed.touches(Sections)
         || changed.touches(Blocks)
         || changed.touches(Lines)
@@ -1169,7 +1178,7 @@ mod tests {
 
     use super::*;
     use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::{ClaimId, FactId, TailoredResume, UnsupportedReason};
+    use crate::model::{ClaimId, FactId, Library, TailoredResume, UnsupportedReason};
     use crate::workspace::parts::Source;
     use crate::workspace::testing::{self, write_sample};
 
@@ -1363,11 +1372,10 @@ mod tests {
         let Some(job) = job else {
             panic!("no job at {company}");
         };
-        let library = app.new(|_| library);
         let previews = app.new(|cx| Previews::new(database.clone(), cx));
         let closed = Rc::new(RefCell::new(0));
         let (view, cx) = app.add_window_view(|window, cx| {
-            let mut view = JobView::new(library, database.clone(), previews, window, cx);
+            let mut view = JobView::new(database.clone(), previews, window, cx);
             view.set_job(job, cx);
             view
         });

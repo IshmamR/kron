@@ -13,14 +13,18 @@ use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
-    IntoElement, KeyBinding, Pixels, SharedString, Window, actions, div, prelude::*, px,
+    IntoElement, KeyBinding, Pixels, SharedString, Subscription, Window, actions, div, prelude::*,
+    px,
 };
 
+use rusqlite::{Connection, OptionalExtension};
+
 use super::parts::{caption, card, heading};
-use crate::database::Database;
+use crate::database::schema::{Events, Generations, JobDescriptions, Jobs};
+use crate::database::{Changed, Database, Error};
 use crate::model::commands;
 use crate::model::{
-    EventId, InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Nudge, ResumeId, Stage,
+    Application, EventId, InterviewKind, JobEvent, JobEventKind, JobId, Nudge, ResumeId, Stage,
     StepKind,
 };
 
@@ -62,9 +66,12 @@ pub enum ApplicationViewEvent {
 /// The job view's Application tab: where the application stands, its events,
 /// and the job itself.
 pub struct ApplicationView {
-    library: Entity<Library>,
     database: Entity<Database>,
     job: Option<JobId>,
+    /// The job's events, and the rest the tab shows of it: read when first
+    /// shown, and again after the database changes.
+    application: Option<Application>,
+    details: Option<JobDetails>,
     form: Option<EventForm>,
     date: Entity<DatePickerState>,
     with: Entity<InputState>,
@@ -76,6 +83,7 @@ pub struct ApplicationView {
     /// Holds focus when nothing in the tab has it, so its keys and the job
     /// view's still arrive.
     focus_handle: FocusHandle,
+    _changes: Subscription,
 }
 
 /// What's being logged or edited. The text and date live in the view's
@@ -97,9 +105,9 @@ impl EventEmitter<ApplicationViewEvent> for ApplicationView {}
 
 impl Render for ApplicationView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.read(cx);
         let cx: &Context<Self> = cx;
-        let library = self.library.read(cx);
-        let Some(job) = self.job.and_then(|job| library.job(job)) else {
+        let (Some(job), Some(details)) = (self.application.as_ref(), self.details.as_ref()) else {
             return div().into_any_element();
         };
         let now = Utc::now();
@@ -132,8 +140,10 @@ impl Render for ApplicationView {
                                         .p_4()
                                         .gap_5()
                                         .child(self.render_status(job, now, cx))
-                                        .when(adding, |this| this.child(self.render_form(job, cx)))
-                                        .child(self.render_timeline(job, now, cx)),
+                                        .when(adding, |this| {
+                                            this.child(self.render_form(details, cx))
+                                        })
+                                        .child(self.render_timeline(job, details, now, cx)),
                                 ),
                         ),
                     )
@@ -141,7 +151,7 @@ impl Render for ApplicationView {
                         resizable_panel()
                             .size(DETAILS_WIDTH)
                             .size_range(DETAILS_MIN_WIDTH..DETAILS_MAX_WIDTH)
-                            .child(self.render_details(job, cx)),
+                            .child(self.render_details(job, details, cx)),
                     ),
             )
             .into_any_element()
@@ -149,13 +159,19 @@ impl Render for ApplicationView {
 }
 
 impl ApplicationView {
-    pub fn new(
-        library: Entity<Library>,
-        database: Entity<Database>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(database: Entity<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
+            _changes: cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+                if changed.touches(Jobs)
+                    || changed.touches(Events)
+                    || changed.touches(JobDescriptions)
+                    || changed.touches(Generations)
+                {
+                    this.application = None;
+                    this.details = None;
+                    cx.notify();
+                }
+            }),
             date: cx.new(|cx| {
                 DatePickerState::new(window, cx)
                     .time_precision(TimePrecision::Minute)
@@ -169,9 +185,10 @@ impl ApplicationView {
                     .auto_grow(2, 8)
                     .placeholder("Anything worth remembering")
             }),
-            library,
             database,
             job: None,
+            application: None,
+            details: None,
             form: None,
             deleted: None,
             layout: cx.new(|_| ResizableState::default()),
@@ -182,9 +199,31 @@ impl ApplicationView {
     pub fn set_job(&mut self, job: JobId, cx: &mut Context<Self>) {
         if self.job != Some(job) {
             self.job = Some(job);
+            self.application = None;
+            self.details = None;
             self.form = None;
             self.deleted = None;
             cx.notify();
+        }
+    }
+
+    /// Reads the job's events and details, unless they're read already.
+    fn read(&mut self, cx: &App) {
+        let Some(job) = self.job else {
+            return;
+        };
+        let connection = self.database.read(cx).connection();
+        if self.application.is_none() {
+            self.application = Application::read(connection, job).unwrap_or_else(|error| {
+                eprintln!("application view: couldn't read the job's events: {error}");
+                None
+            });
+        }
+        if self.details.is_none() {
+            self.details = JobDetails::read(connection, job).unwrap_or_else(|error| {
+                eprintln!("application view: couldn't read the job: {error}");
+                None
+            });
         }
     }
 
@@ -196,11 +235,11 @@ impl ApplicationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let library = self.library.read(cx);
-        let Some(job) = self.job.and_then(|job| library.job(job)) else {
+        self.read(cx);
+        let Some(details) = self.details.as_ref() else {
             return;
         };
-        let current_resume = job.current_resume().map(|resume| resume.id);
+        let current_resume = details.current();
         let (interview_kind, with) = match existing.as_ref().map(|event| &event.kind) {
             Some(JobEventKind::Interview { kind, with }) => (*kind, with.clone()),
             _ => (InterviewKind::Phone, String::new()),
@@ -323,10 +362,10 @@ impl ApplicationView {
             return;
         };
         self.deleted = self
-            .library
-            .read(cx)
-            .job(job)
-            .and_then(|job| job.events.iter().find(|each| each.id == event))
+            .application
+            .as_ref()
+            .filter(|application| application.job == job)
+            .and_then(|application| application.events.iter().find(|each| each.id == event))
             .cloned();
         self.database
             .read(cx)
@@ -360,7 +399,12 @@ impl ApplicationView {
             .queue(move |write| commands::save_event(write, job, &event));
     }
 
-    fn render_status(&self, job: &Job, now: DateTime<Utc>, cx: &Context<Self>) -> impl IntoElement {
+    fn render_status(
+        &self,
+        job: &Application,
+        now: DateTime<Utc>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let stage = job.stage(now);
         let nudge = job.nudge(now);
@@ -489,7 +533,7 @@ impl ApplicationView {
             })
     }
 
-    fn render_form(&self, job: &Job, cx: &Context<Self>) -> impl IntoElement {
+    fn render_form(&self, details: &JobDetails, cx: &Context<Self>) -> impl IntoElement {
         let Some(form) = self.form.as_ref() else {
             return div().into_any_element();
         };
@@ -546,18 +590,18 @@ impl ApplicationView {
                 ))
                 .child(field("With", Input::new(&self.with).into_any_element()))
             })
-            .when(form.step == StepKind::Applied && job.resumes.len() > 1, |this| {
+            .when(form.step == StepKind::Applied && details.resumes.len() > 1, |this| {
                 this.child(field(
                     "Résumé sent",
                     v_flex()
                         .gap_1()
-                        .children(job.resumes.iter().rev().enumerate().map(|(index, resume)| {
-                            let id = resume.id;
-                            let current = job.current_resume().map(|resume| resume.id) == Some(id);
+                        .children(details.resumes.iter().rev().enumerate().map(
+                            |(index, &(id, generated_at))| {
+                            let current = details.current() == Some(id);
                             Radio::new(("sent-resume", index))
                                 .label(format!(
                                     "Generated {}{}",
-                                    date_label(resume.generated_at, true),
+                                    date_label(generated_at, true),
                                     if current { " (current)" } else { "" }
                                 ))
                                 .checked(form.resume == Some(id))
@@ -605,7 +649,13 @@ impl ApplicationView {
             .into_any_element()
     }
 
-    fn render_timeline(&self, job: &Job, now: DateTime<Utc>, cx: &Context<Self>) -> impl IntoElement {
+    fn render_timeline(
+        &self,
+        job: &Application,
+        details: &JobDetails,
+        now: DateTime<Utc>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
         let timeline = job.timeline();
         if timeline.is_empty() {
@@ -623,7 +673,7 @@ impl ApplicationView {
                 let id = event.id;
                 let editing = self.form.as_ref().and_then(|form| form.editing) == Some(id);
                 let editable = event.clone();
-                let details = event_details(job, event);
+                let event_details = event_details(details, event);
                 let group = SharedString::from(format!("event-{}", id.0));
 
                 // A line down the left joins the dots. Not a border, which
@@ -658,7 +708,7 @@ impl ApplicationView {
                             }),
                     )
                     // Edited in place, so it's clear which event the form is for.
-                    .when(editing, |this| this.child(self.render_form(job, cx)))
+                    .when(editing, |this| this.child(self.render_form(details, cx)))
                     .when(!editing, |this| this.child(
                         v_flex()
                             .gap_1()
@@ -731,7 +781,9 @@ impl ApplicationView {
                                         cx,
                                     )),
                             )
-                            .when_some(details, |this, details| this.child(caption(details, cx)))
+                            .when_some(event_details, |this, event_details| {
+                                this.child(caption(event_details, cx))
+                            })
                             // The user's own words: the size of the details, in the
                             // text colour.
                             .when_some(event.note.clone(), |this, note| {
@@ -742,10 +794,17 @@ impl ApplicationView {
             .into_any_element()
     }
 
-    fn render_details(&self, job: &Job, cx: &Context<Self>) -> impl IntoElement {
+    fn render_details(
+        &self,
+        job: &Application,
+        details: &JobDetails,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
-        let sent = job.sent_resume();
-        let current = job.current_resume().map(|resume| resume.id);
+        let sent = job
+            .sent_resume()
+            .and_then(|resume| Some((resume, details.generated_at(resume)?)));
+        let current = details.current();
 
         v_flex()
             .id("job-details")
@@ -767,7 +826,7 @@ impl ApplicationView {
                             .child(job.title.clone()),
                     )
                     .child(caption(job.company.clone(), cx))
-                    .when_some(job.url.clone(), |this, url| {
+                    .when_some(details.url.clone(), |this, url| {
                         this.child(
                             h_flex().child(
                                 Button::new("job-url")
@@ -785,7 +844,7 @@ impl ApplicationView {
                             .pt_2()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child(job.description.clone()),
+                            .child(details.description.clone()),
                     ),
             )
             .child(
@@ -793,14 +852,13 @@ impl ApplicationView {
                     .gap_1()
                     .child(heading("Sent", None, cx))
                     .child(match sent {
-                        Some(resume) => {
-                            let id = resume.id;
+                        Some((id, generated_at)) => {
                             let older = Some(id) != current;
                             card(cx)
                                 .gap_1()
                                 .child(div().text_sm().child(format!(
                                     "Résumé generated {}",
-                                    date_label(resume.generated_at, true)
+                                    date_label(generated_at, true)
                                 )))
                                 .when(older, |this| {
                                     this.child(caption(
@@ -832,14 +890,69 @@ impl ApplicationView {
     }
 }
 
+/// What the tab shows of the job beyond its events.
+struct JobDetails {
+    url: Option<String>,
+    description: String,
+    /// Its résumé's versions and when each was generated, oldest first: the
+    /// last is current.
+    resumes: Vec<(ResumeId, DateTime<Utc>)>,
+}
+
+impl JobDetails {
+    /// `None` once the job is deleted.
+    fn read(connection: &Connection, job: JobId) -> Result<Option<Self>, Error> {
+        let row: Option<(Option<String>, String)> = connection
+            .prepare_cached(
+                "SELECT jobs.url, job_descriptions.text
+                 FROM jobs JOIN job_descriptions ON job_descriptions.job_id = jobs.id
+                 WHERE jobs.id = ?1 AND jobs.deleted_at IS NULL",
+            )?
+            .query_row([job.0], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        let Some((url, description)) = row else {
+            return Ok(None);
+        };
+        let resumes = connection
+            .prepare_cached(
+                "SELECT id, generated_at FROM generations
+                 WHERE job_id = ?1 AND kind = 'resume' AND deleted_at IS NULL
+                 ORDER BY generated_at, id",
+            )?
+            .query_map([job.0], |row| {
+                Ok((
+                    ResumeId(row.get(0)?),
+                    DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default(),
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(Self {
+            url,
+            description,
+            resumes,
+        }))
+    }
+
+    fn current(&self) -> Option<ResumeId> {
+        self.resumes.last().map(|&(resume, _)| resume)
+    }
+
+    fn generated_at(&self, resume: ResumeId) -> Option<DateTime<Utc>> {
+        self.resumes
+            .iter()
+            .find(|&&(each, _)| each == resume)
+            .map(|&(_, generated_at)| generated_at)
+    }
+}
+
 /// Where the application stands, in a few words, for headers. A nudge says
 /// more than the stage, so it replaces it.
-pub fn status_label(job: &Job, now: DateTime<Utc>) -> String {
+pub fn status_label(job: &Application, now: DateTime<Utc>) -> String {
     nudge_label(job, now).unwrap_or_else(|| stage_label(job.stage(now), now))
 }
 
 /// The application's nudge, short enough for a tag.
-pub fn nudge_label(job: &Job, now: DateTime<Utc>) -> Option<String> {
+pub fn nudge_label(job: &Application, now: DateTime<Utc>) -> Option<String> {
     Some(match job.nudge(now)? {
         Nudge::InterviewSoon { at } => interview_soon_label(at, now),
         Nudge::NoReply { days } => format!("No reply in {days} days"),
@@ -925,15 +1038,15 @@ fn event_title(event: &JobEvent, now: DateTime<Utc>) -> String {
     }
 }
 
-fn event_details(job: &Job, event: &JobEvent) -> Option<String> {
+fn event_details(details: &JobDetails, event: &JobEvent) -> Option<String> {
     match &event.kind {
         JobEventKind::Interview { with, .. } if !with.is_empty() => Some(format!("With {with}")),
         JobEventKind::Applied {
             resume: Some(resume),
-        } => job.resume(*resume).map(|resume| {
+        } => details.generated_at(*resume).map(|generated_at| {
             format!(
                 "Sent the résumé generated {}",
-                date_label(resume.generated_at, true)
+                date_label(generated_at, true)
             )
         }),
         _ => None,
@@ -964,5 +1077,249 @@ fn dot_color(kind: &JobEventKind, upcoming: bool, cx: &App) -> Hsla {
         }
         JobEventKind::Note => theme.border,
         _ => theme.foreground,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::database::{TemporaryDirectory, Write};
+    use crate::workspace::testing;
+
+    struct Tab<'a> {
+        view: Entity<ApplicationView>,
+        database: Entity<Database>,
+        job: JobId,
+        cx: &'a mut VisualTestContext,
+        _directory: TemporaryDirectory,
+    }
+
+    fn open<'a>(app: &'a mut TestAppContext, company: &str) -> Tab<'a> {
+        let (database, directory) = testing::open_sample(app);
+        let job = database.read_with(app, |database, _| {
+            database.connection().query_row(
+                "SELECT id FROM jobs WHERE company = ?1",
+                [company],
+                |row| row.get(0),
+            )
+        });
+        let job = match job {
+            Ok(job) => JobId(job),
+            Err(error) => panic!("{company}: {error}"),
+        };
+        let (view, cx) = app.add_window_view(|window, cx| {
+            let mut view = ApplicationView::new(database.clone(), window, cx);
+            view.set_job(job, cx);
+            view
+        });
+        cx.update(|window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            focus_handle.focus(window, cx);
+        });
+        cx.run_until_parked();
+        Tab {
+            view,
+            database,
+            job,
+            cx,
+            _directory: directory,
+        }
+    }
+
+    impl Tab<'_> {
+        fn settle(&mut self) {
+            testing::settle(self.cx, &self.database);
+        }
+
+        fn keys(&mut self, keystrokes: &str) {
+            self.cx.simulate_keystrokes(keystrokes);
+            self.settle();
+        }
+
+        fn log(&mut self, step: StepKind) {
+            self.cx.dispatch_action(LogStep { step });
+            self.settle();
+        }
+
+        fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
+            testing::run(self.cx, &self.database, command);
+        }
+
+        fn update(
+            &mut self,
+            update: impl FnOnce(&mut ApplicationView, &mut Window, &mut Context<ApplicationView>),
+        ) {
+            self.view.update_in(self.cx, update);
+            self.settle();
+        }
+
+        fn events(&mut self) -> Vec<JobEvent> {
+            self.view.read_with(self.cx, |view, _| {
+                view.application
+                    .as_ref()
+                    .map(|application| application.events.clone())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn stored_events(&mut self) -> usize {
+            let job = self.job;
+            let count = self.database.read_with(self.cx, |database, _| {
+                database.connection().query_row(
+                    "SELECT count(*) FROM events WHERE job_id = ?1 AND deleted_at IS NULL
+                     AND kind NOT IN ('wishlisted', 'tailoring', 'ready')",
+                    [job.0],
+                    |row| row.get::<_, i64>(0),
+                )
+            });
+            match count {
+                Ok(count) => usize::try_from(count).unwrap_or_default(),
+                Err(error) => panic!("{error}"),
+            }
+        }
+
+        fn form_error(&mut self) -> Option<&'static str> {
+            self.view
+                .read_with(self.cx, |view, _| view.form.as_ref().and_then(|form| form.error))
+        }
+
+        fn form_open(&mut self) -> bool {
+            self.view.read_with(self.cx, |view, _| view.form.is_some())
+        }
+
+        fn stage(&mut self) -> Option<Stage> {
+            self.view.read_with(self.cx, |view, _| {
+                view.application
+                    .as_ref()
+                    .map(|application| application.stage(Utc::now()))
+            })
+        }
+    }
+
+    #[test]
+    fn a_note_is_saved_with_ctrl_enter_and_closes_the_form() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let before = tab.events().len();
+        tab.log(StepKind::Note);
+        assert!(tab.form_open());
+        tab.cx.simulate_input("Called the recruiter back.");
+        tab.keys("ctrl-enter");
+        assert!(!tab.form_open());
+        assert_eq!(tab.stored_events(), before + 1);
+        let events = tab.events();
+        assert_eq!(events.len(), before + 1, "the timeline read it back");
+        let note = events.last().and_then(|event| event.note.clone());
+        assert_eq!(note.as_deref(), Some("Called the recruiter back."));
+    }
+
+    #[test]
+    fn a_note_needs_text_and_an_interview_a_time() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let before = tab.stored_events();
+        tab.log(StepKind::Note);
+        tab.keys("ctrl-enter");
+        assert_eq!(tab.form_error(), Some("Write the note first."));
+        tab.log(StepKind::Interview);
+        tab.keys("ctrl-enter");
+        assert_eq!(tab.form_error(), Some("Pick when it's held."));
+        assert_eq!(tab.stored_events(), before, "nothing saved");
+    }
+
+    #[test]
+    fn escape_cancels_the_form() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let before = tab.stored_events();
+        tab.log(StepKind::Note);
+        tab.cx.simulate_input("Never mind.");
+        tab.keys("escape");
+        assert!(!tab.form_open());
+        assert_eq!(tab.stored_events(), before);
+    }
+
+    #[test]
+    fn an_edited_event_keeps_its_place() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let events = tab.events();
+        let Some(event) = events.first().cloned() else {
+            panic!("Ledgerly has no events");
+        };
+        let step = StepKind::of(&event.kind);
+        tab.update(|view, window, cx| view.open_form(step, Some(event.clone()), window, cx));
+        tab.update(|view, window, cx| {
+            view.note
+                .update(cx, |note, cx| note.set_value("Edited.", window, cx))
+        });
+        tab.keys("ctrl-enter");
+        let edited = tab.events().into_iter().find(|each| each.id == event.id);
+        let Some(edited) = edited else {
+            panic!("the event is gone");
+        };
+        assert_eq!(edited.note.as_deref(), Some("Edited."));
+        assert_eq!(edited.at, event.at, "left as it was, the time is kept to the second");
+        assert_eq!(tab.events().len(), events.len());
+    }
+
+    /// Fixed before: the Delete button kept focus, so Ctrl+Z went nowhere.
+    #[test]
+    fn ctrl_z_after_deleting_an_event_brings_it_back() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let events = tab.events();
+        let Some(event) = events.first().map(|event| event.id) else {
+            panic!("Ledgerly has no events");
+        };
+        // As after a click: focus outside the tab's keys.
+        tab.cx.update(|window, cx| cx.focus_handle().focus(window, cx));
+        tab.update(|view, window, cx| view.delete(event, window, cx));
+        assert_eq!(tab.events().len(), events.len() - 1);
+        tab.keys("ctrl-z");
+        assert_eq!(tab.events().len(), events.len());
+        assert!(tab.events().iter().any(|each| each.id == event));
+        tab.keys("ctrl-z");
+        assert_eq!(tab.events().len(), events.len(), "one undo per delete");
+    }
+
+    #[test]
+    fn applying_records_the_current_resume() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Cinder Labs");
+        assert_eq!(tab.stage(), Some(Stage::NotApplied));
+        tab.log(StepKind::Applied);
+        tab.keys("ctrl-enter");
+        assert_eq!(tab.stage(), Some(Stage::Applied));
+        let current = tab
+            .view
+            .read_with(tab.cx, |view, _| view.details.as_ref().and_then(JobDetails::current));
+        let sent = tab.view.read_with(tab.cx, |view, _| {
+            view.application.as_ref().and_then(Application::sent_resume)
+        });
+        assert!(current.is_some());
+        assert_eq!(sent, current);
+    }
+
+    #[test]
+    fn marking_no_response_closes_the_application() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Tidewater Systems");
+        assert!(tab.stage().is_some_and(|stage| !stage.is_closed()));
+        tab.update(|view, _, cx| view.log_now(JobEventKind::NoResponse, cx));
+        assert_eq!(tab.stage(), Some(Stage::NoResponse));
+    }
+
+    #[test]
+    fn an_event_logged_elsewhere_shows() {
+        let mut app = TestAppContext::single();
+        let mut tab = open(&mut app, "Ledgerly");
+        let before = tab.events().len();
+        let job = tab.job;
+        let event = JobEvent::new(Utc::now(), JobEventKind::RecruiterReplied);
+        tab.run(move |write| commands::save_event(write, job, &event));
+        assert_eq!(tab.events().len(), before + 1);
     }
 }

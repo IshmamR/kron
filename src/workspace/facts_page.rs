@@ -303,6 +303,11 @@ impl FactsPage {
         }
     }
 
+    #[cfg(test)]
+    pub fn selected(&self) -> Option<FactId> {
+        self.selected
+    }
+
     /// Selects the fact, clearing the filter and search if they hide it.
     pub fn show_fact(&mut self, fact: FactId, window: &mut Window, cx: &mut Context<Self>) {
         self.adding = false;

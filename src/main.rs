@@ -1,5 +1,7 @@
 mod appearance;
-#[allow(dead_code)] // Views don't read it until they move off `Library`.
+// The generated schema has every table and column, used yet or not, and the
+// device ID waits for sync.
+#[allow(dead_code)]
 mod database;
 mod dev_overlay;
 #[allow(dead_code)] // Parts of it aren't used by the UI yet.
@@ -136,11 +138,9 @@ fn main() {
                             window.on_next_frame(|window, _| window.zoom_window());
                         }
                     });
-                    // The workspace loads it from the database.
-                    let library = cx.new(|_| model::Library::default());
                     let dev_overlay = cx.new(|cx| DevOverlay::new(database.clone(), cx));
                     cx.new(|cx| MainWindow {
-                        workspace: cx.new(|cx| Workspace::new(library, database, window, cx)),
+                        workspace: cx.new(|cx| Workspace::new(database, window, cx)),
                         dev_overlay,
                     })
                 },

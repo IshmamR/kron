@@ -26,8 +26,9 @@ use gpui_kit::{
 };
 
 use crate::appearance::{Appearance, Motion};
+use crate::database::schema::Facts;
 use crate::database::{Changed, Database};
-use crate::model::{FactId, JobId, Library, LineId};
+use crate::model::{FactId, JobId, LineId};
 use facts_page::FactsPage;
 use job_view::{JobView, JobViewEvent};
 use previews::Previews;
@@ -69,7 +70,10 @@ pub struct ShowFact {
 
 /// The sidebar and whichever page it has open.
 pub struct Workspace {
-    library: Entity<Library>,
+    database: Entity<Database>,
+    /// Facts that need review, for the sidebar's badge: counted on start,
+    /// and again after facts change.
+    needs_review: usize,
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
@@ -122,7 +126,6 @@ impl Render for Workspace {
 
 impl Workspace {
     pub fn new(
-        library: Entity<Library>,
         database: Entity<Database>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -131,20 +134,20 @@ impl Workspace {
 
         let previews = cx.new(|cx| Previews::new(database.clone(), cx));
         let resume_grid = cx.new(|cx| {
-            ResumeGrid::new(library.clone(), database.clone(), previews.clone(), cx)
+            ResumeGrid::new(database.clone(), previews.clone(), cx)
         });
         let job_view = cx.new(|cx| {
-            JobView::new(library.clone(), database.clone(), previews, window, cx)
+            JobView::new(database.clone(), previews, window, cx)
         });
         let facts_page =
             cx.new(|cx| FactsPage::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
-        reload(&library, &database, cx);
 
         let subscriptions = vec![
-            cx.observe(&library, |_, _, cx| cx.notify()),
-            cx.subscribe(&database, |this, database, _: &Changed, cx| {
-                reload(&this.library, &database, cx)
+            cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+                if changed.touches(Facts) {
+                    this.count_needs_review(cx);
+                }
             }),
             cx.subscribe_in(
                 &resume_grid,
@@ -171,8 +174,9 @@ impl Workspace {
             }),
         ];
 
-        Self {
-            library,
+        let mut workspace = Self {
+            needs_review: 0,
+            database,
             page: Page::Resumes,
             sidebar_collapsed: false,
             focus_handle: cx.focus_handle(),
@@ -180,6 +184,24 @@ impl Workspace {
             job_view,
             facts_page,
             _subscriptions: subscriptions,
+        };
+        workspace.count_needs_review(cx);
+        workspace
+    }
+
+    fn count_needs_review(&mut self, cx: &mut Context<Self>) {
+        let counted = self.database.read(cx).connection().query_row(
+            "SELECT count(*) FROM facts
+             WHERE review IS NOT NULL AND merged_into IS NULL AND deleted_at IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        );
+        match counted {
+            Ok(count) => {
+                self.needs_review = usize::try_from(count).unwrap_or_default();
+                cx.notify();
+            }
+            Err(error) => eprintln!("workspace: couldn't count the facts to review: {error}"),
         }
     }
 
@@ -220,7 +242,7 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let needs_review = self.library.read(cx).needs_review_count();
+        let needs_review = self.needs_review;
         let mut facts = SidebarMenuItem::new("Facts")
             .icon(IconName::BookOpen)
             .active(self.page == Page::Facts)
@@ -380,14 +402,97 @@ fn settings() -> AnyElement {
         .into_any_element()
 }
 
-/// Loads the library from the database again, after a change or on start.
-/// Until views query the database themselves (storage.md, step 4).
-fn reload(library: &Entity<Library>, database: &Entity<Database>, cx: &mut App) {
-    match Library::load(database.read(cx).connection()) {
-        Ok(loaded) => library.update(cx, |library, cx| {
-            *library = loaded;
-            cx.notify();
-        }),
-        Err(error) => eprintln!("couldn't load the library: {error}"),
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::database::{Error, TemporaryDirectory, Write};
+    use crate::model::commands;
+
+    struct Open<'a> {
+        workspace: Entity<Workspace>,
+        database: Entity<Database>,
+        cx: &'a mut VisualTestContext,
+        _directory: TemporaryDirectory,
+    }
+
+    fn open(app: &mut TestAppContext) -> Open<'_> {
+        let (database, directory) = testing::open_sample(app);
+        let (workspace, cx) =
+            app.add_window_view(|window, cx| Workspace::new(database.clone(), window, cx));
+        cx.run_until_parked();
+        Open {
+            workspace,
+            database,
+            cx,
+            _directory: directory,
+        }
+    }
+
+    impl Open<'_> {
+        fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
+            testing::run(self.cx, &self.database, command);
+        }
+
+        fn read<R>(&mut self, read: impl FnOnce(&Workspace, &App) -> R) -> R {
+            self.workspace.read_with(self.cx, read)
+        }
+
+        fn id(&mut self, sql: &str) -> uuid::Uuid {
+            let id = self.database.read_with(self.cx, |database, _| {
+                database.connection().query_row(sql, [], |row| row.get(0))
+            });
+            match id {
+                Ok(id) => id,
+                Err(error) => panic!("{sql}: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_badge_counts_the_facts_to_review_and_follows_changes() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        assert_eq!(open.read(|workspace, _| workspace.needs_review), 1);
+        let fact = FactId(open.id("SELECT id FROM facts WHERE review IS NOT NULL"));
+        open.run(move |write| commands::confirm_fact(write, fact));
+        assert_eq!(open.read(|workspace, _| workspace.needs_review), 0);
+    }
+
+    #[test]
+    fn show_fact_opens_the_facts_page_on_it() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        let fact = FactId(open.id("SELECT id FROM facts WHERE text LIKE 'Cut p99%'"));
+        open.cx.dispatch_action(ShowFact { fact });
+        open.cx.run_until_parked();
+        assert!(open.read(|workspace, _| workspace.page == Page::Facts));
+        let selected = open.read(|workspace, cx| workspace.facts_page.read(cx).selected());
+        assert_eq!(selected, Some(fact));
+    }
+
+    #[test]
+    fn open_line_opens_the_job_with_the_line_selected() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        let job = JobId(open.id("SELECT id FROM jobs WHERE company = 'Ledgerly'"));
+        let line = LineId(open.id(
+            "SELECT lines.id FROM lines
+             JOIN blocks ON blocks.id = lines.block_id
+             JOIN sections ON sections.id = blocks.section_id
+             JOIN current_generations ON current_generations.generation_id = sections.generation_id
+             JOIN jobs ON jobs.id = current_generations.job_id
+             WHERE jobs.company = 'Ledgerly' AND current_generations.kind = 'resume'
+             LIMIT 1",
+        ));
+        open.cx.dispatch_action(OpenLine { job, line });
+        open.cx.run_until_parked();
+        assert!(open.read(|workspace, _| workspace.page == Page::Job));
+        let shown = open.read(|workspace, cx| {
+            let job_view = workspace.job_view.read(cx);
+            (job_view.job(), job_view.selected_line())
+        });
+        assert_eq!(shown, (Some(job), Some(line)));
     }
 }

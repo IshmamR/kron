@@ -18,9 +18,9 @@ use rusqlite::Connection;
 
 use super::application_view;
 use super::previews::{self, Previews, Render as PageRender};
-use crate::database::schema::{FactVersions, Facts, Generations, UnsupportedClaims};
+use crate::database::schema::{Events, FactVersions, Facts, Generations, Jobs, UnsupportedClaims};
 use crate::database::{Changed, Database, Error};
-use crate::model::{Job, JobId, Library, Nudge, ResumeId, Stage};
+use crate::model::{Application, JobId, Nudge, ResumeId, Stage};
 
 const KEY_CONTEXT: &str = "ResumeGrid";
 const CARD_WIDTH: Pixels = px(200.);
@@ -75,15 +75,13 @@ pub enum ResumeGridEvent {
     Open(JobId),
 }
 
-/// Home screen: one card per job, showing its résumé's first page. Which
-/// jobs, in what order, and their stages still come from `Library` until the
-/// timeline reads the database (storage.md, step 4).
+/// Home screen: one card per job, showing its résumé's first page.
 pub struct ResumeGrid {
-    library: Entity<Library>,
     database: Entity<Database>,
     previews: Entity<Previews>,
-    /// Each job's current résumé, by job: read when first shown, and again
-    /// after the database changes.
+    /// Every job's application, and each one's current résumé: read when
+    /// first shown, and again after the database changes.
+    applications: Option<Vec<Application>>,
     current_resumes: Option<HashMap<JobId, CurrentResume>>,
     selected: Option<JobId>,
     filter: JobFilter,
@@ -97,11 +95,11 @@ impl EventEmitter<ResumeGridEvent> for ResumeGrid {}
 
 impl Render for ResumeGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.read_current_resumes(cx);
+        self.read(cx);
         let current_resumes = self.current_resumes.clone().unwrap_or_default();
         let pixels_per_point = previews::pixels_per_point(THUMBNAIL_WIDTH, window);
         let now = Utc::now();
-        let jobs = self.visible_jobs(cx, now);
+        let jobs = self.visible_jobs(now);
         let renders: Vec<Option<PageRender>> = jobs
             .iter()
             .map(|job| {
@@ -111,11 +109,10 @@ impl Render for ResumeGrid {
             })
             .collect();
 
-        let library = self.library.read(cx);
-        let job_count = library.jobs.len();
+        let applications = self.applications.as_deref().unwrap_or_default();
+        let job_count = applications.len();
         let counts = JobFilter::ALL.map(|filter| {
-            library
-                .jobs
+            applications
                 .iter()
                 .filter(|job| filter.includes(job, now))
                 .count()
@@ -123,10 +120,10 @@ impl Render for ResumeGrid {
         let empty = jobs.is_empty();
         let cards: Vec<AnyElement> = jobs
             .iter()
-            .filter_map(|&id| library.job(id))
+            .filter_map(|&id| applications.iter().find(|job| job.job == id))
             .zip(renders)
             .map(|(job, render)| {
-                self.render_card(job, current_resumes.get(&job.id), render, now, cx)
+                self.render_card(job, current_resumes.get(&job.job), render, now, cx)
                     .into_any_element()
             })
             .collect();
@@ -243,16 +240,18 @@ impl Focusable for ResumeGrid {
 
 impl ResumeGrid {
     pub fn new(
-        library: Entity<Library>,
         database: Entity<Database>,
         previews: Entity<Previews>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             _subscriptions: vec![
-                cx.observe(&library, |_, _, cx| cx.notify()),
                 cx.observe(&previews, |_, _, cx| cx.notify()),
                 cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+                    if changed.touches(Jobs) || changed.touches(Events) {
+                        this.applications = None;
+                        cx.notify();
+                    }
                     if changed.touches(Generations)
                         || changed.touches(UnsupportedClaims)
                         || changed.touches(FactVersions)
@@ -263,9 +262,9 @@ impl ResumeGrid {
                     }
                 }),
             ],
-            library,
             database,
             previews,
+            applications: None,
             current_resumes: None,
             selected: None,
             filter: JobFilter::default(),
@@ -279,15 +278,21 @@ impl ResumeGrid {
         cx.notify();
     }
 
-    fn read_current_resumes(&mut self, cx: &App) {
-        if self.current_resumes.is_some() {
-            return;
-        }
+    /// Reads the jobs and their résumés, unless they're read already.
+    fn read(&mut self, cx: &App) {
         let connection = self.database.read(cx).connection();
-        self.current_resumes = Some(current_resumes(connection).unwrap_or_else(|error| {
-            eprintln!("résumé grid: couldn't read the résumés: {error}");
-            HashMap::new()
-        }));
+        if self.applications.is_none() {
+            self.applications = Some(Application::read_all(connection).unwrap_or_else(|error| {
+                eprintln!("résumé grid: couldn't read the jobs: {error}");
+                Vec::new()
+            }));
+        }
+        if self.current_resumes.is_none() {
+            self.current_resumes = Some(current_resumes(connection).unwrap_or_else(|error| {
+                eprintln!("résumé grid: couldn't read the résumés: {error}");
+                HashMap::new()
+            }));
+        }
     }
 
     fn columns(&self) -> usize {
@@ -303,21 +308,20 @@ impl ResumeGrid {
     }
 
     /// The jobs the filter lets through, most recently active first.
-    fn visible_jobs(&self, cx: &App, now: DateTime<Utc>) -> Vec<JobId> {
-        let mut jobs: Vec<&Job> = self
-            .library
-            .read(cx)
-            .jobs
+    fn visible_jobs(&self, now: DateTime<Utc>) -> Vec<JobId> {
+        let mut jobs: Vec<&Application> = self
+            .applications
             .iter()
+            .flatten()
             .filter(|job| self.filter.includes(job, now))
             .collect();
         jobs.sort_by_key(|job| std::cmp::Reverse(job.last_activity(now)));
-        jobs.into_iter().map(|job| job.id).collect()
+        jobs.into_iter().map(|job| job.job).collect()
     }
 
     /// Moves by `offset` cards; a move past either end is ignored.
     fn move_selection(&mut self, offset: isize, cx: &mut Context<Self>) {
-        let jobs = self.visible_jobs(cx, Utc::now());
+        let jobs = self.visible_jobs(Utc::now());
         let current = self
             .selected
             .and_then(|selected| jobs.iter().position(|&job| job == selected));
@@ -335,14 +339,14 @@ impl ResumeGrid {
 
     fn render_card(
         &self,
-        job: &Job,
+        job: &Application,
         resume: Option<&CurrentResume>,
         render: Option<PageRender>,
         now: DateTime<Utc>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let id = job.id;
+        let id = job.job;
         let selected = self.selected == Some(id);
         let unsupported = resume.map_or(0, |resume| resume.unsupported);
         let outdated = resume.is_some_and(|resume| resume.outdated);
@@ -604,7 +608,7 @@ impl JobFilter {
         }
     }
 
-    fn includes(self, job: &Job, now: DateTime<Utc>) -> bool {
+    fn includes(self, job: &Application, now: DateTime<Utc>) -> bool {
         let stage = job.stage(now);
         match self {
             Self::All => true,
@@ -663,7 +667,7 @@ mod tests {
 
     use super::*;
     use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::{ClaimId, FactId, commands};
+    use crate::model::{ClaimId, FactId, Library, commands};
     use crate::workspace::testing::{self, write_sample};
 
     fn assert_current_resumes_match_the_library(connection: &Connection) -> Result<(), Error> {
@@ -743,16 +747,10 @@ mod tests {
 
     fn open(app: &mut TestAppContext) -> Grid<'_> {
         let (database, directory) = testing::open_sample(app);
-        let library = database.read_with(app, |database, _| Library::load(database.connection()));
-        let library = match library {
-            Ok(library) => library,
-            Err(error) => panic!("{error}"),
-        };
-        let library = app.new(|_| library);
         let previews = app.new(|cx| Previews::new(database.clone(), cx));
         let opened = Rc::new(Cell::new(None));
         let (grid, cx) = app.add_window_view(|_, cx| {
-            ResumeGrid::new(library, database.clone(), previews.clone(), cx)
+            ResumeGrid::new(database.clone(), previews.clone(), cx)
         });
         cx.update(|window, cx| {
             grid.focus_handle(cx).focus(window, cx);
@@ -789,7 +787,7 @@ mod tests {
 
         fn visible(&mut self) -> Vec<JobId> {
             self.grid
-                .read_with(self.cx, |grid, cx| grid.visible_jobs(cx, Utc::now()))
+                .read_with(self.cx, |grid, _| grid.visible_jobs(Utc::now()))
         }
 
         fn selected(&mut self) -> Option<JobId> {
