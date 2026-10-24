@@ -1,6 +1,5 @@
 mod application;
 pub mod commands;
-mod load;
 #[cfg(any(debug_assertions, test))]
 pub mod sample;
 mod section;
@@ -13,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use section::citations;
+pub use section::{citations, fact_changes};
 pub use application::{
     Application, InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
 };
@@ -66,14 +65,6 @@ impl Library {
         self.facts.iter().find(|fact| fact.id == id)
     }
 
-    pub fn entry(&self, id: EntryId) -> Option<&Entry> {
-        self.entries.iter().find(|entry| entry.id == id)
-    }
-
-    pub fn job(&self, id: JobId) -> Option<&Job> {
-        self.jobs.iter().find(|job| job.id == id)
-    }
-
     /// The lines of each job's current résumé that cite the fact.
     pub fn fact_uses(&self, id: FactId) -> Vec<(&Job, &Line)> {
         self.jobs
@@ -117,13 +108,6 @@ impl Library {
         changed.sort();
         changed.dedup();
         changed
-    }
-
-    pub fn needs_review_count(&self) -> usize {
-        self.facts
-            .iter()
-            .filter(|fact| fact.review.is_some())
-            .count()
     }
 
     /// "Senior Software Engineer, Northwind Logistics", from the entry's title
@@ -191,12 +175,6 @@ pub struct Fact {
     pub hidden: bool,
     /// `None`: nothing to check.
     pub review: Option<Review>,
-}
-
-impl Fact {
-    pub fn is_edited(&self) -> bool {
-        self.text != self.extracted
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -481,12 +459,6 @@ pub struct Line {
     /// What's on the page: the generated text, or the user's edit of it.
     pub text: String,
     pub cites: Vec<FactId>,
-}
-
-impl Line {
-    pub fn is_edited(&self) -> bool {
-        self.text != self.generated
-    }
 }
 
 /// A claim the generator wanted to make but couldn't back with a fact, so it

@@ -1077,7 +1077,7 @@ impl ShownResume {
         Ok(Self {
             id: resume,
             lines,
-            changes: changes(connection, resume)?,
+            changes: model::fact_changes(connection, resume)?,
         })
     }
 
@@ -1092,47 +1092,6 @@ impl ShownResume {
     pub fn is_outdated(&self, line: &ShownLine) -> bool {
         line.cites.iter().any(|&fact| self.change(fact).is_some())
     }
-}
-
-/// How each fact the résumé was generated from differs from the version it
-/// was generated from, if it does. A merged fact counts as the one it was
-/// merged into.
-fn changes(connection: &Connection, resume: ResumeId) -> Result<Vec<(FactId, FactChange)>, Error> {
-    let versions: Vec<(FactId, bool, bool, bool)> = connection
-        .prepare_cached(
-            "WITH RECURSIVE chains(fact_id, root_id) AS (
-                 SELECT fact_id, fact_id FROM fact_versions WHERE generation_id = ?1
-                 UNION
-                 SELECT chains.fact_id, facts.merged_into
-                 FROM chains JOIN facts ON facts.id = chains.root_id
-                 WHERE facts.merged_into IS NOT NULL
-             )
-             SELECT roots.id, fact_versions.hidden, roots.hidden,
-                    fact_versions.text != roots.text
-             FROM fact_versions
-             JOIN chains ON chains.fact_id = fact_versions.fact_id
-             JOIN facts AS roots ON roots.id = chains.root_id
-                                AND roots.merged_into IS NULL AND roots.deleted_at IS NULL
-             WHERE fact_versions.generation_id = ?1
-             ORDER BY fact_versions.fact_id",
-        )?
-        .query_map([resume.0], |row| {
-            Ok((FactId(row.get(0)?), row.get(1)?, row.get(2)?, row.get(3)?))
-        })?
-        .collect::<Result<_, _>>()?;
-    let mut changes: Vec<(FactId, FactChange)> = Vec::new();
-    for (fact, was_hidden, hidden, reworded) in versions {
-        let change = match (was_hidden, hidden) {
-            (false, true) => FactChange::Hidden,
-            (true, false) => FactChange::Shown,
-            _ if reworded => FactChange::Reworded,
-            _ => continue,
-        };
-        if !changes.iter().any(|(changed, _)| *changed == fact) {
-            changes.push((fact, change));
-        }
-    }
-    Ok(changes)
 }
 
 /// Whether the change is to anything the view or its inspector shows.
@@ -1177,16 +1136,15 @@ mod tests {
     use gpui_kit::{TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::{ClaimId, FactId, Library, TailoredResume, UnsupportedReason};
+    use crate::database::{TemporaryDirectory, Write};
+    use crate::model::{ClaimId, FactId, Library, TailoredResume, UnsupportedReason, sample};
     use crate::workspace::parts::Source;
-    use crate::workspace::testing::{self, write_sample};
+    use crate::workspace::testing;
 
-    /// The queries read each job's versions, each version's lines and
-    /// changes, and what the inspector shows of each line, as
-    /// `Library::load` does.
-    fn assert_queries_match_the_library(connection: &Connection) -> Result<(), Error> {
-        let library = Library::load(connection)?;
+    /// The queries read back each job's versions, each version's lines and
+    /// changes, and what the inspector shows of each line, as `library` has
+    /// them.
+    fn assert_queries_match(connection: &Connection, library: &Library) -> Result<(), Error> {
         for job in &library.jobs {
             let versions = Versions::read(connection, job.id)?;
             assert_eq!(
@@ -1209,7 +1167,7 @@ mod tests {
                 assert_eq!(version.template.key, resume.template);
             }
             for resume in &job.resumes {
-                assert_resume_matches(connection, &library, resume)?;
+                assert_resume_matches(connection, library, resume)?;
             }
         }
         Ok(())
@@ -1294,12 +1252,6 @@ mod tests {
         Ok(())
     }
 
-    fn sample_writer() -> Result<Writer, Error> {
-        let mut writer = Writer::open_in_memory()?;
-        writer.execute(write_sample)?;
-        Ok(writer)
-    }
-
     fn fact(connection: &Connection, start: &str) -> Result<FactId, Error> {
         Ok(FactId(connection.query_row(
             "SELECT id FROM facts WHERE text LIKE ?1 || '%' ORDER BY id LIMIT 1",
@@ -1309,15 +1261,15 @@ mod tests {
     }
 
     #[test]
-    fn the_queries_read_the_sample_as_the_library_does() -> Result<(), Error> {
-        assert_queries_match_the_library(sample_writer()?.kron())
+    fn the_queries_read_back_what_the_sample_wrote() -> Result<(), Error> {
+        let (writer, library) = sample::written()?;
+        assert_queries_match(writer.kron(), &library)
     }
 
+    /// The commands, and the same changes made to the sample as written.
     #[test]
-    fn the_queries_follow_changes_to_facts_and_claims_as_the_library_does() -> Result<(), Error> {
-        let mut writer = sample_writer()?;
-        let migration = fact(writer.kron(), "Led the migration")?;
-        let linkedin = fact(writer.kron(), "Migrated 12 backend")?;
+    fn the_queries_follow_changes_to_facts_and_claims() -> Result<(), Error> {
+        let (mut writer, mut library) = sample::written()?;
         let latency = fact(writer.kron(), "Cut p99 latency")?;
         let property_tests = fact(writer.kron(), "Introduced property-based tests")?;
         let claim: ClaimId = ClaimId(writer.kron().query_row(
@@ -1326,17 +1278,35 @@ mod tests {
             [],
             |row| row.get(0),
         )?);
-        writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
-        writer.execute(|write| commands::add_claim_as_fact(write, claim))?;
+        let (added, _) = writer.execute(|write| commands::add_claim_as_fact(write, claim))?;
         writer.execute(|write| commands::set_hidden(write, latency, true))?;
-        assert_queries_match_the_library(writer.kron())
+
+        for fact in &mut library.facts {
+            if fact.id == latency {
+                fact.text = "Cut p99 latency by 80%.".into();
+                fact.review = None;
+                fact.hidden = true;
+            } else if fact.id == property_tests {
+                fact.hidden = false;
+            }
+        }
+        for each in library
+            .jobs
+            .iter_mut()
+            .flat_map(|job| &mut job.resumes)
+            .flat_map(|resume| &mut resume.unsupported_claims)
+            .filter(|each| each.id == claim)
+        {
+            each.added_as = added.first().copied();
+        }
+        assert_queries_match(writer.kron(), &library)
     }
 
     #[test]
     fn a_job_without_a_resume_has_no_versions() -> Result<(), Error> {
-        let writer = sample_writer()?;
+        let (writer, _) = sample::written()?;
         let job = JobId(writer.kron().query_row(
             "SELECT id FROM jobs WHERE company = 'Halcyon Cloud'",
             [],
@@ -1359,18 +1329,16 @@ mod tests {
 
     fn open<'a>(app: &'a mut TestAppContext, company: &str) -> View<'a> {
         let (database, directory) = testing::open_sample(app);
-        let library = database.read_with(app, |database, _| Library::load(database.connection()));
-        let library = match library {
-            Ok(library) => library,
-            Err(error) => panic!("{error}"),
-        };
-        let job = library
-            .jobs
-            .iter()
-            .find(|job| job.company == company)
-            .map(|job| job.id);
-        let Some(job) = job else {
-            panic!("no job at {company}");
+        let job = database.read_with(app, |database, _| {
+            database.connection().query_row(
+                "SELECT id FROM jobs WHERE company = ?1",
+                [company],
+                |row| row.get(0),
+            )
+        });
+        let job = match job {
+            Ok(job) => JobId(job),
+            Err(error) => panic!("no job at {company}: {error}"),
         };
         let previews = app.new(|cx| Previews::new(database.clone(), cx));
         let closed = Rc::new(RefCell::new(0));

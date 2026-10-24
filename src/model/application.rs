@@ -495,12 +495,7 @@ mod tests {
 
     #[test]
     fn the_applications_read_back_as_the_sample_wrote_them() -> Result<(), Error> {
-        let mut writer = crate::database::Writer::open_in_memory()?;
-        writer.execute(|write| {
-            crate::typeset::install_templates(write)?;
-            super::super::sample::write_library(write)
-        })?;
-        let library = super::super::Library::load(writer.kron())?;
+        let (writer, library) = super::super::sample::written()?;
         let applications = Application::read_all(writer.kron())?;
         assert_eq!(
             applications.iter().map(|each| each.job).collect::<Vec<_>>(),
@@ -510,11 +505,11 @@ mod tests {
         for (application, job) in applications.iter().zip(&library.jobs) {
             assert_eq!(application.title, job.title);
             assert_eq!(application.company, job.company);
-            assert_eq!(application.created_at, job.created_at);
+            assert_eq!(application.created_at.timestamp_millis(), job.created_at.timestamp_millis());
             let ids = |events: &[JobEvent]| events.iter().map(|event| event.id).collect::<Vec<_>>();
             assert_eq!(ids(&application.events), ids(&job.events));
             for (read, expected) in application.events.iter().zip(&job.events) {
-                assert_eq!(read.at, expected.at);
+                assert_eq!(read.at.timestamp_millis(), expected.at.timestamp_millis());
                 assert_eq!(read.kind, expected.kind);
                 assert_eq!(read.note, expected.note);
             }

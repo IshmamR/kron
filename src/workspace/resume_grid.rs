@@ -666,12 +666,11 @@ mod tests {
     use gpui_kit::{TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::{ClaimId, FactId, Library, commands};
-    use crate::workspace::testing::{self, write_sample};
+    use crate::database::{TemporaryDirectory, Write};
+    use crate::model::{FactId, Library, commands, sample};
+    use crate::workspace::testing;
 
-    fn assert_current_resumes_match_the_library(connection: &Connection) -> Result<(), Error> {
-        let library = Library::load(connection)?;
+    fn assert_current_resumes_match(connection: &Connection, library: &Library) -> Result<(), Error> {
         let current = current_resumes(connection)?;
         for job in &library.jobs {
             let expected = job.current_resume();
@@ -691,12 +690,6 @@ mod tests {
         Ok(())
     }
 
-    fn sample_writer() -> Result<Writer, Error> {
-        let mut writer = Writer::open_in_memory()?;
-        writer.execute(write_sample)?;
-        Ok(writer)
-    }
-
     fn fact(connection: &Connection, start: &str) -> Result<FactId, Error> {
         Ok(FactId(connection.query_row(
             "SELECT id FROM facts WHERE text LIKE ?1 || '%' ORDER BY id LIMIT 1",
@@ -706,32 +699,53 @@ mod tests {
     }
 
     #[test]
-    fn the_current_resumes_read_as_the_library_reads_them() -> Result<(), Error> {
-        assert_current_resumes_match_the_library(sample_writer()?.kron())
+    fn the_current_resumes_read_back_what_the_sample_wrote() -> Result<(), Error> {
+        let (writer, library) = sample::written()?;
+        assert_current_resumes_match(writer.kron(), &library)
     }
 
     #[test]
-    fn the_current_resumes_follow_changes_as_the_library_does() -> Result<(), Error> {
-        let mut writer = sample_writer()?;
+    fn the_current_resumes_follow_changes_to_facts() -> Result<(), Error> {
+        let (mut writer, mut library) = sample::written()?;
         let migration = fact(writer.kron(), "Led the migration")?;
         let linkedin = fact(writer.kron(), "Migrated 12 backend")?;
         let latency = fact(writer.kron(), "Cut p99 latency")?;
         let property_tests = fact(writer.kron(), "Introduced property-based tests")?;
-        let claim = ClaimId(writer.kron().query_row(
-            "SELECT id FROM unsupported_claims WHERE added_as IS NULL
-             AND reason != 'uses_hidden_fact' ORDER BY id LIMIT 1",
-            [],
-            |row| row.get(0),
-        )?);
+
+        // A merged fact is compared with the fact it was merged into.
         writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
-        assert_current_resumes_match_the_library(writer.kron())?;
+        for version in library
+            .jobs
+            .iter_mut()
+            .flat_map(|job| &mut job.resumes)
+            .flat_map(|resume| &mut resume.basis)
+            .filter(|version| version.fact == migration)
+        {
+            version.fact = linkedin;
+        }
+        assert_current_resumes_match(writer.kron(), &library)?;
+
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
-        writer.execute(|write| commands::add_claim_as_fact(write, claim))?;
-        assert_current_resumes_match_the_library(writer.kron())?;
+        for fact in &mut library.facts {
+            if fact.id == latency {
+                fact.text = "Cut p99 latency by 80%.".into();
+            } else if fact.id == property_tests {
+                fact.hidden = false;
+            }
+        }
+        assert_current_resumes_match(writer.kron(), &library)?;
+
         writer.execute(|write| commands::revert_fact(write, latency))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, true))?;
-        assert_current_resumes_match_the_library(writer.kron())
+        for fact in &mut library.facts {
+            if fact.id == latency {
+                fact.text = fact.extracted.clone();
+            } else if fact.id == property_tests {
+                fact.hidden = true;
+            }
+        }
+        assert_current_resumes_match(writer.kron(), &library)
     }
 
     // The grid in a window, driven by keys, with the thumbnails typeset.

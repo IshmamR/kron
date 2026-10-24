@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rusqlite::Connection;
 use uuid::Uuid;
 
-use super::{Block, EntryBlock, FactId, Line, LineId, ResumeId, Section, SectionKind};
+use super::{Block, EntryBlock, FactChange, FactId, Line, LineId, ResumeId, Section, SectionKind};
 use crate::database::Error;
 
 /// A line and its role in its block, like "title" or "bullet".
@@ -192,6 +192,47 @@ pub fn citations(
     Ok(citations)
 }
 
+/// How each fact the résumé was generated from differs from the version it
+/// was generated from, if it does. A merged fact counts as the one it was
+/// merged into.
+pub fn fact_changes(connection: &Connection, generation: ResumeId) -> Result<Vec<(FactId, FactChange)>, Error> {
+    let versions: Vec<(FactId, bool, bool, bool)> = connection
+        .prepare_cached(
+            "WITH RECURSIVE chains(fact_id, root_id) AS (
+                 SELECT fact_id, fact_id FROM fact_versions WHERE generation_id = ?1
+                 UNION
+                 SELECT chains.fact_id, facts.merged_into
+                 FROM chains JOIN facts ON facts.id = chains.root_id
+                 WHERE facts.merged_into IS NOT NULL
+             )
+             SELECT roots.id, fact_versions.hidden, roots.hidden,
+                    fact_versions.text != roots.text
+             FROM fact_versions
+             JOIN chains ON chains.fact_id = fact_versions.fact_id
+             JOIN facts AS roots ON roots.id = chains.root_id
+                                AND roots.merged_into IS NULL AND roots.deleted_at IS NULL
+             WHERE fact_versions.generation_id = ?1
+             ORDER BY fact_versions.fact_id",
+        )?
+        .query_map([generation.0], |row| {
+            Ok((FactId(row.get(0)?), row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut changes: Vec<(FactId, FactChange)> = Vec::new();
+    for (fact, was_hidden, hidden, reworded) in versions {
+        let change = match (was_hidden, hidden) {
+            (false, true) => FactChange::Hidden,
+            (true, false) => FactChange::Shown,
+            _ if reworded => FactChange::Reworded,
+            _ => continue,
+        };
+        if !changes.iter().any(|(changed, _)| *changed == fact) {
+            changes.push((fact, change));
+        }
+    }
+    Ok(changes)
+}
+
 fn first(lines: Vec<Line>) -> Option<Line> {
     lines.into_iter().next()
 }
@@ -199,23 +240,12 @@ fn first(lines: Vec<Line>) -> Option<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{Write, Writer};
     use crate::model::{FactId, Library, commands, sample};
     use crate::typeset::{self, resume_markup};
 
-    fn sample_writer() -> Result<Writer, Error> {
-        let mut writer = Writer::open_in_memory()?;
-        writer.execute(|write: &mut Write| {
-            typeset::install_templates(write)?;
-            sample::write_library(write)
-        })?;
-        Ok(writer)
-    }
-
-    /// Every résumé reads back with the markup and citations `Library::load`
-    /// gives it, so it typesets the same.
-    fn assert_resumes_match_the_library(connection: &Connection) -> Result<(), Error> {
-        let library = Library::load(connection)?;
+    /// Every résumé reads back with the markup and citations it was written
+    /// with, so it typesets the same.
+    fn assert_resumes_match(connection: &Connection, library: &Library) -> Result<(), Error> {
         let mut checked = 0;
         for resume in library.jobs.iter().flat_map(|job| &job.resumes) {
             let sections = Section::read_all(connection, resume.id)?;
@@ -240,31 +270,52 @@ mod tests {
     }
 
     #[test]
-    fn every_sample_resume_reads_back_as_the_library_reads_it() -> Result<(), Error> {
-        assert_resumes_match_the_library(sample_writer()?.kron())
+    fn every_sample_resume_reads_back_as_it_was_written() -> Result<(), Error> {
+        let (writer, library) = sample::written()?;
+        assert_resumes_match(writer.kron(), &library)
     }
 
     #[test]
-    fn citations_follow_merges_as_the_library_does() -> Result<(), Error> {
-        let mut writer = sample_writer()?;
-        let fact = |writer: &Writer, start: &str| -> Result<FactId, Error> {
-            Ok(FactId(writer.kron().query_row(
-                "SELECT id FROM facts WHERE text LIKE ?1 || '%'",
-                [start],
-                |row| row.get(0),
-            )?))
+    fn citations_follow_merges_to_the_kept_fact() -> Result<(), Error> {
+        let (mut writer, mut library) = sample::written()?;
+        let fact = |start: &str| -> Result<FactId, Error> {
+            library
+                .facts
+                .iter()
+                .find(|fact| fact.text.starts_with(start))
+                .map(|fact| fact.id)
+                .ok_or_else(|| Error::Misuse(format!("no sample fact starts with {start:?}")))
         };
-        let migration = fact(&writer, "Led the migration")?;
-        let linkedin = fact(&writer, "Migrated 12 backend")?;
-        let latency = fact(&writer, "Cut p99 latency")?;
+        let migration = fact("Led the migration")?;
+        let linkedin = fact("Migrated 12 backend")?;
+        let latency = fact("Cut p99 latency")?;
         writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
         writer.execute(|write| commands::merge_facts(write, latency, &[linkedin]))?;
-        assert_resumes_match_the_library(writer.kron())
+
+        let mut merged = 0;
+        for line in library
+            .jobs
+            .iter_mut()
+            .flat_map(|job| &mut job.resumes)
+            .flat_map(|resume| resume.lines_mut())
+        {
+            let mut cites: Vec<FactId> = Vec::with_capacity(line.cites.len());
+            for &cited in &line.cites {
+                let kept = if cited == migration || cited == linkedin { latency } else { cited };
+                merged += usize::from(kept != cited);
+                if !cites.contains(&kept) {
+                    cites.push(kept);
+                }
+            }
+            line.cites = cites;
+        }
+        assert!(merged > 0);
+        assert_resumes_match(writer.kron(), &library)
     }
 
     #[test]
     fn a_missing_resume_has_no_sections() -> Result<(), Error> {
-        let writer = sample_writer()?;
+        let (writer, _) = sample::written()?;
         let sections = Section::read_all(writer.kron(), ResumeId::new())?;
         assert!(sections.is_empty());
         Ok(())

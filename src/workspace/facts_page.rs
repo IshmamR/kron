@@ -1313,19 +1313,12 @@ mod tests {
     use super::*;
     use crate::database::schema::facts;
     use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::Library;
+    use crate::model::{Library, sample};
     use crate::workspace::testing::{self, write_sample};
 
-    fn sample_writer() -> Result<Writer, Error> {
-        let mut writer = Writer::open_in_memory()?;
-        writer.execute(write_sample)?;
-        Ok(writer)
-    }
-
-    /// The queries read what `Library::load` does, which they replace: the
-    /// facts, and each one's sources, uses and duplicates.
-    fn assert_queries_match_the_library(connection: &Connection) -> Result<(), Error> {
-        let library = Library::load(connection)?;
+    /// The queries read back the facts the sample wrote, and each one's
+    /// sources and uses.
+    fn assert_queries_match(connection: &Connection, library: &Library) -> Result<(), Error> {
         let mut list = FactList::new();
         list.load(connection)?;
         let listed: Vec<FactId> = list.all().iter().map(|fact| fact.id).collect();
@@ -1351,7 +1344,7 @@ mod tests {
             let expected_labels: Vec<String> = expected
                 .sources
                 .iter()
-                .map(|source| Source::from_library(&library, source).label)
+                .map(|source| Source::from_library(library, source).label)
                 .collect();
             assert_eq!(labels, expected_labels, "{}", fact.text);
 
@@ -1378,14 +1371,14 @@ mod tests {
     }
 
     #[test]
-    fn the_queries_read_the_sample_as_the_library_does() -> Result<(), Error> {
-        assert_queries_match_the_library(sample_writer()?.kron())
+    fn the_queries_read_back_what_the_sample_wrote() -> Result<(), Error> {
+        let (writer, library) = sample::written()?;
+        assert_queries_match(writer.kron(), &library)
     }
 
     #[test]
-    fn the_queries_follow_merges_and_edits_as_the_library_does() -> Result<(), Error> {
-        let mut writer = sample_writer()?;
-        let library = Library::load(writer.kron())?;
+    fn the_queries_follow_a_chain_of_merges() -> Result<(), Error> {
+        let (mut writer, library) = sample::written()?;
         let text = |start: &str| {
             library
                 .facts
@@ -1405,12 +1398,22 @@ mod tests {
         writer.execute(|write| commands::merge_facts(write, migration, &[linkedin]))?;
         writer.execute(|write| commands::merge_facts(write, latency, &[migration]))?;
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
-        assert_queries_match_the_library(writer.kron())?;
 
         let mut list = FactList::new();
         list.load(writer.kron())?;
+        assert_eq!(list.all().len(), library.facts.len() - 2);
+        assert!(list.fact(migration).is_none() && list.fact(linkedin).is_none());
         let detail = Detail::read(writer.kron(), latency, list.all())?;
         assert_eq!(detail.sources.len(), 3, "its own and both merged into it");
+        // Every line that cited any of the three cites it now, and was
+        // generated before its new wording.
+        let uses: BTreeSet<LineId> = detail.uses.iter().map(|used| used.line).collect();
+        let expected: BTreeSet<LineId> = [migration, linkedin, latency]
+            .into_iter()
+            .flat_map(|fact| library.fact_uses(fact))
+            .map(|(_, line)| line.id)
+            .collect();
+        assert_eq!(uses, expected);
         assert!(detail.uses.iter().all(|used| used.outdated));
         Ok(())
     }

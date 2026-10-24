@@ -38,8 +38,6 @@ const DEFAULT_DOCUMENT: &str = "cv";
 const DOCUMENT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
 /// The paper the bundled templates set.
 const PAPER: &str = "letter";
-/// The custom section the sample's `Other` entries go in.
-const CUSTOM_SECTION: &str = "Other";
 
 pub fn library() -> Result<Library, String> {
     let data: SampleData =
@@ -83,6 +81,12 @@ pub fn write_if_empty(write: &mut Write) -> Result<(), database::Error> {
 /// installed (`typeset::install_templates`).
 pub fn write_library(write: &mut Write) -> Result<(), database::Error> {
     let library = library().map_err(database::Error::Misuse)?;
+    write_this(write, &library)
+}
+
+/// Writes `library`, as the sample's, keeping its ids: tests check what the
+/// database reads back against it.
+pub fn write_this(write: &mut Write, library: &Library) -> Result<(), database::Error> {
     for document in &library.documents {
         write_document(write, document)?;
     }
@@ -107,6 +111,19 @@ pub fn write_library(write: &mut Write) -> Result<(), database::Error> {
         write_job(write, job, position)?;
     }
     Ok(())
+}
+
+/// An in-memory database with the bundled templates and the sample, and the
+/// sample as written, for tests to check what they read back against.
+#[cfg(test)]
+pub fn written() -> Result<(database::Writer, Library), database::Error> {
+    let library = library().map_err(database::Error::Misuse)?;
+    let mut writer = database::Writer::open_in_memory()?;
+    writer.execute(|write| {
+        crate::typeset::install_templates(write)?;
+        write_this(write, &library)
+    })?;
+    Ok((writer, library))
 }
 
 struct Loader {
