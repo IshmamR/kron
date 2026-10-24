@@ -7,7 +7,7 @@ use gpui_kit::{
 
 use super::ShowFact;
 use super::parts::{
-    caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
+    Source, caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
 };
 use crate::database::Database;
 use crate::model::commands;
@@ -251,7 +251,7 @@ fn fact_card(
             h_flex()
                 .justify_between()
                 .child(caption(fact_kind_label(fact.kind), cx))
-                .child(fact_status(fact, cx)),
+                .child(fact_status(fact.review.is_some(), fact.hidden, cx)),
         )
         .child(div().text_sm().child(fact.text.clone()))
         .when_some(
@@ -270,7 +270,7 @@ fn fact_card(
         .children(
             fact.sources
                 .iter()
-                .map(|source| source_excerpt(library, source, cx)),
+                .map(|source| source_excerpt(&Source::from_library(library, source), cx)),
         )
         .child(h_flex().child(show_in_facts_button(
             SharedString::from(format!("show-fact-{}", fact_id.0)),

@@ -33,3 +33,7 @@ x11rb = "0.13"
 # own code stays in debug; first builds get slower, `cargo run` doesn't.
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+# Headless windows for UI tests: simulated keys, clicks and actions.
+gpui-kit = { version = "0.7.1", features = ["test-support"] }

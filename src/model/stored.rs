@@ -2,6 +2,8 @@
 // schema's CHECKs list them. One table both ways, so a write and a read can't
 // disagree.
 
+use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
+
 use super::{EntryKind, FactKind, Inclusion, InterviewKind, ReviewReason, SectionKind};
 
 macro_rules! stored {
@@ -18,6 +20,16 @@ macro_rules! stored {
                     $($text => Some(Self::$variant),)*
                     _ => None,
                 }
+            }
+        }
+
+        /// Fails on text the column's CHECK doesn't allow.
+        impl FromSql for $type {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                let text = value.as_str()?;
+                Self::from_stored(text).ok_or_else(|| {
+                    FromSqlError::Other(format!("{}: {text:?}", stringify!($type)).into())
+                })
             }
         }
     };

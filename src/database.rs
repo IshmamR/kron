@@ -35,6 +35,13 @@ pub fn open(cx: &mut App) -> Result<Entity<Database>, Error> {
     Ok(cx.new(|cx| Database::new(opened, cx)))
 }
 
+/// `open` in a directory of the test's own.
+#[cfg(test)]
+pub fn open_in(directory: &TemporaryDirectory, cx: &mut App) -> Result<Entity<Database>, Error> {
+    let opened = Opened::open(&directory.0)?;
+    Ok(cx.new(|cx| Database::new(opened, cx)))
+}
+
 /// The connections, and the only state shared between views. It knows
 /// nothing about résumés: the domain modules own their tables and write them
 /// through commands, and each view runs its own queries on `connection`.
@@ -98,6 +105,14 @@ impl Database {
     /// changes through `Changed`, and the writer logs a failure.
     pub fn queue(&self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
         drop(self.writer.submit(command));
+    }
+
+    /// Waits for the commands queued so far to commit. Their `Changed` events
+    /// are sent by then, for the test to deliver.
+    #[cfg(test)]
+    pub fn flush(&self) {
+        let flushed = futures::executor::block_on(self.writer.submit(|_| Ok(())));
+        assert!(matches!(flushed, Ok(Ok(()))), "the writer has stopped");
     }
 }
 
@@ -306,6 +321,26 @@ fn data_directory() -> Result<PathBuf, Error> {
         .ok_or(Error::NoDataDirectory)
 }
 
+/// A directory of its own, removed when dropped.
+#[cfg(test)]
+pub struct TemporaryDirectory(PathBuf);
+
+#[cfg(test)]
+impl TemporaryDirectory {
+    pub fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("kron-test-{}", Uuid::now_v7())))
+    }
+}
+
+#[cfg(test)]
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0) {
+            eprintln!("couldn't remove {}: {error}", self.0.display());
+        }
+    }
+}
+
 fn open_connection(path: &Path, flags: OpenFlags) -> Result<Connection, Error> {
     let connection = Connection::open_with_flags(path, flags)?;
     if !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
@@ -370,23 +405,6 @@ mod tests {
     use super::*;
     use schema::{Documents, Facts, Jobs, documents};
 
-    /// A directory of its own, removed when dropped.
-    struct TemporaryDirectory(PathBuf);
-
-    impl TemporaryDirectory {
-        fn new() -> Self {
-            Self(std::env::temp_dir().join(format!("kron-test-{}", Uuid::now_v7())))
-        }
-    }
-
-    impl Drop for TemporaryDirectory {
-        fn drop(&mut self) {
-            if let Err(error) = std::fs::remove_dir_all(&self.0) {
-                eprintln!("couldn't remove {}: {error}", self.0.display());
-            }
-        }
-    }
-
     fn add_note(write: &mut Write, id: Uuid) -> Result<(), Error> {
         let now = write.now();
         write.insert(Documents, id, &[documents::ADDED_AT.value(&now)])
@@ -440,6 +458,28 @@ mod tests {
             Err(rusqlite::Error::SqliteFailure(error, _))
                 if error.code == rusqlite::ErrorCode::ReadOnly
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_database_from_an_older_version_migrates_and_keeps_its_rows() -> Result<(), Error> {
+        let mut connection = Connection::open_in_memory()?;
+        migrate(&mut connection, "kron.sqlite", &KRON_MIGRATIONS[..1])?;
+        connection.execute(
+            "INSERT INTO documents (id, added_at) VALUES (?1, 0)",
+            [Uuid::now_v7()],
+        )?;
+        migrate(&mut connection, "kron.sqlite", KRON_MIGRATIONS)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        assert_eq!(version as usize, KRON_MIGRATIONS.len());
+        assert_eq!(count(&connection, "documents")?, 1);
+        let indexes: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'index'
+             AND name IN ('facts_by_merged_into', 'line_citations_by_fact')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(indexes, 2);
         Ok(())
     }
 

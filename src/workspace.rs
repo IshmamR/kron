@@ -133,7 +133,7 @@ impl Workspace {
             JobView::new(library.clone(), database.clone(), previews, window, cx)
         });
         let facts_page =
-            cx.new(|cx| FactsPage::new(library.clone(), database.clone(), window, cx));
+            cx.new(|cx| FactsPage::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
         reload(&library, &database, cx);
 

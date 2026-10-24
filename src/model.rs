@@ -86,26 +86,6 @@ impl Library {
             .collect()
     }
 
-    /// Facts that probably say the same thing as `id`: most of the shorter
-    /// one's words appear in the other.
-    pub fn possible_duplicates(&self, id: FactId) -> Vec<FactId> {
-        let Some(fact) = self.fact(id) else {
-            return Vec::new();
-        };
-        let words = significant_words(&fact.text);
-        self.facts
-            .iter()
-            .filter(|other| other.id != id && other.kind == fact.kind)
-            .filter(|other| {
-                let other_words = significant_words(&other.text);
-                let shared = words.intersection(&other_words).count();
-                let shorter = words.len().min(other_words.len());
-                shorter > 0 && shared as f32 / shorter as f32 >= DUPLICATE_OVERLAP
-            })
-            .map(|other| other.id)
-            .collect()
-    }
-
     /// How the fact differs from the version the résumé was generated from,
     /// if it does.
     pub fn fact_change(&self, resume: &TailoredResume, id: FactId) -> Option<FactChange> {
@@ -529,6 +509,18 @@ pub enum UnsupportedReason {
     UsesHiddenFact(FactId),
 }
 
+/// Tells whether another fact probably says the same thing as `text`: most
+/// of the shorter one's words appear in the other.
+pub fn possible_duplicate(text: &str) -> impl Fn(&str) -> bool {
+    let words = significant_words(text);
+    move |other| {
+        let other_words = significant_words(other);
+        let shared = words.intersection(&other_words).count();
+        let shorter = words.len().min(other_words.len());
+        shorter > 0 && shared as f32 / shorter as f32 >= DUPLICATE_OVERLAP
+    }
+}
+
 fn significant_words(text: &str) -> HashSet<String> {
     const COMMON: [&str; 8] = ["the", "and", "for", "from", "with", "that", "into", "their"];
     text.split(|character: char| !character.is_alphanumeric())
@@ -551,9 +543,9 @@ mod tests {
         }
     }
 
-    fn fact_with_text(library: &Library, start: &str) -> FactId {
+    fn fact_text<'a>(library: &'a Library, start: &str) -> &'a str {
         match library.facts.iter().find(|fact| fact.text.starts_with(start)) {
-            Some(fact) => fact.id,
+            Some(fact) => &fact.text,
             None => panic!("no fact starts with {start:?}"),
         }
     }
@@ -561,10 +553,12 @@ mod tests {
     #[test]
     fn the_sample_linkedin_bullet_is_a_possible_duplicate() {
         let library = sample();
-        let migration = fact_with_text(&library, "Led the migration");
-        let linkedin = fact_with_text(&library, "Migrated 12 backend");
-        assert_eq!(library.possible_duplicates(migration), vec![linkedin]);
-        let latency = fact_with_text(&library, "Cut p99 latency");
-        assert!(library.possible_duplicates(latency).is_empty());
+        let migration = fact_text(&library, "Led the migration");
+        let linkedin = fact_text(&library, "Migrated 12 backend");
+        let latency = fact_text(&library, "Cut p99 latency");
+        assert!(possible_duplicate(migration)(linkedin));
+        assert!(possible_duplicate(linkedin)(migration));
+        assert!(!possible_duplicate(latency)(linkedin));
+        assert!(!possible_duplicate(latency)(migration));
     }
 }

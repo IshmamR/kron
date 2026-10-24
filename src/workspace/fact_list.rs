@@ -1,12 +1,16 @@
-use chrono::Local;
+use std::collections::HashMap;
+
+use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, IndexPath, Sizable, h_flex};
 use gpui_kit::{
-    App, Context, Entity, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
+    App, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
 };
+use rusqlite::Connection;
 
 use super::parts::fact_kind_label;
-use crate::model::{DocumentKind, EntryId, Fact, FactId, FactKind, Library};
+use crate::database::Error;
+use crate::model::{EntryId, FactId, FactKind, Review, ReviewReason};
 
 /// Which facts the list shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,7 +32,7 @@ impl Filter {
         }
     }
 
-    pub fn includes(self, fact: &Fact) -> bool {
+    pub fn includes(self, fact: &ListedFact) -> bool {
         match self {
             Filter::All => true,
             Filter::NeedsReview => fact.review.is_some(),
@@ -37,11 +41,28 @@ impl Filter {
     }
 }
 
+/// A fact as the list shows it.
+#[derive(Clone, Debug)]
+pub struct ListedFact {
+    pub id: FactId,
+    pub kind: FactKind,
+    pub text: String,
+    /// The role, project or degree it belongs to, unless that was deleted.
+    pub entry: Option<EntryId>,
+    pub hidden: bool,
+    pub review: Option<Review>,
+    /// When the note it was first found in was written, if it came from one.
+    noted_at: Option<DateTime<Utc>>,
+}
+
 /// The facts page's list: facts grouped by the role, project or degree they
 /// belong to, with the profile first and loose facts last: from notes, then
 /// from documents.
 pub struct FactList {
-    library: Entity<Library>,
+    /// Every fact not merged into another, oldest first.
+    facts: Vec<ListedFact>,
+    /// Oldest first, which is the order of their groups.
+    entries: Vec<EntryId>,
     filter: Filter,
     /// Lowercased search text.
     query: String,
@@ -92,8 +113,7 @@ impl ListDelegate for FactList {
     ) -> Option<ListItem> {
         let id = self.fact_at(index)?;
         let marked = self.marked.contains(&id);
-        let library = self.library.read(cx);
-        let fact = library.fact(id)?;
+        let fact = self.fact(id)?;
         let theme = cx.theme();
         let hidden = fact.hidden;
 
@@ -215,39 +235,63 @@ impl ListDelegate for FactList {
 }
 
 impl FactList {
-    pub fn new(library: Entity<Library>, cx: &App) -> Self {
-        let mut list = Self {
-            library,
+    pub fn new() -> Self {
+        Self {
+            facts: Vec::new(),
+            entries: Vec::new(),
             filter: Filter::default(),
             query: String::new(),
             groups: Vec::new(),
             selected: None,
             previously_selected: None,
             marked: Vec::new(),
-        };
-        list.rebuild(cx);
-        list
+        }
     }
 
-    /// Regroups the facts, after the library, filter or search changed.
-    pub fn rebuild(&mut self, cx: &App) {
-        let library = self.library.read(cx);
-        self.groups = groups(library, self.filter, &self.query);
-        self.marked.retain(|&id| library.fact(id).is_some());
+    /// Reads the facts again, after the database changed.
+    pub fn load(&mut self, connection: &Connection) -> Result<(), Error> {
+        self.facts = listed_facts(connection)?;
+        self.entries = connection
+            .prepare_cached("SELECT id FROM entries WHERE deleted_at IS NULL ORDER BY id")?
+            .query_map([], |row| Ok(EntryId(row.get(0)?)))?
+            .collect::<Result<_, _>>()?;
+        let facts = &self.facts;
+        self.marked
+            .retain(|&id| facts.iter().any(|fact| fact.id == id));
+        self.regroup();
+        Ok(())
+    }
+
+    /// Every fact, listed or not.
+    pub fn all(&self) -> &[ListedFact] {
+        &self.facts
+    }
+
+    pub fn fact(&self, id: FactId) -> Option<&ListedFact> {
+        self.facts.iter().find(|fact| fact.id == id)
+    }
+
+    /// Shows the fact with new text before the database has it, so an edit
+    /// doesn't flash the old text.
+    pub fn set_text(&mut self, id: FactId, text: &str) {
+        if let Some(fact) = self.facts.iter_mut().find(|fact| fact.id == id) {
+            fact.text = text.to_string();
+            self.regroup();
+        }
     }
 
     pub fn filter(&self) -> Filter {
         self.filter
     }
 
-    pub fn set_filter(&mut self, filter: Filter, cx: &App) {
+    pub fn set_filter(&mut self, filter: Filter) {
         self.filter = filter;
-        self.rebuild(cx);
+        self.regroup();
     }
 
-    pub fn set_query(&mut self, query: &str, cx: &App) {
+    pub fn set_query(&mut self, query: &str) {
         self.query = query.trim().to_lowercase();
-        self.rebuild(cx);
+        self.regroup();
     }
 
     pub fn fact_at(&self, index: IndexPath) -> Option<FactId> {
@@ -280,6 +324,72 @@ impl FactList {
     pub fn set_marked(&mut self, marked: Vec<FactId>) {
         self.marked = marked;
     }
+
+    /// "Senior Software Engineer, Northwind Logistics", from the entry's title
+    /// and organization facts.
+    pub fn entry_label(&self, entry: EntryId) -> Option<String> {
+        let mut naming = EntryNaming::default();
+        for fact in self.facts.iter().filter(|fact| fact.entry == Some(entry)) {
+            naming.add(fact);
+        }
+        naming.label()
+    }
+
+    /// Each group's title and its listed facts, top to bottom.
+    #[cfg(test)]
+    pub fn groups(&self) -> impl Iterator<Item = (&SharedString, &[FactId])> {
+        self.groups
+            .iter()
+            .map(|group| (&group.title, group.facts.as_slice()))
+    }
+
+    /// Groups the facts again, after they, the filter or the search changed:
+    /// the profile, each entry in order, then loose facts from notes and the
+    /// rest.
+    fn regroup(&mut self) {
+        let mut namings: HashMap<EntryId, EntryNaming> = HashMap::new();
+        for fact in &self.facts {
+            if let Some(entry) = fact.entry {
+                namings.entry(entry).or_default().add(fact);
+            }
+        }
+        let mut groups = vec![Group::new("Profile")];
+        let mut entry_groups = HashMap::new();
+        for &entry in &self.entries {
+            entry_groups.insert(entry, groups.len());
+            let title = namings
+                .get(&entry)
+                .map_or_else(|| "Untitled".to_string(), EntryNaming::title);
+            groups.push(Group::new(title));
+        }
+        let notes = groups.len();
+        groups.push(Group::new("Your notes"));
+        let other = groups.len();
+        groups.push(Group::new("Other"));
+
+        for fact in &self.facts {
+            let listed = self.filter.includes(fact)
+                && (self.query.is_empty() || fact.text.to_lowercase().contains(&self.query));
+            if !listed {
+                continue;
+            }
+            let profile = matches!(
+                fact.kind,
+                FactKind::Name | FactKind::Contact | FactKind::Summary | FactKind::Skill
+            );
+            let group = match fact.entry.and_then(|entry| entry_groups.get(&entry)) {
+                Some(&group) => group,
+                None if profile => 0,
+                None if fact.noted_at.is_some() => notes,
+                None => other,
+            };
+            groups[group].facts.push(fact.id);
+        }
+        // An empty group would still be a section to the list, which then
+        // takes its first row for the first fact.
+        groups.retain(|group| !group.facts.is_empty());
+        self.groups = groups;
+    }
 }
 
 struct Group {
@@ -287,71 +397,121 @@ struct Group {
     facts: Vec<FactId>,
 }
 
-fn groups(library: &Library, filter: Filter, query: &str) -> Vec<Group> {
-    let listed = |fact: &&Fact| {
-        filter.includes(fact) && (query.is_empty() || fact.text.to_lowercase().contains(query))
-    };
-    let entry_of = |fact: &Fact| fact.entry.filter(|&entry| library.entry(entry).is_some());
-    let collect = |belongs: &dyn Fn(&Fact) -> bool| -> Vec<FactId> {
-        library
-            .facts
-            .iter()
-            .filter(listed)
-            .filter(|fact| belongs(fact))
-            .map(|fact| fact.id)
-            .collect()
-    };
-    let is_profile = |fact: &Fact| {
-        matches!(
-            fact.kind,
-            FactKind::Name | FactKind::Contact | FactKind::Summary | FactKind::Skill
-        )
-    };
-
-    let mut groups = vec![Group {
-        title: "Profile".into(),
-        facts: collect(&|fact| entry_of(fact).is_none() && is_profile(fact)),
-    }];
-    for entry in &library.entries {
-        groups.push(Group {
-            title: entry_title(library, entry.id).into(),
-            facts: collect(&|fact| entry_of(fact) == Some(entry.id)),
-        });
+impl Group {
+    fn new(title: impl Into<SharedString>) -> Self {
+        Self {
+            title: title.into(),
+            facts: Vec::new(),
+        }
     }
-    let from_note = |fact: &Fact| {
-        fact.sources
-            .first()
-            .and_then(|source| library.document(source.document))
-            .is_some_and(|document| document.kind == DocumentKind::Note)
-    };
-    let loose = |fact: &Fact| entry_of(fact).is_none() && !is_profile(fact);
-    groups.push(Group {
-        title: "Your notes".into(),
-        facts: collect(&|fact| loose(fact) && from_note(fact)),
-    });
-    groups.push(Group {
-        title: "Other".into(),
-        facts: collect(&|fact| loose(fact) && !from_note(fact)),
-    });
-    groups
 }
 
-/// The entry's title and organization, or, for facts written together in a
-/// note, where they were written.
-fn entry_title(library: &Library, entry: EntryId) -> String {
-    if let Some(label) = library.entry_label(entry) {
-        return label;
+/// What an entry is called, from its facts, oldest first.
+#[derive(Default)]
+struct EntryNaming<'a> {
+    title: Option<&'a str>,
+    skill_group: Option<&'a str>,
+    organization: Option<&'a str>,
+    /// When its first fact's note was written, if it came from one.
+    noted_at: Option<Option<DateTime<Utc>>>,
+}
+
+impl<'a> EntryNaming<'a> {
+    fn add(&mut self, fact: &'a ListedFact) {
+        let text = Some(fact.text.as_str());
+        match fact.kind {
+            FactKind::Title => self.title = self.title.or(text),
+            FactKind::SkillGroup => self.skill_group = self.skill_group.or(text),
+            FactKind::Organization => self.organization = self.organization.or(text),
+            _ => {}
+        }
+        self.noted_at.get_or_insert(fact.noted_at);
     }
-    let note_date = library
-        .facts
-        .iter()
-        .find(|fact| fact.entry == Some(entry))
-        .and_then(|fact| fact.sources.first())
-        .and_then(|source| library.document(source.document))
-        .filter(|document| document.kind == DocumentKind::Note)
-        .map(|document| document.added_at.with_timezone(&Local).format("%b %-d"));
-    match note_date {
-        Some(date) => format!("Your note, {date}"),
-        None => "Untitled".into(),
+
+    fn label(&self) -> Option<String> {
+        match (self.title.or(self.skill_group), self.organization) {
+            (Some(title), Some(organization)) => Some(format!("{title}, {organization}")),
+            (Some(label), None) | (None, Some(label)) => Some(label.to_string()),
+            (None, None) => None,
+        }
     }
+
+    /// The label, or, for facts written together in a note, when they were
+    /// written.
+    fn title(&self) -> String {
+        if let Some(label) = self.label() {
+            return label;
+        }
+        match self.noted_at.flatten() {
+            Some(noted_at) => format!(
+                "Your note, {}",
+                noted_at.with_timezone(&Local).format("%b %-d")
+            ),
+            None => "Untitled".into(),
+        }
+    }
+}
+
+/// Every fact not merged into another, oldest first. A merged fact's sources
+/// count for the fact at the end of its chain of merges.
+fn listed_facts(connection: &Connection) -> Result<Vec<ListedFact>, Error> {
+    let mut statement = connection.prepare_cached(
+        "WITH RECURSIVE
+             -- Each merged fact and the fact at the end of its chain of merges:
+             -- up from the few merged facts, not down from every fact.
+             chains(fact_id, root_id) AS (
+                 SELECT id, merged_into FROM facts WHERE merged_into IS NOT NULL
+                 UNION
+                 SELECT chains.fact_id, facts.merged_into
+                 FROM chains JOIN facts ON facts.id = chains.root_id
+                 WHERE facts.merged_into IS NOT NULL
+             ),
+             merged(fact_id, root_id) AS (
+                 SELECT chains.fact_id, chains.root_id
+                 FROM chains JOIN facts ON facts.id = chains.root_id
+                 WHERE facts.merged_into IS NULL
+             ),
+             -- min() makes the bare document_id the first source's.
+             first_sources(root_id, document_id, source_id) AS (
+                 SELECT coalesce(merged.root_id, fact_sources.fact_id), fact_sources.document_id,
+                        min(fact_sources.id)
+                 FROM fact_sources LEFT JOIN merged ON merged.fact_id = fact_sources.fact_id
+                 WHERE fact_sources.deleted_at IS NULL
+                 GROUP BY 1
+             )
+         SELECT facts.id, facts.kind, facts.text, entries.id, facts.hidden, facts.review,
+                facts.review_note,
+                CASE WHEN documents.file_name IS NULL AND documents.deleted_at IS NULL
+                     THEN documents.added_at END
+         FROM facts
+         LEFT JOIN entries ON entries.id = facts.entry_id AND entries.deleted_at IS NULL
+         LEFT JOIN first_sources ON first_sources.root_id = facts.id
+         LEFT JOIN documents ON documents.id = first_sources.document_id
+         WHERE facts.merged_into IS NULL AND facts.deleted_at IS NULL
+         ORDER BY facts.id",
+    )?;
+    let facts = statement
+        .query_map([], |row| {
+            Ok(ListedFact {
+                id: FactId(row.get(0)?),
+                kind: row.get(1)?,
+                text: row.get(2)?,
+                entry: row.get::<_, Option<_>>(3)?.map(EntryId),
+                hidden: row.get(4)?,
+                review: row
+                    .get::<_, Option<ReviewReason>>(5)?
+                    .map(|reason| -> rusqlite::Result<Review> {
+                        Ok(Review {
+                            reason,
+                            note: row.get(6)?,
+                        })
+                    })
+                    .transpose()?,
+                noted_at: row
+                    .get::<_, Option<i64>>(7)?
+                    .and_then(DateTime::from_timestamp_millis),
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(facts)
 }

@@ -2,14 +2,14 @@
 
 use std::ops::Range;
 
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::{
     App, Div, FontWeight, HighlightStyle, Hsla, IntoElement, SharedString, StyledText, div,
     prelude::*, px,
 };
 
-use crate::model::{DocumentKind, Fact, FactKind, FactSource, Library};
+use crate::model::{DocumentKind, FactKind, FactSource, Library};
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
@@ -66,11 +66,11 @@ pub fn fact_kind_label(kind: FactKind) -> &'static str {
 /// Whether the fact needs review and whether it's hidden, each as a coloured
 /// dot and plain text: coloured text, yellow especially, is hard to read on a
 /// light background. Nothing for a fact that's fine as it is.
-pub fn fact_status(fact: &Fact, cx: &App) -> impl IntoElement {
+pub fn fact_status(needs_review: bool, hidden: bool, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
     let states = [
-        fact.review.is_some().then_some(("Needs review", theme.warning)),
-        fact.hidden.then_some(("Hidden", theme.muted_foreground)),
+        needs_review.then_some(("Needs review", theme.warning)),
+        hidden.then_some(("Hidden", theme.muted_foreground)),
     ];
     h_flex()
         .flex_none()
@@ -85,30 +85,60 @@ pub fn fact_status(fact: &Fact, cx: &App) -> impl IntoElement {
         }))
 }
 
-/// "From alex_rahman_cv.pdf", or "From your note, Oct 9".
-pub fn source_label(library: &Library, source: &FactSource) -> String {
-    match library.document(source.document) {
-        Some(document) => match &document.kind {
-            DocumentKind::File { file_name } => format!("From {file_name}"),
-            DocumentKind::Note => format!(
-                "From your note, {}",
-                document.added_at.with_timezone(&Local).format("%b %-d")
-            ),
-        },
-        None => "From a deleted document".into(),
+/// Where a fact was found, as shown: the document's label, and the source
+/// lines around it unless the document is gone.
+pub struct Source {
+    pub label: String,
+    /// The lines, and where the fact falls within them.
+    pub context: Option<(String, Range<usize>)>,
+}
+
+impl Source {
+    /// `document` is the file's name, if it's a file, and when it was added;
+    /// `None` once the document is deleted.
+    pub fn new(
+        document: Option<(Option<&str>, DateTime<Utc>)>,
+        text: Option<&str>,
+        span: &Range<usize>,
+    ) -> Self {
+        Self {
+            label: match document {
+                Some((Some(file_name), _)) => format!("From {file_name}"),
+                Some((None, added_at)) => format!(
+                    "From your note, {}",
+                    added_at.with_timezone(&Local).format("%b %-d")
+                ),
+                None => "From a deleted document".into(),
+            },
+            context: document
+                .and(text)
+                .and_then(|text| source_context(text, span)),
+        }
+    }
+
+    pub fn from_library(library: &Library, source: &FactSource) -> Self {
+        let document = library.document(source.document);
+        Self::new(
+            document.map(|document| {
+                let file_name = match &document.kind {
+                    DocumentKind::File { file_name } => Some(file_name.as_str()),
+                    DocumentKind::Note => None,
+                };
+                (file_name, document.added_at)
+            }),
+            document.map(|document| document.text.as_str()),
+            &source.span,
+        )
     }
 }
 
 /// Where a fact was found, with the surrounding lines for context.
-pub fn source_excerpt(library: &Library, source: &FactSource, cx: &App) -> impl IntoElement {
+pub fn source_excerpt(source: &Source, cx: &App) -> impl IntoElement + use<> {
     let theme = cx.theme();
-    let context = library
-        .document(source.document)
-        .and_then(|document| source_context(&document.text, &source.span));
     v_flex()
         .gap_1()
-        .child(caption(source_label(library, source), cx))
-        .when_some(context, |this, (text, highlight)| {
+        .child(caption(source.label.clone(), cx))
+        .when_some(source.context.clone(), |this, (text, highlight)| {
             this.child(
                 div()
                     .p_2()

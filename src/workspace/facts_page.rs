@@ -11,15 +11,21 @@ use gpui_kit::{
     Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyBinding, Keystroke, Pixels, ScrollStrategy, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
+use chrono::DateTime;
+use rusqlite::{Connection, OptionalExtension};
 
 use super::OpenLine;
-use super::fact_list::{FactList, Filter};
+use super::fact_list::{FactList, Filter, ListedFact};
 use super::parts::{
-    caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt, source_label,
+    Source, caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
 };
-use crate::database::Database;
+use crate::database::schema::{
+    Blocks, Documents, Entries, FactSources, FactVersions, Facts, Generations, Jobs, LineCitations,
+    Lines, Sections,
+};
+use crate::database::{Changed, Database, Error};
 use crate::model::commands::{self, Merge};
-use crate::model::{Fact, FactId, Library};
+use crate::model::{FactId, JobId, LineId, possible_duplicate};
 
 const KEY_CONTEXT: &str = "FactsPage";
 /// Keys meant for the list itself, so they don't fire while typing.
@@ -84,15 +90,19 @@ pub fn init(cx: &mut App) {
 /// Everything the app knows about the user, to review, correct, hide, merge
 /// and add to.
 pub struct FactsPage {
-    library: Entity<Library>,
     database: Entity<Database>,
     list: Entity<ListState<FactList>>,
     search: Entity<InputState>,
     /// The list's width.
     layout: Entity<ResizableState>,
     selected: Option<FactId>,
+    /// What's shown of the selected fact beyond the list's row. Read when
+    /// first shown, and again after the database changes.
+    detail: Option<Detail>,
+    /// What's shown of the facts marked to merge, read the same way.
+    merging: Option<Merging>,
     /// A fact to select once the list has it: one just added, which the
-    /// library has once it's reloaded after the write.
+    /// list has once it's read again after the write.
     select_when_listed: Option<FactId>,
     adding: bool,
     /// The wording picked to keep when merging.
@@ -110,16 +120,28 @@ pub struct FactsPage {
 impl Render for FactsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_fact_editor(window, cx);
+        let marked = self.marked(cx);
+        if !self.adding && marked.len() > 1 {
+            self.read_merging(marked, cx);
+        } else if !self.adding {
+            self.read_detail(cx);
+        }
         let theme = cx.theme();
 
         let detail = if self.adding {
             self.render_add(cx).into_any_element()
-        } else if self.marked(cx).len() > 1 {
-            self.render_merge(cx)
+        } else if let Some(merging) = &self.merging
+            && merging.facts == self.marked(cx)
+        {
+            self.render_merge(merging, cx)
         } else {
-            match self.selected.and_then(|id| self.library.read(cx).fact(id)) {
-                Some(fact) => self.render_fact(fact, cx),
-                None => div()
+            let list = self.list.read(cx).delegate();
+            let fact = self.selected.and_then(|id| list.fact(id));
+            match (fact, &self.detail) {
+                (Some(fact), Some(detail)) if detail.fact == fact.id => {
+                    self.render_fact(fact, detail, cx)
+                }
+                _ => div()
                     .size_full()
                     .flex()
                     .items_center()
@@ -201,13 +223,12 @@ impl Focusable for FactsPage {
 }
 
 impl FactsPage {
-    pub fn new(
-        library: Entity<Library>,
-        database: Entity<Database>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let list = cx.new(|cx| ListState::new(FactList::new(library.clone(), cx), window, cx));
+    pub fn new(database: Entity<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut facts = FactList::new();
+        if let Err(error) = facts.load(database.read(cx).connection()) {
+            eprintln!("facts page: couldn't read the facts: {error}");
+        }
+        let list = cx.new(|cx| ListState::new(facts, window, cx));
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search facts (Ctrl+F)"));
         let fact_editor = cx.new(|cx| {
@@ -223,8 +244,10 @@ impl FactsPage {
         });
 
         let subscriptions = vec![
-            cx.observe_in(&library, window, |this, _, window, cx| {
-                this.rebuild_list(window, cx)
+            cx.subscribe_in(&database, window, |this, _, changed: &Changed, window, cx| {
+                if shows(changed) {
+                    this.reload(window, cx);
+                }
             }),
             cx.subscribe_in(&list, window, |this, list, event, _, cx| match event {
                 ListEvent::Select(index) | ListEvent::Confirm(index) => {
@@ -244,7 +267,7 @@ impl FactsPage {
                 InputEvent::Change => {
                     let query = search.read(cx).value();
                     this.list
-                        .update(cx, |list, cx| list.delegate_mut().set_query(&query, cx));
+                        .update(cx, |list, _| list.delegate_mut().set_query(&query));
                     this.rebuild_list(window, cx);
                 }
                 InputEvent::PressEnter { .. } => this.focus_list(window, cx),
@@ -263,12 +286,13 @@ impl FactsPage {
         ];
 
         Self {
-            library,
             database,
             list,
             search,
             layout: cx.new(|_| ResizableState::default()),
             selected: None,
+            detail: None,
+            merging: None,
             select_when_listed: None,
             adding: false,
             keep: None,
@@ -288,9 +312,9 @@ impl FactsPage {
         if self.list.read(cx).delegate().index_of(fact).is_none() {
             self.search
                 .update(cx, |search, cx| search.set_value("", window, cx));
-            self.list.update(cx, |list, cx| {
-                list.delegate_mut().set_query("", cx);
-                list.delegate_mut().set_filter(Filter::All, cx);
+            self.list.update(cx, |list, _| {
+                list.delegate_mut().set_query("");
+                list.delegate_mut().set_filter(Filter::All);
             });
         }
         self.select(fact, window, cx);
@@ -312,13 +336,26 @@ impl FactsPage {
         cx.notify();
     }
 
-    /// Regroups the list. If the selected fact is no longer listed, the first
-    /// listed fact is selected instead, so the details and keys follow what's
-    /// on screen.
+    /// Reads the facts again, and what's shown of them, after the database
+    /// changed.
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let database = self.database.clone();
+        self.list.update(cx, |list, cx| {
+            if let Err(error) = list.delegate_mut().load(database.read(cx).connection()) {
+                eprintln!("facts page: couldn't read the facts: {error}");
+            }
+        });
+        self.detail = None;
+        self.merging = None;
+        self.rebuild_list(window, cx);
+    }
+
+    /// Updates the list's selection after its facts changed. If the selected
+    /// fact is no longer listed, the first listed fact is selected instead, so
+    /// the details and keys follow what's on screen.
     fn rebuild_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.selected;
         let selected = self.list.update(cx, |list, cx| {
-            list.delegate_mut().rebuild(cx);
             let delegate = list.delegate();
             let fact = selected
                 .filter(|&fact| delegate.index_of(fact).is_some())
@@ -364,11 +401,10 @@ impl FactsPage {
 
     fn set_filter(&mut self, filter: Filter, window: &mut Window, cx: &mut Context<Self>) {
         self.list
-            .update(cx, |list, cx| list.delegate_mut().set_filter(filter, cx));
+            .update(cx, |list, _| list.delegate_mut().set_filter(filter));
         self.rebuild_list(window, cx);
     }
 
-    /// ↩: confirms the fact and moves on to the next one to review.
     /// ↩: confirms the fact and moves on to the next one to review, or,
     /// while merging, merges.
     fn confirm_fact(&mut self, _: &ConfirmFact, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,7 +430,7 @@ impl FactsPage {
         let Some(fact) = self.selected else {
             return;
         };
-        let Some(hidden) = self.library.read(cx).fact(fact).map(|fact| fact.hidden) else {
+        let Some(hidden) = self.list.read(cx).delegate().fact(fact).map(|fact| fact.hidden) else {
             return;
         };
         self.undo_merge = None;
@@ -414,15 +450,24 @@ impl FactsPage {
 
     /// Esc while editing a fact: puts its text back and leaves the editor.
     fn cancel_edit(&mut self, _: &CancelEdit, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self.list.read(cx).delegate();
         let text = self
             .editing
-            .and_then(|id| self.library.read(cx).fact(id))
+            .and_then(|id| list.fact(id))
             .map(|fact| fact.text.clone());
         if let Some(text) = text {
             self.fact_editor
                 .update(cx, |editor, cx| editor.set_value(text, window, cx));
         }
         self.list.focus_handle(cx).focus(window, cx);
+    }
+
+    fn open_add_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_fact_text(cx);
+        self.adding = true;
+        self.note_editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
+        cx.notify();
     }
 
     /// Closes the add form, throwing away what was typed.
@@ -435,24 +480,18 @@ impl FactsPage {
     }
 
     fn next_to_review(&self, after: FactId, cx: &App) -> Option<FactId> {
-        let library = self.library.read(cx);
-        self.list
-            .read(cx)
-            .delegate()
-            .facts()
+        let list = self.list.read(cx).delegate();
+        list.facts()
             .skip_while(|&id| id != after)
             .skip(1)
-            .find(|&id| {
-                library
-                    .fact(id)
-                    .is_some_and(|fact| fact.review.is_some())
-            })
+            .find(|&id| list.fact(id).is_some_and(|fact| fact.review.is_some()))
     }
 
     /// Loads the selected fact into the editor when the selection changes, or
     /// when its text changed elsewhere while the editor wasn't in use.
     fn sync_fact_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(fact) = self.selected.and_then(|id| self.library.read(cx).fact(id)) else {
+        let list = self.list.read(cx).delegate();
+        let Some(fact) = self.selected.and_then(|id| list.fact(id)) else {
             return;
         };
         let (id, text) = (fact.id, fact.text.clone());
@@ -470,25 +509,21 @@ impl FactsPage {
         let Some(fact) = self.editing else {
             return;
         };
-        let text = self.fact_editor.read(cx).value();
+        let text = self.fact_editor.read(cx).value().trim().to_string();
         let unchanged = self
-            .library
+            .list
             .read(cx)
+            .delegate()
             .fact(fact)
-            .is_none_or(|fact| fact.text == text.trim() || text.trim().is_empty());
+            .is_none_or(|fact| fact.text == text || text.is_empty());
         if unchanged {
             return;
         }
         self.undo_merge = None;
-        // Shown now, so the editor doesn't flash the old text until the
-        // library is reloaded after the write.
-        self.library.update(cx, |library, cx| {
-            if let Some(fact) = library.facts.iter_mut().find(|each| each.id == fact) {
-                fact.text = text.trim().to_string();
-                cx.notify();
-            }
+        self.list.update(cx, |list, cx| {
+            list.delegate_mut().set_text(fact, &text);
+            cx.notify();
         });
-        let text = text.to_string();
         self.database
             .read(cx)
             .queue(move |write| commands::edit_fact(write, fact, &text));
@@ -519,7 +554,7 @@ impl FactsPage {
             if let Some(first) = first
                 && let Err(error) = this.update_in(cx, |this, window, cx| {
                     this.select_when_listed = Some(first);
-                    this.rebuild_list(window, cx);
+                    this.reload(window, cx);
                 })
             {
                 eprintln!("facts page: {error}");
@@ -566,31 +601,76 @@ impl FactsPage {
         self.select(keep, window, cx);
     }
 
+    fn revert_fact(&mut self, fact: FactId, cx: &mut Context<Self>) {
+        self.undo_merge = None;
+        self.database
+            .read(cx)
+            .queue(move |write| commands::revert_fact(write, fact));
+    }
+
+    /// Marks the fact and a possible duplicate of it to merge, keeping its
+    /// wording.
+    fn merge_with(&mut self, fact: FactId, other: FactId, cx: &mut Context<Self>) {
+        self.keep = Some(fact);
+        self.set_marked(vec![fact, other], cx);
+        cx.notify();
+    }
+
     /// The wording picked to keep, or else the first that needs no review.
     fn kept_wording(&self, marked: &[FactId], cx: &App) -> Option<FactId> {
-        let library = self.library.read(cx);
+        let list = self.list.read(cx).delegate();
         self.keep
             .filter(|keep| marked.contains(keep))
             .or_else(|| {
-                marked.iter().copied().find(|&id| {
-                    library
-                        .fact(id)
-                        .is_some_and(|fact| fact.review.is_none())
-                })
+                marked
+                    .iter()
+                    .copied()
+                    .find(|&id| list.fact(id).is_some_and(|fact| fact.review.is_none()))
             })
             .or(marked.first().copied())
     }
 
-    fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let library = self.library.read(cx);
-        let count = |filter: Filter| {
-            library
-                .facts
-                .iter()
-                .filter(|fact| filter.includes(fact))
-                .count()
+    /// Reads what's shown of the selected fact, unless it's read already.
+    fn read_detail(&mut self, cx: &App) {
+        let Some(fact) = self.selected else {
+            return;
         };
-        let filter = self.list.read(cx).delegate().filter();
+        if self.detail.as_ref().is_some_and(|detail| detail.fact == fact) {
+            return;
+        }
+        let connection = self.database.read(cx).connection();
+        let facts = self.list.read(cx).delegate().all();
+        self.detail = Some(Detail::read(connection, fact, facts).unwrap_or_else(|error| {
+            eprintln!("facts page: couldn't read the fact: {error}");
+            Detail::empty(fact)
+        }));
+    }
+
+    /// Reads what's shown of the facts marked to merge, unless it's read
+    /// already.
+    fn read_merging(&mut self, marked: Vec<FactId>, cx: &App) {
+        if self
+            .merging
+            .as_ref()
+            .is_some_and(|merging| merging.facts == marked)
+        {
+            return;
+        }
+        let connection = self.database.read(cx).connection();
+        self.merging = Some(Merging::read(connection, &marked).unwrap_or_else(|error| {
+            eprintln!("facts page: couldn't read the facts to merge: {error}");
+            Merging {
+                sources: vec![Vec::new(); marked.len()],
+                facts: marked,
+                uses: 0,
+            }
+        }));
+    }
+
+    fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let list = self.list.read(cx).delegate();
+        let count = |filter: Filter| list.all().iter().filter(|fact| filter.includes(fact)).count();
+        let filter = list.filter();
         let selected_index = Filter::ALL
             .iter()
             .position(|&each| each == filter)
@@ -624,22 +704,14 @@ impl FactsPage {
                     .ghost()
                     .small()
                     .tooltip("Add facts")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.save_fact_text(cx);
-                        this.adding = true;
-                        this.note_editor
-                            .update(cx, |editor, cx| editor.focus(window, cx));
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_add_form(window, cx))),
             )
     }
 
-    fn render_fact(&self, fact: &Fact, cx: &Context<Self>) -> AnyElement {
-        let library = self.library.read(cx);
+    fn render_fact(&self, fact: &ListedFact, detail: &Detail, cx: &Context<Self>) -> AnyElement {
+        let list = self.list.read(cx).delegate();
         let theme = cx.theme();
         let id = fact.id;
-        let uses = library.fact_uses(id);
-        let duplicates = library.possible_duplicates(id);
 
         let actions = h_flex()
             .gap_2()
@@ -694,7 +766,7 @@ impl FactsPage {
                         .text_sm()
                         .child(format!(
                             "Merged. This fact now has {} sources.",
-                            fact.sources.len()
+                            detail.sources.len()
                         ))
                         .child(
                             Button::new("undo-merge")
@@ -722,10 +794,10 @@ impl FactsPage {
                             )
                             .when(fact.review.is_some() || fact.hidden, |this| {
                                 this.child(div().text_color(theme.muted_foreground).child("·"))
-                                    .child(fact_status(fact, cx))
+                                    .child(fact_status(fact.review.is_some(), fact.hidden, cx))
                             })
                             .when_some(
-                                fact.entry.and_then(|entry| library.entry_label(entry)),
+                                fact.entry.and_then(|entry| list.entry_label(entry)),
                                 |this, entry| {
                                     this.child(div().text_color(theme.muted_foreground).child("·"))
                                         .child(
@@ -744,14 +816,14 @@ impl FactsPage {
                             .child(Textarea::new(&self.fact_editor)),
                     )
                     .child(caption("↩ saves, ⇧↩ adds a line break, Esc cancels.", cx))
-                    .when(fact.is_edited(), |this| {
+                    .when(fact.text != detail.extracted, |this| {
                         this.child(
                             h_flex()
                                 .gap_2()
                                 .items_start()
                                 .child(
                                     div().flex_1().min_w_0().child(caption(
-                                        format!("Extracted as “{}”", fact.extracted),
+                                        format!("Extracted as “{}”", detail.extracted),
                                         cx,
                                     )),
                                 )
@@ -762,10 +834,7 @@ impl FactsPage {
                                         .ghost()
                                         .xsmall()
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.undo_merge = None;
-                                            this.database.read(cx).queue(move |write| {
-                                                commands::revert_fact(write, id)
-                                            });
+                                            this.revert_fact(id, cx)
                                         })),
                                 ),
                         )
@@ -789,27 +858,25 @@ impl FactsPage {
             )
             .child(
                 v_flex()
-                    .child(heading("Sources", Some(fact.sources.len()), cx))
+                    .child(heading("Sources", Some(detail.sources.len()), cx))
                     .child(
                         v_flex().gap_3().children(
-                            fact.sources
+                            detail
+                                .sources
                                 .iter()
-                                .map(|source| source_excerpt(library, source, cx)),
+                                .map(|source| source_excerpt(source, cx)),
                         ),
                     ),
             )
             .child(
                 v_flex()
-                    .child(heading("Used in", Some(uses.len()), cx))
-                    .when(uses.is_empty(), |this| {
+                    .child(heading("Used in", Some(detail.uses.len()), cx))
+                    .when(detail.uses.is_empty(), |this| {
                         this.child(caption("No résumé uses this fact yet.", cx))
                     })
-                    .child(v_flex().gap_1().children(uses.iter().enumerate().map(
-                        |(index, (job, line))| {
-                            let outdated = job
-                                .current_resume()
-                                .is_some_and(|resume| library.fact_change(resume, id).is_some());
-                            let (job_id, line_id) = (job.id, line.id);
+                    .child(v_flex().gap_1().children(detail.uses.iter().enumerate().map(
+                        |(index, used)| {
+                            let (job_id, line_id) = (used.job, used.line);
                             card(cx)
                                 .id(("use", index))
                                 .gap_0p5()
@@ -824,13 +891,9 @@ impl FactsPage {
                                         cx,
                                     )
                                 })
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .child(format!("{} · {}", job.title, job.company)),
-                                )
-                                .child(caption(line.text.clone(), cx))
-                                .when(outdated, |this| {
+                                .child(div().text_sm().child(used.job_title.clone()))
+                                .child(caption(used.text.clone(), cx))
+                                .when(used.outdated, |this| {
                                     this.child(
                                         h_flex()
                                             .gap_1()
@@ -847,19 +910,20 @@ impl FactsPage {
                         },
                     ))),
             )
-            .when(!duplicates.is_empty(), |this| {
+            .when(!detail.duplicates.is_empty(), |this| {
                 this.child(
                     v_flex()
-                        .child(heading("Possible duplicates", Some(duplicates.len()), cx))
-                        .child(v_flex().gap_1().children(duplicates.iter().enumerate().filter_map(
-                            |(index, &other)| {
-                                let other_fact = library.fact(other)?;
+                        .child(heading("Possible duplicates", Some(detail.duplicates.len()), cx))
+                        .child(v_flex().gap_1().children(detail.duplicates.iter().enumerate().filter_map(
+                            |(index, duplicate)| {
+                                let other = duplicate.fact;
+                                let other_fact = list.fact(other)?;
                                 Some(
                                     card(cx)
                                         .gap_1()
                                         .child(div().text_sm().child(other_fact.text.clone()))
-                                        .children(other_fact.sources.first().map(|source| {
-                                            caption(source_label(library, source), cx)
+                                        .children(duplicate.source.clone().map(|source| {
+                                            caption(source, cx)
                                         }))
                                         .child(
                                             h_flex().child(
@@ -869,9 +933,7 @@ impl FactsPage {
                                                     .xsmall()
                                                     .on_click(cx.listener(
                                                         move |this, _, _, cx| {
-                                                            this.keep = Some(id);
-                                                            this.set_marked(vec![id, other], cx);
-                                                            cx.notify();
+                                                            this.merge_with(id, other, cx)
                                                         },
                                                     )),
                                             ),
@@ -884,12 +946,12 @@ impl FactsPage {
             .into_any_element()
     }
 
-    fn render_merge(&self, cx: &Context<Self>) -> AnyElement {
-        let library = self.library.read(cx);
+    fn render_merge(&self, merging: &Merging, cx: &Context<Self>) -> AnyElement {
+        let list = self.list.read(cx).delegate();
         let theme = cx.theme();
-        let marked = self.marked(cx);
-        let keep = self.kept_wording(&marked, cx);
-        let uses: usize = marked.iter().map(|&id| library.fact_uses(id).len()).sum();
+        let marked = &merging.facts;
+        let keep = self.kept_wording(marked, cx);
+        let uses = merging.uses;
 
         v_flex()
             .gap_4()
@@ -910,12 +972,8 @@ impl FactsPage {
             )
             .child(v_flex().gap_2().children(marked.iter().enumerate().filter_map(
                 |(index, &id)| {
-                    let fact = library.fact(id)?;
-                    let sources: Vec<String> = fact
-                        .sources
-                        .iter()
-                        .map(|source| source_label(library, source))
-                        .collect();
+                    let fact = list.fact(id)?;
+                    let sources = merging.sources.get(index)?;
                     let kept = keep == Some(id);
                     // On the page background, as in a form: on a card's grey
                     // an empty radio barely shows.
@@ -966,8 +1024,12 @@ impl FactsPage {
                                                     .when(
                                                         fact.review.is_some() || fact.hidden,
                                                         |this| {
-                                                            this.child(fact_status(fact, cx))
-                                                                .child(caption("·", cx))
+                                                            this.child(fact_status(
+                                                                fact.review.is_some(),
+                                                                fact.hidden,
+                                                                cx,
+                                                            ))
+                                                            .child(caption("·", cx))
                                                         },
                                                     )
                                                     .child(caption(sources.join(", "), cx)),
@@ -1062,5 +1124,1024 @@ impl FactsPage {
                             })),
                     ),
             )
+    }
+}
+
+/// What the page shows of a fact beyond its row in the list.
+struct Detail {
+    fact: FactId,
+    extracted: String,
+    sources: Vec<Source>,
+    /// The lines of each job's current résumé that cite it.
+    uses: Vec<Use>,
+    duplicates: Vec<Duplicate>,
+}
+
+impl Detail {
+    /// `facts` are the list's, to look for duplicates among.
+    fn read(connection: &Connection, fact: FactId, facts: &[ListedFact]) -> Result<Self, Error> {
+        let extracted: Option<String> = connection
+            .prepare_cached("SELECT extracted FROM facts WHERE id = ?1")?
+            .query_row([fact.0], |row| row.get(0))
+            .optional()?;
+        let Some(extracted) = extracted else {
+            return Ok(Self::empty(fact));
+        };
+        let mut duplicates = Vec::new();
+        if let Some(listed) = facts.iter().find(|listed| listed.id == fact) {
+            let duplicates_it = possible_duplicate(&listed.text);
+            for other in facts.iter().filter(|other| {
+                other.id != fact && other.kind == listed.kind && duplicates_it(&other.text)
+            }) {
+                duplicates.push(Duplicate {
+                    fact: other.id,
+                    source: sources(connection, other.id)?
+                        .into_iter()
+                        .next()
+                        .map(|source| source.label),
+                });
+            }
+        }
+        Ok(Self {
+            fact,
+            extracted,
+            sources: sources(connection, fact)?,
+            uses: uses(connection, fact)?,
+            duplicates,
+        })
+    }
+
+    /// For a fact that couldn't be read: its row, without the rest.
+    fn empty(fact: FactId) -> Self {
+        Self {
+            fact,
+            extracted: String::new(),
+            sources: Vec::new(),
+            uses: Vec::new(),
+            duplicates: Vec::new(),
+        }
+    }
+}
+
+struct Use {
+    job: JobId,
+    /// "Backend Engineer · Ledgerly"
+    job_title: String,
+    line: LineId,
+    text: String,
+    /// The fact changed since the résumé was generated.
+    outdated: bool,
+}
+
+/// A fact that may say the same, and where it was first found.
+struct Duplicate {
+    fact: FactId,
+    source: Option<String>,
+}
+
+/// What the page shows of the facts marked to merge beyond their rows.
+struct Merging {
+    facts: Vec<FactId>,
+    /// Each fact's sources' labels.
+    sources: Vec<Vec<String>>,
+    /// Résumé lines citing any of them.
+    uses: usize,
+}
+
+impl Merging {
+    fn read(connection: &Connection, facts: &[FactId]) -> Result<Self, Error> {
+        let mut sources_of = Vec::new();
+        let mut used = 0;
+        for &fact in facts {
+            sources_of.push(
+                sources(connection, fact)?
+                    .into_iter()
+                    .map(|source| source.label)
+                    .collect(),
+            );
+            used += uses(connection, fact)?.len();
+        }
+        Ok(Self {
+            facts: facts.to_vec(),
+            sources: sources_of,
+            uses: used,
+        })
+    }
+}
+
+/// Whether the change is to anything the page shows.
+fn shows(changed: &Changed) -> bool {
+    changed.touches(Facts)
+        || changed.touches(FactSources)
+        || changed.touches(Documents)
+        || changed.touches(Entries)
+        || changed.touches(Jobs)
+        || changed.touches(Generations)
+        || changed.touches(Sections)
+        || changed.touches(Blocks)
+        || changed.touches(Lines)
+        || changed.touches(LineCitations)
+        || changed.touches(FactVersions)
+}
+
+/// Where the fact and the facts merged into it were found, in the order they
+/// were found.
+fn sources(connection: &Connection, fact: FactId) -> Result<Vec<Source>, Error> {
+    let mut statement = connection.prepare_cached(
+        "WITH RECURSIVE members(id) AS (
+             SELECT ?1
+             UNION
+             SELECT facts.id FROM facts JOIN members ON facts.merged_into = members.id
+         )
+         SELECT documents.file_name, documents.added_at, documents.deleted_at IS NULL,
+                document_texts.text, fact_sources.span_start, fact_sources.span_end
+         FROM members
+         -- CROSS JOIN keeps this order: by its index, not every source by id.
+         CROSS JOIN fact_sources ON fact_sources.fact_id = members.id
+         JOIN documents ON documents.id = fact_sources.document_id
+         LEFT JOIN document_texts ON document_texts.document_id = documents.id
+         WHERE fact_sources.deleted_at IS NULL
+         ORDER BY fact_sources.id",
+    )?;
+    let sources = statement
+        .query_map([fact.0], |row| {
+            let file_name: Option<String> = row.get(0)?;
+            let added_at = DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default();
+            let kept: bool = row.get(2)?;
+            let text: Option<String> = row.get(3)?;
+            // The schema keeps spans non-negative.
+            let span = offset(row.get(4)?)..offset(row.get(5)?);
+            Ok(Source::new(
+                kept.then_some((file_name.as_deref(), added_at)),
+                text.as_deref(),
+                &span,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(sources)
+}
+
+/// The lines of each job's current résumé that cite the fact, or a fact
+/// merged into it, in the order of the board and then the page.
+fn uses(connection: &Connection, fact: FactId) -> Result<Vec<Use>, Error> {
+    let mut statement = connection.prepare_cached(
+        "WITH RECURSIVE members(id) AS (
+             SELECT ?1
+             UNION
+             SELECT facts.id FROM facts JOIN members ON facts.merged_into = members.id
+         )
+         SELECT jobs.id, jobs.title, jobs.company, lines.id, lines.text,
+                EXISTS (
+                    SELECT 1 FROM fact_versions
+                    JOIN members ON members.id = fact_versions.fact_id
+                    WHERE fact_versions.generation_id = generations.id
+                      AND (fact_versions.hidden != facts.hidden
+                           OR fact_versions.text != facts.text)
+                )
+         FROM lines
+         JOIN blocks ON blocks.id = lines.block_id AND blocks.deleted_at IS NULL
+         JOIN sections ON sections.id = blocks.section_id AND sections.deleted_at IS NULL
+         JOIN generations ON generations.id = sections.generation_id
+         JOIN jobs ON jobs.id = generations.job_id AND jobs.deleted_at IS NULL
+         JOIN facts ON facts.id = ?1
+         WHERE lines.deleted_at IS NULL
+           AND lines.id IN (
+               SELECT line_citations.line_id FROM members
+               CROSS JOIN line_citations ON line_citations.fact_id = members.id
+           )
+           -- Its job's current résumé. Not the current_generations view, which
+           -- ranks every job's generations to find each one's.
+           AND generations.id = (
+               SELECT current.id FROM generations AS current
+               WHERE current.job_id = generations.job_id AND current.kind = 'resume'
+                 AND current.deleted_at IS NULL
+               ORDER BY current.generated_at DESC, current.id DESC LIMIT 1
+           )
+         ORDER BY jobs.board_sort_key, jobs.id, sections.sort_key, blocks.sort_key,
+                  lines.sort_key",
+    )?;
+    let uses = statement
+        .query_map([fact.0], |row| {
+            let title: String = row.get(1)?;
+            let company: String = row.get(2)?;
+            Ok(Use {
+                job: JobId(row.get(0)?),
+                job_title: format!("{title} · {company}"),
+                line: LineId(row.get(3)?),
+                text: row.get(4)?,
+                outdated: row.get(5)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(uses)
+}
+
+fn offset(value: i64) -> usize {
+    usize::try_from(value).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use gpui_kit::{TestAppContext, VisualTestContext};
+    use rusqlite::types::FromSql;
+
+    use super::*;
+    use crate::database::schema::facts;
+    use crate::database::{self, TemporaryDirectory, Write, Writer};
+    use crate::model::{Library, sample};
+    use crate::typeset;
+
+    fn sample_writer() -> Result<Writer, Error> {
+        let mut writer = Writer::open_in_memory()?;
+        writer.execute(write_sample)?;
+        Ok(writer)
+    }
+
+    fn write_sample(write: &mut Write) -> Result<(), Error> {
+        typeset::install_templates(write)?;
+        sample::write_library(write)
+    }
+
+    /// The queries read what `Library::load` does, which they replace: the
+    /// facts, and each one's sources, uses and duplicates.
+    fn assert_queries_match_the_library(connection: &Connection) -> Result<(), Error> {
+        let library = Library::load(connection)?;
+        let mut list = FactList::new();
+        list.load(connection)?;
+        let listed: Vec<FactId> = list.all().iter().map(|fact| fact.id).collect();
+        let loaded: Vec<FactId> = library.facts.iter().map(|fact| fact.id).collect();
+        assert_eq!(listed, loaded);
+        for (fact, expected) in list.all().iter().zip(&library.facts) {
+            assert_eq!(fact.text, expected.text);
+            assert_eq!(fact.kind, expected.kind);
+            assert_eq!(fact.hidden, expected.hidden);
+            assert_eq!(fact.review, expected.review);
+            assert_eq!(fact.entry, expected.entry);
+            if let Some(entry) = fact.entry {
+                assert_eq!(list.entry_label(entry), library.entry_label(entry));
+            }
+
+            let detail = Detail::read(connection, fact.id, list.all())?;
+            assert_eq!(detail.extracted, expected.extracted);
+            let labels: Vec<String> = detail
+                .sources
+                .iter()
+                .map(|source| source.label.clone())
+                .collect();
+            let expected_labels: Vec<String> = expected
+                .sources
+                .iter()
+                .map(|source| Source::from_library(&library, source).label)
+                .collect();
+            assert_eq!(labels, expected_labels, "{}", fact.text);
+
+            // As sets: the library reads a block's lines by role, the
+            // query by their order on the page.
+            let uses: BTreeSet<(LineId, bool)> = detail
+                .uses
+                .iter()
+                .map(|used| (used.line, used.outdated))
+                .collect();
+            let expected_uses: BTreeSet<(LineId, bool)> = library
+                .fact_uses(fact.id)
+                .into_iter()
+                .map(|(job, line)| {
+                    let outdated = job
+                        .current_resume()
+                        .is_some_and(|resume| library.fact_change(resume, fact.id).is_some());
+                    (line.id, outdated)
+                })
+                .collect();
+            assert_eq!(uses, expected_uses, "{}", fact.text);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_queries_read_the_sample_as_the_library_does() -> Result<(), Error> {
+        assert_queries_match_the_library(sample_writer()?.kron())
+    }
+
+    #[test]
+    fn the_queries_follow_merges_and_edits_as_the_library_does() -> Result<(), Error> {
+        let mut writer = sample_writer()?;
+        let library = Library::load(writer.kron())?;
+        let text = |start: &str| {
+            library
+                .facts
+                .iter()
+                .find(|fact| fact.text.starts_with(start))
+                .map(|fact| fact.id)
+        };
+        let (Some(migration), Some(linkedin), Some(latency)) = (
+            text("Led the migration"),
+            text("Migrated 12 backend"),
+            text("Cut p99 latency"),
+        ) else {
+            panic!("the sample changed");
+        };
+        // A chain: the LinkedIn bullet into the migration, which then goes
+        // into the latency fact.
+        writer.execute(|write| commands::merge_facts(write, migration, &[linkedin]))?;
+        writer.execute(|write| commands::merge_facts(write, latency, &[migration]))?;
+        writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
+        assert_queries_match_the_library(writer.kron())?;
+
+        let mut list = FactList::new();
+        list.load(writer.kron())?;
+        let detail = Detail::read(writer.kron(), latency, list.all())?;
+        assert_eq!(detail.sources.len(), 3, "its own and both merged into it");
+        assert!(detail.uses.iter().all(|used| used.outdated));
+        Ok(())
+    }
+
+    #[test]
+    fn the_queries_read_an_empty_database() -> Result<(), Error> {
+        let writer = Writer::open_in_memory()?;
+        let mut list = FactList::new();
+        list.load(writer.kron())?;
+        assert!(list.all().is_empty());
+        assert_eq!(list.facts().count(), 0);
+        let missing = FactId::new();
+        let detail = Detail::read(writer.kron(), missing, list.all())?;
+        assert!(detail.sources.is_empty() && detail.uses.is_empty());
+        Ok(())
+    }
+
+    // The page in a window, driven by keys as a person would, on a database
+    // on disk with the sample.
+
+    struct Page<'a> {
+        page: Entity<FactsPage>,
+        database: Entity<Database>,
+        cx: &'a mut VisualTestContext,
+        _directory: TemporaryDirectory,
+    }
+
+    fn open(app: &mut TestAppContext) -> Page<'_> {
+        let directory = TemporaryDirectory::new();
+        let database = app.update(|cx| {
+            gpui_kit::init(cx);
+            init(cx);
+            database::open_in(&directory, cx)
+        });
+        let database = match database {
+            Ok(database) => database,
+            Err(error) => panic!("couldn't open the database: {error}"),
+        };
+        database.read_with(app, |database, _| {
+            database.queue(write_sample);
+            database.flush();
+        });
+        app.run_until_parked();
+        let (page, cx) =
+            app.add_window_view(|window, cx| FactsPage::new(database.clone(), window, cx));
+        cx.update(|window, cx| page.focus_handle(cx).focus(window, cx));
+        cx.run_until_parked();
+        Page {
+            page,
+            database,
+            cx,
+            _directory: directory,
+        }
+    }
+
+    impl Page<'_> {
+        /// Lets queued commands commit, delivers what they changed, and draws.
+        fn settle(&mut self) {
+            self.database.read_with(self.cx, |database, _| database.flush());
+            self.cx.run_until_parked();
+        }
+
+        fn keys(&mut self, keystrokes: &str) {
+            self.cx.simulate_keystrokes(keystrokes);
+            self.settle();
+        }
+
+        /// A command from elsewhere in the app, like the inspector's.
+        fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
+            self.database
+                .read_with(self.cx, |database, _| database.queue(command));
+            self.settle();
+        }
+
+        fn update<R>(
+            &mut self,
+            update: impl FnOnce(&mut FactsPage, &mut Window, &mut Context<FactsPage>) -> R,
+        ) -> R {
+            let result = self.page.update_in(self.cx, update);
+            self.settle();
+            result
+        }
+
+        fn read<R>(&mut self, read: impl FnOnce(&FactsPage, &App) -> R) -> R {
+            self.page.read_with(self.cx, read)
+        }
+
+        fn fact(&mut self, start: &str) -> FactId {
+            let found = self.read(|page, cx| {
+                page.list
+                    .read(cx)
+                    .delegate()
+                    .all()
+                    .iter()
+                    .find(|fact| fact.text.starts_with(start))
+                    .map(|fact| fact.id)
+            });
+            match found {
+                Some(fact) => fact,
+                None => panic!("no fact starts with {start:?}"),
+            }
+        }
+
+        fn row(&mut self, fact: FactId) -> Option<ListedFact> {
+            self.read(|page, cx| page.list.read(cx).delegate().fact(fact).cloned())
+        }
+
+        fn listed(&mut self) -> Vec<FactId> {
+            self.read(|page, cx| page.list.read(cx).delegate().facts().collect())
+        }
+
+        fn count(&mut self, filter: Filter) -> usize {
+            self.read(|page, cx| {
+                page.list
+                    .read(cx)
+                    .delegate()
+                    .all()
+                    .iter()
+                    .filter(|fact| filter.includes(fact))
+                    .count()
+            })
+        }
+
+        fn selected(&mut self) -> Option<FactId> {
+            self.read(|page, _| page.selected)
+        }
+
+        fn marked(&mut self) -> Vec<FactId> {
+            self.read(|page, cx| page.marked(cx))
+        }
+
+        fn show(&mut self, fact: FactId) {
+            self.update(|page, window, cx| page.show_fact(fact, window, cx));
+        }
+
+        fn filter(&mut self, filter: Filter) {
+            self.update(|page, window, cx| page.set_filter(filter, window, cx));
+        }
+
+        /// Types the search, in place of what's there.
+        fn search(&mut self, query: &str) {
+            self.keys("ctrl-f ctrl-a backspace");
+            self.cx.simulate_input(query);
+            self.settle();
+        }
+
+        /// Types into the fact editor in place of its text.
+        fn type_fact_text(&mut self, text: &str) {
+            self.update(|page, window, cx| {
+                page.fact_editor.update(cx, |editor, cx| {
+                    editor.set_value("", window, cx);
+                    editor.focus(window, cx);
+                })
+            });
+            self.cx.simulate_input(text);
+            self.settle();
+        }
+
+        fn editor_text(&mut self) -> String {
+            self.read(|page, cx| page.fact_editor.read(cx).value().to_string())
+        }
+
+        fn detail<R>(&mut self, read: impl FnOnce(&Detail) -> R) -> Option<R> {
+            self.read(|page, _| page.detail.as_ref().map(read))
+        }
+
+        /// A column of the fact's row in the database.
+        fn stored<T: FromSql>(&mut self, column: &str, fact: FactId) -> T {
+            let sql = format!("SELECT {column} FROM facts WHERE id = ?1");
+            let value = self.database.read_with(self.cx, |database, _| {
+                database
+                    .connection()
+                    .query_row(&sql, [fact.0], |row| row.get(0))
+            });
+            match value {
+                Ok(value) => value,
+                Err(error) => panic!("{sql}: {error}"),
+            }
+        }
+
+        fn needs_review(&mut self, facts: &[FactId]) {
+            let facts = facts.to_vec();
+            self.run(move |write| {
+                for fact in facts {
+                    write.set(facts::REVIEW, fact.0, &Some("unsure"))?;
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn the_page_lists_the_sample() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        assert_eq!(page.count(Filter::All), 83);
+        assert_eq!(page.count(Filter::NeedsReview), 1);
+        assert_eq!(page.count(Filter::Hidden), 2);
+        assert_eq!(page.listed().len(), 83);
+        let titles = page.read(|page, cx| {
+            page.list
+                .read(cx)
+                .delegate()
+                .groups()
+                .map(|(title, _)| title.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(titles.first().map(String::as_str), Some("Profile"));
+        assert!(titles.iter().any(|title| title.ends_with(", Northwind Logistics")));
+        assert_eq!(page.selected(), None, "nothing until the user picks");
+    }
+
+    #[test]
+    fn arrow_keys_select_and_show_the_fact() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.keys("down");
+        let first = page.listed().first().copied();
+        assert_eq!(page.selected(), first);
+        assert_eq!(page.detail(|detail| detail.fact), first, "read once shown");
+        page.keys("down");
+        let second = page.listed().get(1).copied();
+        assert_eq!(page.selected(), second);
+        assert_eq!(page.detail(|detail| detail.fact), second);
+        page.keys("up");
+        assert_eq!(page.selected(), first);
+    }
+
+    #[test]
+    fn the_detail_shows_sources_uses_and_duplicates() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.show(migration);
+        assert_eq!(page.detail(|detail| detail.sources.len()), Some(1));
+        assert!(page.detail(|detail| !detail.uses.is_empty()) == Some(true));
+        assert_eq!(
+            page.detail(|detail| detail
+                .duplicates
+                .iter()
+                .map(|duplicate| duplicate.fact)
+                .collect::<Vec<_>>()),
+            Some(vec![linkedin])
+        );
+    }
+
+    #[test]
+    fn enter_confirms_and_moves_to_the_next_to_review() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let listed = page.listed();
+        let (first, second) = (listed[3], listed[10]);
+        page.needs_review(&[first, second]);
+        assert_eq!(page.count(Filter::NeedsReview), 3);
+        page.show(first);
+        page.keys("enter");
+        assert_eq!(page.stored::<Option<String>>("review", first), None);
+        assert_eq!(page.selected(), Some(second), "the next one to review");
+        assert_eq!(page.count(Filter::NeedsReview), 2);
+        assert!(page.row(first).is_some_and(|fact| fact.review.is_none()));
+    }
+
+    #[test]
+    fn confirming_the_last_to_review_empties_that_filter() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.filter(Filter::NeedsReview);
+        assert_eq!(page.listed().len(), 1);
+        page.keys("down");
+        page.keys("enter");
+        assert_eq!(page.count(Filter::NeedsReview), 0);
+        assert!(page.listed().is_empty());
+        assert_eq!(page.selected(), None, "nothing listed to select");
+    }
+
+    #[test]
+    fn backspace_hides_and_shows_again() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.show(latency);
+        page.keys("backspace");
+        assert!(page.stored::<bool>("hidden", latency));
+        assert_eq!(page.count(Filter::Hidden), 3);
+        assert_eq!(page.selected(), Some(latency), "still listed under All");
+        page.keys("delete");
+        assert!(!page.stored::<bool>("hidden", latency));
+        assert_eq!(page.count(Filter::Hidden), 2);
+    }
+
+    #[test]
+    fn showing_a_fact_under_hidden_moves_to_the_first_still_listed() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.filter(Filter::Hidden);
+        let listed = page.listed();
+        assert_eq!(listed.len(), 2);
+        page.show(listed[0]);
+        page.keys("backspace");
+        assert_eq!(page.listed(), vec![listed[1]]);
+        assert_eq!(page.selected(), Some(listed[1]));
+        assert_eq!(page.detail(|detail| detail.fact), Some(listed[1]));
+    }
+
+    #[test]
+    fn an_edit_shows_at_once_and_saves_on_enter() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.needs_review(&[latency]);
+        page.show(latency);
+        page.type_fact_text("Cut p99 latency by 80%.");
+        page.cx.simulate_keystrokes("enter");
+        // Before the write commits: the list's own copy.
+        assert_eq!(
+            page.row(latency).map(|fact| fact.text),
+            Some("Cut p99 latency by 80%.".into())
+        );
+        page.settle();
+        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
+        assert_eq!(page.stored::<Option<String>>("review", latency), None, "rewording reviews");
+        assert!(
+            page.detail(|detail| detail.uses.iter().all(|used| used.outdated)) == Some(true),
+            "the résumés using it were generated before"
+        );
+        assert!(page.detail(|detail| detail.extracted.starts_with("Cut p99 latency")) == Some(true));
+
+        page.update(|page, _, cx| page.revert_fact(latency, cx));
+        let extracted: String = page.stored("extracted", latency);
+        assert_eq!(page.stored::<String>("text", latency), extracted);
+        assert_eq!(page.editor_text(), extracted, "the editor follows a revert");
+    }
+
+    #[test]
+    fn escape_puts_the_text_back() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        let before: String = page.stored("text", latency);
+        page.show(latency);
+        page.type_fact_text("Something else");
+        page.keys("escape");
+        assert_eq!(page.editor_text(), before);
+        // Leaving the editor saves, so Esc must have put it back first.
+        page.keys("down");
+        assert_eq!(page.stored::<String>("text", latency), before);
+    }
+
+    #[test]
+    fn an_empty_or_unchanged_edit_saves_nothing() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.needs_review(&[latency]);
+        let before: String = page.stored("text", latency);
+        page.show(latency);
+        page.type_fact_text("   ");
+        page.keys("enter");
+        assert_eq!(page.stored::<String>("text", latency), before);
+        page.type_fact_text(&format!("  {before} "));
+        page.keys("enter");
+        assert_eq!(page.stored::<String>("text", latency), before);
+        assert!(
+            page.stored::<Option<String>>("review", latency).is_some(),
+            "nothing changed, so nothing was reviewed"
+        );
+    }
+
+    #[test]
+    fn moving_away_saves_an_edit() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        let other = page.fact("Led the migration");
+        page.show(latency);
+        page.type_fact_text("Cut p99 latency by 80%.");
+        page.show(other);
+        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
+        assert_eq!(page.editor_text(), page.stored::<String>("text", other));
+    }
+
+    #[test]
+    fn a_note_adds_its_lines_as_facts_and_selects_the_first() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.filter(Filter::Hidden);
+        page.update(|page, window, cx| page.open_add_form(window, cx));
+        page.cx.simulate_input("Organized Code Fest 2019.");
+        page.keys("shift-enter");
+        page.cx.simulate_input("Ran a team of 15.");
+        page.keys("ctrl-enter");
+        page.settle();
+        assert!(!page.read(|page, _| page.adding), "the form closed");
+        assert_eq!(page.count(Filter::All), 85);
+        assert_eq!(page.read(|page, cx| page.list.read(cx).delegate().filter()), Filter::All);
+        let first = page.fact("Organized Code Fest 2019.");
+        let second = page.fact("Ran a team of 15.");
+        assert_eq!(page.selected(), Some(first));
+        let (first_row, second_row) = (page.row(first), page.row(second));
+        assert!(first_row.as_ref().is_some_and(|fact| fact.review.is_none()));
+        assert_eq!(
+            first_row.and_then(|fact| fact.entry),
+            second_row.and_then(|fact| fact.entry),
+            "written together, grouped together"
+        );
+        let titles = page.read(|page, cx| {
+            page.list
+                .read(cx)
+                .delegate()
+                .groups()
+                .map(|(title, _)| title.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert!(titles.iter().any(|title| title.starts_with("Your note, ")));
+    }
+
+    #[test]
+    fn escape_closes_the_note_without_adding_it() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.update(|page, window, cx| page.open_add_form(window, cx));
+        page.cx.simulate_input("Gave a guest lecture.");
+        page.keys("escape");
+        assert!(!page.read(|page, _| page.adding));
+        assert_eq!(page.count(Filter::All), 83);
+        page.update(|page, window, cx| page.open_add_form(window, cx));
+        let typed = page.read(|page, cx| page.note_editor.read(cx).value().to_string());
+        assert_eq!(typed, "", "what was typed is thrown away");
+        page.keys("ctrl-enter");
+        assert_eq!(page.count(Filter::All), 83, "an empty note adds nothing");
+    }
+
+    #[test]
+    fn ctrl_enter_marks_facts_and_enter_merges_them_keeping_the_picked_wording() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.show(migration);
+        page.show(linkedin);
+        page.keys("ctrl-enter");
+        assert_eq!(page.marked(), vec![migration, linkedin]);
+        assert_eq!(
+            page.read(|page, _| page.merging.as_ref().map(|merging| merging.facts.clone())),
+            Some(vec![migration, linkedin])
+        );
+        assert!(page.read(|page, _| page.merging.as_ref().is_some_and(|merging| merging.uses > 0)));
+        page.keys("1");
+        assert_eq!(page.read(|page, _| page.keep), Some(migration));
+        page.keys("enter");
+
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
+        assert_eq!(merged_into, Some(migration.0));
+        assert_eq!(page.row(linkedin).map(|fact| fact.id), None);
+        assert_eq!(page.count(Filter::All), 82);
+        assert_eq!(page.selected(), Some(migration));
+        assert!(page.marked().is_empty());
+        assert_eq!(page.detail(|detail| detail.sources.len()), Some(2));
+        assert!(page.read(|page, _| page.undo_merge.is_some()));
+
+        page.keys("ctrl-z");
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
+        assert_eq!(merged_into, None);
+        assert_eq!(page.count(Filter::All), 83);
+        assert_eq!(page.detail(|detail| detail.sources.len()), Some(1));
+        page.keys("ctrl-z");
+        assert_eq!(page.count(Filter::All), 83, "one undo per merge");
+    }
+
+    #[test]
+    fn a_ctrl_enter_again_unmarks_and_escape_drops_the_marks() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let listed = page.listed();
+        page.show(listed[0]);
+        page.show(listed[1]);
+        page.keys("ctrl-enter");
+        page.keys("down");
+        page.keys("ctrl-enter");
+        assert_eq!(page.marked(), vec![listed[0], listed[1], listed[2]]);
+        page.keys("ctrl-enter");
+        assert_eq!(page.marked(), vec![listed[0], listed[1]]);
+        page.keys("escape");
+        assert!(page.marked().is_empty());
+        assert_eq!(page.count(Filter::All), 83);
+    }
+
+    #[test]
+    fn a_possible_duplicate_merges_into_the_fact_shown() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.show(migration);
+        page.update(|page, _, cx| page.merge_with(migration, linkedin, cx));
+        assert_eq!(page.marked(), vec![migration, linkedin]);
+        page.keys("enter");
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
+        assert_eq!(merged_into, Some(migration.0));
+    }
+
+    #[test]
+    fn a_merge_keeps_the_wording_that_needs_no_review() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.needs_review(&[migration]);
+        page.show(migration);
+        page.show(linkedin);
+        page.keys("ctrl-enter");
+        page.keys("enter");
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", migration);
+        assert_eq!(merged_into, Some(linkedin.0));
+        assert_eq!(page.stored::<Option<String>>("review", linkedin), None);
+    }
+
+    #[test]
+    fn undo_is_gone_once_something_else_changes() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.show(migration);
+        page.show(linkedin);
+        page.keys("ctrl-enter");
+        page.keys("enter");
+        page.keys("backspace");
+        page.keys("ctrl-z");
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
+        assert_eq!(merged_into, Some(migration.0), "the merge stays");
+    }
+
+    #[test]
+    fn a_search_narrows_the_list_and_showing_a_fact_clears_it() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.search("P99");
+        assert_eq!(page.listed(), vec![latency], "case doesn't matter");
+        page.search("no fact says this");
+        assert!(page.listed().is_empty());
+        let migration = page.fact("Led the migration");
+        page.show(migration);
+        assert_eq!(page.listed().len(), 83);
+        assert_eq!(page.selected(), Some(migration));
+        let query = page.read(|page, cx| page.search.read(cx).value().to_string());
+        assert_eq!(query, "");
+    }
+
+    #[test]
+    fn a_search_hiding_the_selected_fact_selects_the_first_match() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let latency = page.fact("Cut p99 latency");
+        page.show(migration);
+        page.search("p99");
+        assert_eq!(page.selected(), Some(latency));
+    }
+
+    #[test]
+    fn a_change_from_elsewhere_shows() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.show(latency);
+        page.run(move |write| commands::set_hidden(write, latency, true));
+        assert!(page.row(latency).is_some_and(|fact| fact.hidden));
+        page.run(move |write| commands::edit_fact(write, latency, "Halved p99 latency."));
+        assert_eq!(page.editor_text(), "Halved p99 latency.");
+    }
+
+    #[test]
+    fn a_change_the_page_doesnt_show_doesnt_read_it_again() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.show(latency);
+        assert!(page.read(|page, _| page.detail.is_some()));
+        // Settings: nothing the page shows.
+        page.run(|write| {
+            write.set(
+                crate::database::schema::settings::APPEARANCE,
+                1,
+                &"dark",
+            )
+        });
+        assert!(page.read(|page, _| page.detail.is_some()));
+    }
+
+    #[test]
+    fn keys_do_nothing_with_no_fact_selected() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.keys("enter backspace delete ctrl-z 1 ctrl-enter escape");
+        assert_eq!(page.count(Filter::All), 83);
+        assert_eq!(page.count(Filter::NeedsReview), 1);
+        assert_eq!(page.count(Filter::Hidden), 2);
+        assert!(page.marked().is_empty());
+    }
+
+    #[test]
+    fn three_facts_merge_with_the_wording_a_number_picks() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let listed = page.listed();
+        let (first, second, third) = (listed[20], listed[21], listed[22]);
+        page.show(first);
+        page.show(second);
+        page.keys("ctrl-enter down ctrl-enter");
+        assert_eq!(page.marked(), vec![first, second, third]);
+        page.keys("9");
+        assert_eq!(page.read(|page, _| page.keep), None, "no ninth wording");
+        page.keys("3 enter");
+        for merged in [first, second] {
+            let merged_into: Option<uuid::Uuid> = page.stored("merged_into", merged);
+            assert_eq!(merged_into, Some(third.0));
+        }
+        assert_eq!(page.count(Filter::All), 81);
+        assert_eq!(page.selected(), Some(third));
+        page.keys("ctrl-z");
+        assert_eq!(page.count(Filter::All), 83);
+    }
+
+    #[test]
+    fn editing_the_merged_fact_drops_the_undo() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let migration = page.fact("Led the migration");
+        let linkedin = page.fact("Migrated 12 backend");
+        page.show(migration);
+        page.show(linkedin);
+        page.keys("ctrl-enter enter");
+        assert!(page.read(|page, _| page.undo_merge.is_some()));
+        page.type_fact_text("Led the migration of 12 services.");
+        page.keys("enter");
+        assert!(page.read(|page, _| page.undo_merge.is_none()));
+        assert_eq!(
+            page.stored::<String>("text", migration),
+            "Led the migration of 12 services."
+        );
+    }
+
+    #[test]
+    fn opening_the_note_form_saves_an_edit() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.show(latency);
+        page.type_fact_text("Cut p99 latency by 80%.");
+        page.update(|page, window, cx| page.open_add_form(window, cx));
+        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
+    }
+
+    #[test]
+    fn showing_a_fact_the_filter_leaves_out_lists_all_again() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.filter(Filter::Hidden);
+        let latency = page.fact("Cut p99 latency");
+        page.show(latency);
+        assert_eq!(page.read(|page, cx| page.list.read(cx).delegate().filter()), Filter::All);
+        assert_eq!(page.selected(), Some(latency));
+    }
+
+    #[test]
+    fn down_from_the_search_goes_to_the_first_match() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        let latency = page.fact("Cut p99 latency");
+        page.search("p99");
+        page.keys("down");
+        assert_eq!(page.selected(), Some(latency));
+        page.keys("backspace");
+        assert!(page.stored::<bool>("hidden", latency), "the list has the keys again");
+    }
+
+    #[test]
+    fn erasing_everything_empties_the_page_and_the_sample_comes_back() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.keys("down");
+        page.run(|write| write.erase_everything());
+        assert_eq!(page.count(Filter::All), 0);
+        assert_eq!(page.selected(), None);
+        assert!(page.listed().is_empty());
+        page.run(write_sample);
+        assert_eq!(page.count(Filter::All), 83);
     }
 }
