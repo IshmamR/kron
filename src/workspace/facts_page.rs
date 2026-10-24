@@ -23,7 +23,7 @@ use crate::database::schema::{
     Lines, Sections,
 };
 use crate::database::{Changed, Database, Error};
-use crate::model::commands::{self, Merge};
+use crate::model::commands;
 use crate::model::{FactId, JobId, LineId, possible_duplicate};
 
 const KEY_CONTEXT: &str = "FactsPage";
@@ -48,8 +48,7 @@ actions!(
         FocusSearch,
         FocusList,
         CancelEdit,
-        AddFacts,
-        UndoMerge
+        AddFacts
     ]
 );
 
@@ -77,7 +76,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("backspace", ToggleHidden, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("delete", ToggleHidden, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(LIST_KEY_CONTEXT)),
-        KeyBinding::new("secondary-z", UndoMerge, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("down", FocusList, Some(&input_in(SEARCH_CONTEXT))),
         KeyBinding::new("escape", FocusList, Some(&input_in(SEARCH_CONTEXT))),
         KeyBinding::new("escape", CancelEdit, Some(&input_in(FACT_EDITOR_CONTEXT))),
@@ -110,9 +108,6 @@ pub struct FactsPage {
     /// The fact `fact_editor` holds.
     editing: Option<FactId>,
     note_editor: Entity<TextareaState>,
-    /// The last merge, to undo. Undo is offered while the fact it merged
-    /// into is selected and nothing else has changed.
-    undo_merge: Option<Merge>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -161,7 +156,6 @@ impl Render for FactsPage {
             }))
             .on_action(cx.listener(|this, _: &FocusList, window, cx| this.focus_list(window, cx)))
             .on_action(cx.listener(Self::cancel_edit))
-            .on_action(cx.listener(|this, _: &UndoMerge, window, cx| this.undo_merge(window, cx)))
             .on_action(cx.listener(|this, action: &KeepWording, _, cx| {
                 if let Some(&fact) = this.marked(cx).get(action.index) {
                     this.keep = Some(fact);
@@ -298,7 +292,6 @@ impl FactsPage {
             fact_editor,
             editing: None,
             note_editor,
-            undo_merge: None,
             _subscriptions: subscriptions,
         }
     }
@@ -312,7 +305,6 @@ impl FactsPage {
     pub fn show_fact(&mut self, fact: FactId, window: &mut Window, cx: &mut Context<Self>) {
         self.adding = false;
         // The library may have changed elsewhere since.
-        self.undo_merge = None;
         if self.list.read(cx).delegate().index_of(fact).is_none() {
             self.search
                 .update(cx, |search, cx| search.set_value("", window, cx));
@@ -420,7 +412,6 @@ impl FactsPage {
             return;
         };
         let next = self.next_to_review(fact, cx);
-        self.undo_merge = None;
         self.database
             .read(cx)
             .queue(move |write| commands::confirm_fact(write, fact));
@@ -437,7 +428,6 @@ impl FactsPage {
         let Some(hidden) = self.list.read(cx).delegate().fact(fact).map(|fact| fact.hidden) else {
             return;
         };
-        self.undo_merge = None;
         self.database
             .read(cx)
             .queue(move |write| commands::set_hidden(write, fact, !hidden));
@@ -523,7 +513,6 @@ impl FactsPage {
         if unchanged {
             return;
         }
-        self.undo_merge = None;
         self.list.update(cx, |list, cx| {
             list.delegate_mut().set_text(fact, &text);
             cx.notify();
@@ -538,7 +527,6 @@ impl FactsPage {
         if text.trim().is_empty() {
             return;
         }
-        self.undo_merge = None;
         self.close_add_form(window, cx);
         if self.list.read(cx).delegate().filter() == Filter::Hidden {
             self.set_filter(Filter::All, window, cx);
@@ -572,41 +560,15 @@ impl FactsPage {
         let Some(keep) = self.kept_wording(&marked, cx) else {
             return;
         };
-        self.undo_merge = None;
         self.set_marked(Vec::new(), cx);
         self.keep = None;
         self.select(keep, window, cx);
-        let merged = self
-            .database
-            .read(cx)
-            .write(cx, move |write| commands::merge_facts(write, keep, &marked));
-        cx.spawn(async move |this, cx| match merged.await {
-            Ok(merge) => {
-                if let Err(error) = this.update(cx, |this, cx| {
-                    this.undo_merge = Some(merge);
-                    cx.notify();
-                }) {
-                    eprintln!("facts page: {error}");
-                }
-            }
-            Err(error) => eprintln!("couldn't merge the facts: {error}"),
-        })
-        .detach();
-    }
-
-    fn undo_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(merge) = self.undo_merge.take() else {
-            return;
-        };
-        let keep = merge.keep;
         self.database
             .read(cx)
-            .queue(move |write| commands::undo_merge(write, &merge));
-        self.select(keep, window, cx);
+            .queue(move |write| commands::merge_facts(write, keep, &marked));
     }
 
     fn revert_fact(&mut self, fact: FactId, cx: &mut Context<Self>) {
-        self.undo_merge = None;
         self.database
             .read(cx)
             .queue(move |write| commands::revert_fact(write, fact));
@@ -751,39 +713,8 @@ impl FactsPage {
                     })),
             );
 
-        let merged_here = self
-            .undo_merge
-            .as_ref()
-            .is_some_and(|merge| merge.keep == id);
-
         v_flex()
             .gap_4()
-            .when(merged_here, |this| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .justify_between()
-                        .px_2()
-                        .py_1()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary)
-                        .text_sm()
-                        .child(format!(
-                            "Merged. This fact now has {} sources.",
-                            detail.sources.len()
-                        ))
-                        .child(
-                            Button::new("undo-merge")
-                                .label("Undo")
-                                .icon(IconName::Undo2)
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.undo_merge(window, cx)
-                                })),
-                        ),
-                )
-            })
             .child(
                 v_flex()
                     .gap_2()
@@ -1081,7 +1012,7 @@ impl FactsPage {
             )
             .child(caption(
                 "Number keys pick a wording. Ctrl-click facts in the list to add or remove \
-                 them. You can undo a merge right after it.",
+                 them. Ctrl+Z undoes a merge.",
                 cx,
             ))
             .into_any_element()
@@ -1527,6 +1458,11 @@ mod tests {
             self.settle();
         }
 
+        /// Ctrl+Z, as the workspace handles it.
+        fn undo(&mut self) {
+            testing::undo(self.cx, &self.database);
+        }
+
         /// A command from elsewhere in the app, like the inspector's.
         fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
             testing::run(self.cx, &self.database, command);
@@ -1917,14 +1853,13 @@ mod tests {
         assert_eq!(page.selected(), Some(migration));
         assert!(page.marked().is_empty());
         assert_eq!(page.detail(|detail| detail.sources.len()), Some(2));
-        assert!(page.read(|page, _| page.undo_merge.is_some()));
 
-        page.keys("ctrl-z");
+        page.undo();
         let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
         assert_eq!(merged_into, None);
         assert_eq!(page.count(Filter::All), 83);
         assert_eq!(page.detail(|detail| detail.sources.len()), Some(1));
-        page.keys("ctrl-z");
+        page.undo();
         assert_eq!(page.count(Filter::All), 83, "one undo per merge");
     }
 
@@ -1977,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_is_gone_once_something_else_changes() {
+    fn undo_takes_back_the_latest_change_first() {
         let mut app = TestAppContext::single();
         let mut page = open(&mut app);
         let migration = page.fact("Led the migration");
@@ -1987,7 +1922,9 @@ mod tests {
         page.keys("ctrl-enter");
         page.keys("enter");
         page.keys("backspace");
-        page.keys("ctrl-z");
+        assert!(page.stored::<bool>("hidden", migration));
+        page.undo();
+        assert!(!page.stored::<bool>("hidden", migration));
         let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
         assert_eq!(merged_into, Some(migration.0), "the merge stays");
     }
@@ -2054,7 +1991,7 @@ mod tests {
     fn keys_do_nothing_with_no_fact_selected() {
         let mut app = TestAppContext::single();
         let mut page = open(&mut app);
-        page.keys("enter backspace delete ctrl-z 1 ctrl-enter escape");
+        page.keys("enter backspace delete 1 ctrl-enter escape");
         assert_eq!(page.count(Filter::All), 83);
         assert_eq!(page.count(Filter::NeedsReview), 1);
         assert_eq!(page.count(Filter::Hidden), 2);
@@ -2080,12 +2017,12 @@ mod tests {
         }
         assert_eq!(page.count(Filter::All), 81);
         assert_eq!(page.selected(), Some(third));
-        page.keys("ctrl-z");
+        page.undo();
         assert_eq!(page.count(Filter::All), 83);
     }
 
     #[test]
-    fn editing_the_merged_fact_drops_the_undo() {
+    fn undo_after_editing_the_merged_fact_takes_back_the_edit_first() {
         let mut app = TestAppContext::single();
         let mut page = open(&mut app);
         let migration = page.fact("Led the migration");
@@ -2093,14 +2030,17 @@ mod tests {
         page.show(migration);
         page.show(linkedin);
         page.keys("ctrl-enter enter");
-        assert!(page.read(|page, _| page.undo_merge.is_some()));
+        let before = page.stored::<String>("text", migration);
         page.type_fact_text("Led the migration of 12 services.");
         page.keys("enter");
-        assert!(page.read(|page, _| page.undo_merge.is_none()));
         assert_eq!(
             page.stored::<String>("text", migration),
             "Led the migration of 12 services."
         );
+        page.undo();
+        assert_eq!(page.stored::<String>("text", migration), before);
+        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
+        assert_eq!(merged_into, Some(migration.0), "the merge stays");
     }
 
     #[test]

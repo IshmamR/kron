@@ -1,12 +1,17 @@
+mod history;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::types::{Null, ToSqlOutput, Value, ValueRef};
-use rusqlite::{CachedStatement, Connection, ToSql, Transaction, TransactionBehavior};
+use rusqlite::{
+    CachedStatement, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior,
+};
 
 use super::schema::{Assignment, Column, Files, Fits, Key, Nullable, SoftDelete, Table, files};
 use super::{Change, Error};
+use history::{History, Shape, Step};
 
 /// Distinct statements each connection keeps prepared. rusqlite's default of
 /// 16 is fewer than the tables times the fields commands write, or the
@@ -21,6 +26,9 @@ pub struct Writer {
     clock: Clock,
     /// Where `add_file` saves files; `None` in tests, which keep only the rows.
     files: Option<PathBuf>,
+    /// What the last commands replaced, newest last, and the undos undone.
+    undos: History,
+    redos: History,
 }
 
 impl Writer {
@@ -38,6 +46,8 @@ impl Writer {
             device,
             clock,
             files,
+            undos: History::new(),
+            redos: History::new(),
         })
     }
 
@@ -64,11 +74,47 @@ impl Writer {
     }
 
     /// Runs `command` in one transaction and returns what it returned with
-    /// the rows it changed. If it fails, nothing it wrote is kept.
+    /// the rows it changed. If it fails, nothing it wrote is kept. What it
+    /// replaced goes on the undo history, and a new command ends redoing.
     pub fn execute<R>(
         &mut self,
         command: impl FnOnce(&mut Write) -> Result<R, Error>,
     ) -> Result<(R, Vec<Change>), Error> {
+        let ran = self.run(command)?;
+        if let Some(undo) = ran.undo {
+            self.undos.push(undo);
+            self.redos.clear();
+        }
+        Ok((ran.value, ran.changes))
+    }
+
+    /// Undoes the last command that changed anything, as a command of its
+    /// own, so it syncs like any edit. `None`: nothing to undo.
+    pub fn undo(&mut self) -> Result<Option<Vec<Change>>, Error> {
+        let Some(undo) = self.undos.pop() else {
+            return Ok(None);
+        };
+        let ran = self.run(|write| write.apply(&undo))?;
+        if let Some(redo) = ran.undo {
+            self.redos.push(redo);
+        }
+        Ok(Some(ran.changes))
+    }
+
+    /// Does again what the last undo undid. `None`: nothing to redo.
+    pub fn redo(&mut self) -> Result<Option<Vec<Change>>, Error> {
+        let Some(redo) = self.redos.pop() else {
+            return Ok(None);
+        };
+        let ran = self.run(|write| write.apply(&redo))?;
+        if let Some(undo) = ran.undo {
+            self.undos.push(undo);
+        }
+        Ok(Some(ran.changes))
+    }
+
+    /// `execute`, without touching the history.
+    fn run<R>(&mut self, command: impl FnOnce(&mut Write) -> Result<R, Error>) -> Result<Ran<R>, Error> {
         let now = now();
         let sync_on: bool =
             self.device
@@ -87,12 +133,16 @@ impl Writer {
             now,
             files: self.files.as_deref(),
             changes: Vec::new(),
+            undo: Some(Vec::new()),
+            erased: false,
         };
         let value = command(&mut write)?;
         let Write {
             transaction,
             device_transaction,
             changes,
+            undo,
+            erased,
             ..
         } = write;
         transaction.commit()?;
@@ -111,9 +161,19 @@ impl Writer {
                 eprintln!("couldn't save the sync clock: {error}");
             }
         }
-        Ok((value, changes))
+        if erased {
+            // The rows the history refers to are gone.
+            self.undos.clear();
+            self.redos.clear();
+        }
+        Ok(Ran {
+            value,
+            changes,
+            undo: undo.filter(|steps| !steps.is_empty()),
+        })
     }
 }
+
 
 /// What a command writes through. Every write goes through `insert`, `set`,
 /// `update`, `clear` or `delete`, which also note the change for the views,
@@ -134,6 +194,11 @@ pub struct Write<'a> {
     now: i64,
     files: Option<&'a Path>,
     changes: Vec<Change>,
+    /// What the command replaced, to undo it; `None` once it said it can't
+    /// be undone.
+    undo: Option<Vec<Step>>,
+    /// It ran `erase_everything`.
+    erased: bool,
 }
 
 impl Write<'_> {
@@ -164,12 +229,25 @@ impl Write<'_> {
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        self.connection_of::<T>()?
+        self.connection_for(T::DEVICE)?
             .prepare_cached(&format!(
                 "INSERT INTO \"{}\" ({columns}) VALUES ({placeholders})",
                 T::NAME
             ))?
             .execute(parameters.as_slice())?;
+        // A row without `deleted_at` can't be taken back, and needn't be:
+        // each belongs to a row that has it (a document's text to its
+        // document, a citation to its line), or stays on purpose, like a file.
+        let shape = Shape::of::<T>();
+        if T::SOFT_DELETE
+            && shape.undoable()
+            && let Some(steps) = &mut self.undo
+        {
+            steps.push(Step::Inserted {
+                shape,
+                key: owned(&key.values())?,
+            });
+        }
 
         if let Some(clock) = self.clock.filter(|_| !T::DEVICE) {
             self.transaction
@@ -193,7 +271,7 @@ impl Write<'_> {
         key: impl Key<T::Key>,
         value: &impl Fits<V>,
     ) -> Result<(), Error> {
-        self.update_fields::<T>(&key.values(), &[(column.name(), value)])
+        self.update_row(Shape::of::<T>(), &key.values(), &[(column.name(), value)])
     }
 
     /// Sets several columns of the row with this key in one statement, so
@@ -208,7 +286,7 @@ impl Write<'_> {
             .iter()
             .map(|assignment| (assignment.column, assignment.value))
             .collect();
-        self.update_fields::<T>(&key.values(), &fields)
+        self.update_row(Shape::of::<T>(), &key.values(), &fields)
     }
 
     /// Sets a column that may be NULL to NULL.
@@ -217,13 +295,13 @@ impl Write<'_> {
         column: Column<T, Nullable<V>>,
         key: impl Key<T::Key>,
     ) -> Result<(), Error> {
-        self.update_fields::<T>(&key.values(), &[(column.name(), &Null)])
+        self.update_row(Shape::of::<T>(), &key.values(), &[(column.name(), &Null)])
     }
 
     /// Marks the row deleted.
     pub fn delete<T: SoftDelete>(&mut self, _table: T, key: impl Key<T::Key>) -> Result<(), Error> {
         let now = self.now;
-        self.update_fields::<T>(&key.values(), &[("deleted_at", &now)])
+        self.update_row(Shape::of::<T>(), &key.values(), &[("deleted_at", &now)])
     }
 
     /// Saves `bytes` as `files/ab/abcd…`, named by their BLAKE3 hash, and adds
@@ -267,6 +345,7 @@ impl Write<'_> {
     #[cfg(any(debug_assertions, test))]
     pub fn erase_everything(&mut self) -> Result<(), Error> {
         // Checked at commit, so the order tables empty in doesn't matter.
+        self.erased = true;
         self.transaction
             .pragma_update(None, "defer_foreign_keys", true)?;
         for table in super::schema::TABLES.iter().chain(&["outbox"]) {
@@ -316,9 +395,15 @@ impl Write<'_> {
         Ok(statement)
     }
 
-    /// The connection `T` is in, inside the command's transaction there.
-    fn connection_of<T: Table>(&mut self) -> Result<&Connection, Error> {
-        if !T::DEVICE {
+    /// Leaves the command off the undo history, like installing the bundled
+    /// templates on start: undoing that would take them away.
+    pub fn not_undoable(&mut self) {
+        self.undo = None;
+    }
+
+    /// The database a table is in, inside the command's transaction there.
+    fn connection_for(&mut self, device: bool) -> Result<&Connection, Error> {
+        if !device {
             return Ok(&self.transaction);
         }
         let transaction = match self.device_transaction.take() {
@@ -328,8 +413,11 @@ impl Write<'_> {
         Ok(self.device_transaction.insert(transaction))
     }
 
-    fn update_fields<T: Table>(
+    /// Sets `fields` of the row with `key` in one statement, noting what
+    /// they held for undo.
+    fn update_row(
         &mut self,
+        shape: Shape,
         key: &[&dyn ToSql],
         fields: &[(&'static str, &dyn ToSql)],
     ) -> Result<(), Error> {
@@ -337,42 +425,77 @@ impl Write<'_> {
             return Ok(());
         }
         let row_key = row_key(key)?;
+        let condition = shape.condition(fields.len() + 1);
+        let before = match self.undo.is_some() && shape.undoable() {
+            true => self.read_fields(shape, key, fields.iter().map(|(field, _)| *field))?,
+            false => None,
+        };
         let assignments = fields
             .iter()
             .zip(1..)
             .map(|((field, _), index)| format!("\"{field}\" = ?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let condition = T::KEY
-            .iter()
-            .zip(fields.len() + 1..)
-            .map(|(column, index)| format!("\"{column}\" = ?{index}"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
         let mut parameters: Vec<&dyn ToSql> = fields.iter().map(|(_, value)| *value).collect();
         parameters.extend_from_slice(key);
         let updated = self
-            .connection_of::<T>()?
+            .connection_for(shape.device)?
             .prepare_cached(&format!(
                 "UPDATE \"{}\" SET {assignments} WHERE {condition}",
-                T::NAME
+                shape.name
             ))?
             .execute(parameters.as_slice())?;
         if updated == 0 {
-            return Err(Error::RowNotFound { table: T::NAME });
+            return Err(Error::RowNotFound { table: shape.name });
+        }
+        if let (Some(before), Some(steps)) = (before, &mut self.undo) {
+            let mut changed = Vec::with_capacity(fields.len());
+            for ((field, after), before) in fields.iter().zip(before) {
+                changed.push((*field, before, owned_value(*after)?));
+            }
+            steps.push(Step::Fields {
+                shape,
+                key: owned(key)?,
+                fields: changed,
+            });
         }
         for (field, _) in fields {
-            self.note_field_change::<T>(&row_key, field)?;
+            self.note_field_change(shape, &row_key, field)?;
         }
         Ok(())
     }
 
-    fn note_field_change<T: Table>(
+    /// The row's values of `fields`, in order; `None` if there's no such row.
+    fn read_fields(
         &mut self,
+        shape: Shape,
+        key: &[&dyn ToSql],
+        fields: impl Iterator<Item = &'static str>,
+    ) -> Result<Option<Vec<Value>>, Error> {
+        let columns = fields
+            .map(|field| format!("\"{field}\""))
+            .collect::<Vec<_>>();
+        let count = columns.len();
+        let sql = format!(
+            "SELECT {} FROM \"{}\" WHERE {}",
+            columns.join(", "),
+            shape.name,
+            shape.condition(1)
+        );
+        Ok(self
+            .connection_for(shape.device)?
+            .prepare_cached(&sql)?
+            .query_row(key, |row| (0..count).map(|index| row.get(index)).collect())
+            .optional()?)
+    }
+
+    fn note_field_change(
+        &mut self,
+        shape: Shape,
         row_key: &[u8],
         field: &'static str,
     ) -> Result<(), Error> {
-        if let Some(clock) = self.clock.filter(|_| !T::DEVICE) {
+        if let Some(clock) = self.clock.filter(|_| !shape.device) {
             // Entries hold no values: the sender reads them from the row. So
             // a field needs one entry, with its latest clock, and none while
             // the row is still unsent: field '' sends it whole, edits included.
@@ -383,23 +506,31 @@ impl Write<'_> {
                 .prepare_cached(
                     "UPDATE outbox SET clock = ?3 WHERE table_name = ?1 AND row_key = ?2 AND field = ''",
                 )?
-                .execute((T::NAME, row_key, clock))?;
+                .execute((shape.name, row_key, clock))?;
             if unsent == 0 {
                 self.transaction
                     .prepare_cached(
                         "INSERT INTO outbox (table_name, row_key, field, clock) VALUES (?1, ?2, ?3, ?4)
                          ON CONFLICT (table_name, row_key, field) DO UPDATE SET clock = excluded.clock",
                     )?
-                    .execute((T::NAME, row_key, field, clock))?;
+                    .execute((shape.name, row_key, field, clock))?;
             }
         }
         self.changes.push(Change {
-            table: T::NAME,
+            table: shape.name,
             key: row_key.into(),
             field: Some(field),
         });
         Ok(())
     }
+}
+
+/// A committed command: what it returned, the rows it changed, and what it
+/// replaced, to undo it, if anything.
+struct Ran<R> {
+    value: R,
+    changes: Vec<Change>,
+    undo: Option<Vec<Step>>,
 }
 
 /// Hybrid logical clock: ms since the Unix epoch shifted up 16 bits, plus a
@@ -455,6 +586,25 @@ pub(super) fn row_key(values: &[&dyn ToSql]) -> Result<Vec<u8>, Error> {
     Ok(key)
 }
 
+/// The values, to keep past the command.
+fn owned(values: &[&dyn ToSql]) -> Result<Vec<Value>, Error> {
+    values.iter().map(|value| owned_value(*value)).collect()
+}
+
+fn owned_value(value: &dyn ToSql) -> Result<Value, Error> {
+    match value.to_sql()? {
+        ToSqlOutput::Borrowed(value) => Ok(match value {
+            ValueRef::Null => Value::Null,
+            ValueRef::Integer(integer) => Value::Integer(integer),
+            ValueRef::Real(real) => Value::Real(real),
+            ValueRef::Text(text) => Value::Text(String::from_utf8_lossy(text).into_owned()),
+            ValueRef::Blob(bytes) => Value::Blob(bytes.to_vec()),
+        }),
+        ToSqlOutput::Owned(value) => Ok(value),
+        other => Err(Error::Misuse(format!("a column holds a value, not {other:?}"))),
+    }
+}
+
 fn now() -> i64 {
     // A clock before 1970 is a broken clock; 0 still keeps the hybrid clock
     // moving forward on its counter.
@@ -466,7 +616,6 @@ fn now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::OptionalExtension;
     use uuid::Uuid;
 
     use super::*;

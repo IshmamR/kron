@@ -36,7 +36,7 @@ const DETAILS_MIN_WIDTH: Pixels = px(280.);
 const DETAILS_MAX_WIDTH: Pixels = px(560.);
 const DOT_SIZE: Pixels = px(9.);
 
-actions!(application_view, [SaveEvent, CancelEvent, UndoDelete]);
+actions!(application_view, [SaveEvent, CancelEvent]);
 
 /// Opens the form to log an event of this kind.
 #[derive(Clone, Debug, PartialEq, Action)]
@@ -48,7 +48,6 @@ pub struct LogStep {
 pub fn init(cx: &mut App) {
     let input_in = format!("{FORM_CONTEXT} > Input");
     cx.bind_keys([
-        KeyBinding::new("secondary-z", UndoDelete, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-enter", SaveEvent, Some(FORM_CONTEXT)),
         KeyBinding::new("escape", CancelEvent, Some(FORM_CONTEXT)),
         // The text boxes' own Esc does nothing, and Ctrl+Enter in the note
@@ -76,8 +75,6 @@ pub struct ApplicationView {
     date: Entity<DatePickerState>,
     with: Entity<InputState>,
     note: Entity<TextareaState>,
-    /// The last event deleted, to undo.
-    deleted: Option<JobEvent>,
     /// The details panel's width.
     layout: Entity<ResizableState>,
     /// Holds focus when nothing in the tab has it, so its keys and the job
@@ -120,9 +117,6 @@ impl Render for ApplicationView {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, action: &LogStep, window, cx| {
                 this.open_form(action.step, None, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &UndoDelete, window, cx| {
-                this.undo_delete(window, cx)
             }))
             .size_full()
             .child(
@@ -190,7 +184,6 @@ impl ApplicationView {
             application: None,
             details: None,
             form: None,
-            deleted: None,
             layout: cx.new(|_| ResizableState::default()),
             focus_handle: cx.focus_handle(),
         }
@@ -202,7 +195,6 @@ impl ApplicationView {
             self.application = None;
             self.details = None;
             self.form = None;
-            self.deleted = None;
             cx.notify();
         }
     }
@@ -348,7 +340,6 @@ impl ApplicationView {
             note,
         };
         self.form = None;
-        self.deleted = None;
         self.database
             .read(cx)
             .queue(move |write| commands::save_event(write, job, &event));
@@ -358,15 +349,6 @@ impl ApplicationView {
     /// Focuses the timeline too, so Ctrl+Z undoes it: the click left focus
     /// on the button.
     fn delete(&mut self, event: EventId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(job) = self.job else {
-            return;
-        };
-        self.deleted = self
-            .application
-            .as_ref()
-            .filter(|application| application.job == job)
-            .and_then(|application| application.events.iter().find(|each| each.id == event))
-            .cloned();
         self.database
             .read(cx)
             .queue(move |write| commands::delete_event(write, event));
@@ -377,22 +359,10 @@ impl ApplicationView {
         }
     }
 
-    fn undo_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(event) = self.deleted.take() else {
-            return;
-        };
-        self.focus_handle.focus(window, cx);
-        self.database
-            .read(cx)
-            .queue(move |write| commands::restore_event(write, event.id));
-        cx.notify();
-    }
-
     fn log_now(&mut self, kind: JobEventKind, cx: &mut Context<Self>) {
         let Some(job) = self.job else {
             return;
         };
-        self.deleted = None;
         let event = JobEvent::new(Utc::now(), kind);
         self.database
             .read(cx)
@@ -508,29 +478,6 @@ impl ApplicationView {
                     )
                 },
             )
-            .when_some(self.deleted.as_ref(), |this, deleted| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .justify_between()
-                        .px_2()
-                        .py_1()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary)
-                        .text_sm()
-                        .child(format!("Deleted “{}”.", event_title(deleted, now)))
-                        .child(
-                            Button::new("undo-delete")
-                                .label("Undo")
-                                .icon(IconName::Undo2)
-                                .ghost()
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.undo_delete(window, cx)
-                                })),
-                        ),
-                )
-            })
     }
 
     fn render_form(&self, details: &JobDetails, cx: &Context<Self>) -> impl IntoElement {
@@ -1138,6 +1085,11 @@ mod tests {
             self.settle();
         }
 
+        /// Ctrl+Z, as the workspace handles it.
+        fn undo(&mut self) {
+            testing::undo(self.cx, &self.database);
+        }
+
         fn log(&mut self, step: StepKind) {
             self.cx.dispatch_action(LogStep { step });
             self.settle();
@@ -1267,7 +1219,7 @@ mod tests {
 
     /// Fixed before: the Delete button kept focus, so Ctrl+Z went nowhere.
     #[test]
-    fn ctrl_z_after_deleting_an_event_brings_it_back() {
+    fn deleting_an_event_keeps_focus_in_the_tab_and_undo_brings_it_back() {
         let mut app = TestAppContext::single();
         let mut tab = open(&mut app, "Ledgerly");
         let events = tab.events();
@@ -1277,12 +1229,14 @@ mod tests {
         // As after a click: focus outside the tab's keys.
         tab.cx.update(|window, cx| cx.focus_handle().focus(window, cx));
         tab.update(|view, window, cx| view.delete(event, window, cx));
+        let focused = tab
+            .view
+            .update_in(tab.cx, |view, window, _| view.focus_handle.is_focused(window));
+        assert!(focused, "so Ctrl+Z reaches the workspace");
         assert_eq!(tab.events().len(), events.len() - 1);
-        tab.keys("ctrl-z");
+        tab.undo();
         assert_eq!(tab.events().len(), events.len());
         assert!(tab.events().iter().any(|each| each.id == event));
-        tab.keys("ctrl-z");
-        assert_eq!(tab.events().len(), events.len(), "one undo per delete");
     }
 
     #[test]

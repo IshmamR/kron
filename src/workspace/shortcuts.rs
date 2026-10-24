@@ -9,14 +9,14 @@ use gpui_kit::{
 
 use super::ToggleSidebar;
 use super::facts_page::{
-    AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden, UndoMerge,
+    AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden,
 };
-use super::application_view::{CancelEvent, SaveEvent, UndoDelete};
+use super::application_view::{CancelEvent, SaveEvent};
 use super::job_view::{
     Back, SelectNextLine, SelectPreviousLine, ShowApplicationTab, ShowResumeTab,
 };
 use super::resume_grid::{OpenSelected, SelectLeft, SelectRight, ShowFilter};
-use super::{ShowShortcuts, resume_grid};
+use super::{Redo, ShowShortcuts, Undo, resume_grid};
 
 /// Two columns, so every shortcut fits without scrolling on most screens.
 const WIDTH: f32 = 900.;
@@ -106,6 +106,8 @@ fn groups() -> Vec<Group> {
             shortcuts: vec![
                 shortcut("Show or hide the sidebar", vec![Action(Box::new(ToggleSidebar))]),
                 shortcut("Show keyboard shortcuts", vec![Action(Box::new(ShowShortcuts))]),
+                shortcut("Undo the last change", vec![Action(Box::new(Undo))]),
+                shortcut("Redo the change undone", vec![Action(Box::new(Redo))]),
             ],
         },
         Group {
@@ -157,7 +159,6 @@ fn groups() -> Vec<Group> {
             shortcuts: vec![
                 shortcut("Save the event", vec![Action(Box::new(SaveEvent))]),
                 shortcut("Cancel logging", vec![Action(Box::new(CancelEvent))]),
-                shortcut("Undo deleting an event", vec![Action(Box::new(UndoDelete))]),
             ],
         },
         Group {
@@ -187,7 +188,6 @@ fn groups() -> Vec<Group> {
                 ),
                 shortcut("Merge, while merging", vec![Action(Box::new(ConfirmFact))]),
                 shortcut("Clear merge marks", vec![Action(Box::new(Dismiss))]),
-                shortcut("Undo the merge", vec![Action(Box::new(UndoMerge))]),
                 shortcut("Save the fact's text, while editing it", vec![Keystroke("enter")]),
                 shortcut("Add a line break, while editing", vec![Keystroke("shift-enter")]),
                 shortcut("Cancel editing", vec![Action(Box::new(CancelEdit))]),

@@ -48,3 +48,10 @@ pub fn run(
     database.read_with(cx, |database, _| database.queue(command));
     settle(cx, database);
 }
+
+/// Undoes the last change, as Ctrl+Z does, and settles.
+pub fn undo(cx: &mut VisualTestContext, database: &Entity<Database>) {
+    // Dropping the task only stops waiting: the undo still runs.
+    database.read_with(cx, |database, cx| drop(database.undo(cx)));
+    settle(cx, database);
+}

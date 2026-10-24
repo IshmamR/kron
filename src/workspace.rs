@@ -15,13 +15,14 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::kbd::Kbd;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{IconName, Sizable, h_flex};
+use gpui_kit::component::{IconName, Root, Sizable, WindowExt, h_flex};
 use gpui_kit::{
     Action, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
     KeyBinding, Pixels, SharedString, Subscription, Task, Window, WindowBounds, actions, div,
@@ -49,12 +50,15 @@ const TOGGLE_WIDTH: Pixels = px(32.);
 /// drag saves once, not on every step.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
 
-actions!(workspace, [ToggleSidebar, ShowShortcuts]);
+actions!(workspace, [ToggleSidebar, ShowShortcuts, Undo, Redo]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("secondary-b", ToggleSidebar, None),
         KeyBinding::new("secondary-/", ShowShortcuts, None),
+        // A text field's own undo comes first: its key context is deeper.
+        KeyBinding::new("secondary-z", Undo, None),
+        KeyBinding::new("secondary-y", Redo, None),
     ]);
     facts_page::init(cx);
     job_view::init(cx);
@@ -130,6 +134,8 @@ impl Render for Workspace {
             }))
             .on_action(|_: &ShowShortcuts, window, cx| shortcuts::open(window, cx))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo_or_redo(false, window, cx)))
+            .on_action(cx.listener(|this, _: &Redo, window, cx| this.undo_or_redo(true, window, cx)))
             .size_full()
             .child(
                 h_flex()
@@ -317,6 +323,35 @@ impl Workspace {
             .read(cx)
             .queue(move |write| settings::set_sidebar_collapsed(write, collapsed));
         cx.notify();
+    }
+
+    /// Undoes the last change, or redoes the last undone, wherever it was
+    /// made, and says so: it may be on another page.
+    fn undo_or_redo(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let database = self.database.read(cx);
+        let undone = if redo { database.redo(cx) } else { database.undo(cx) };
+        cx.spawn_in(window, async move |_, cx| {
+            let message = match (undone.await, redo) {
+                (Ok(true), false) => "Undone",
+                (Ok(true), true) => "Redone",
+                (Ok(false), false) => "Nothing to undo",
+                (Ok(false), true) => "Nothing to redo",
+                (Err(error), _) => {
+                    eprintln!("couldn't undo or redo: {error}");
+                    if redo { "Couldn't redo" } else { "Couldn't undo" }
+                }
+            };
+            if let Err(error) = cx.update(|window, cx| {
+                // The kit's notifications live in its Root, which a test's
+                // window may not have.
+                if window.root::<Root>().flatten().is_some() {
+                    window.push_notification(Notification::new().message(message), cx);
+                }
+            }) {
+                eprintln!("workspace: {error}");
+            }
+        })
+        .detach();
     }
 
     fn open_job(&mut self, job: JobId, window: &mut Window, cx: &mut Context<Self>) {
@@ -599,6 +634,23 @@ mod tests {
         assert_eq!(open.read(|workspace, _| workspace.needs_review), 1);
         let fact = FactId(open.id("SELECT id FROM facts WHERE review IS NOT NULL"));
         open.run(move |write| commands::confirm_fact(write, fact));
+        assert_eq!(open.read(|workspace, _| workspace.needs_review), 0);
+    }
+
+    #[test]
+    fn ctrl_z_undoes_the_last_change_and_ctrl_y_redoes_it() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        let fact = FactId(open.id("SELECT id FROM facts WHERE review IS NOT NULL"));
+        open.run(move |write| commands::confirm_fact(write, fact));
+        assert_eq!(open.read(|workspace, _| workspace.needs_review), 0);
+        let keys = |open: &mut Open, keystrokes: &str| {
+            open.cx.simulate_keystrokes(keystrokes);
+            testing::settle(open.cx, &open.database);
+        };
+        keys(&mut open, "ctrl-z");
+        assert_eq!(open.read(|workspace, _| workspace.needs_review), 1);
+        keys(&mut open, "ctrl-y");
         assert_eq!(open.read(|workspace, _| workspace.needs_review), 0);
     }
 

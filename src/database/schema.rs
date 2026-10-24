@@ -13,6 +13,8 @@ pub trait Table: Copy {
     type Key;
     /// In device.sqlite, so never synced; otherwise in kron.sqlite, and synced.
     const DEVICE: bool = false;
+    /// Has `deleted_at`, and implements `SoftDelete`.
+    const SOFT_DELETE: bool = false;
 }
 
 /// A table with `deleted_at`: only these delete.

@@ -144,25 +144,14 @@ pub fn revert_fact(write: &mut Write, fact: FactId) -> Result<(), Error> {
     write.set(facts::TEXT, fact.0, &extracted)
 }
 
-/// A merge, with what it changed on the kept fact, to undo it.
-#[derive(Clone, Debug)]
-pub struct Merge {
-    pub keep: FactId,
-    pub others: Vec<FactId>,
-    review: Option<String>,
-    review_note: Option<String>,
-    entry: Option<Uuid>,
-}
-
 /// Folds `others` into `keep`, which keeps its wording and gains their
 /// sources and citations: each of them points at it (`merged_into`), and
 /// nothing is deleted. Merging is reviewing, so `keep` needs no review after.
-pub fn merge_facts(write: &mut Write, keep: FactId, others: &[FactId]) -> Result<Merge, Error> {
+pub fn merge_facts(write: &mut Write, keep: FactId, others: &[FactId]) -> Result<(), Error> {
     let others: Vec<FactId> = others.iter().copied().filter(|&id| id != keep).collect();
-    let (review, review_note, entry): (Option<String>, Option<String>, Option<Uuid>) = write
-        .prepare("SELECT review, review_note, entry_id FROM facts WHERE id = ?1")?
-        .query_row([keep.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-    let mut adopted = entry;
+    let mut adopted: Option<Uuid> = write
+        .prepare("SELECT entry_id FROM facts WHERE id = ?1")?
+        .query_row([keep.0], |row| row.get(0))?;
     for other in &others {
         write.set(facts::MERGED_INTO, other.0, &Some(keep.0))?;
         if adopted.is_none() {
@@ -178,28 +167,6 @@ pub fn merge_facts(write: &mut Write, keep: FactId, others: &[FactId]) -> Result
             facts::REVIEW.value(&None::<&str>),
             facts::REVIEW_NOTE.value(&None::<&str>),
             facts::ENTRY_ID.value(&adopted),
-        ],
-    )?;
-    Ok(Merge {
-        keep,
-        others,
-        review,
-        review_note,
-        entry,
-    })
-}
-
-pub fn undo_merge(write: &mut Write, merge: &Merge) -> Result<(), Error> {
-    for other in &merge.others {
-        write.clear(facts::MERGED_INTO, other.0)?;
-    }
-    write.update(
-        Facts,
-        merge.keep.0,
-        &[
-            facts::REVIEW.value(&merge.review),
-            facts::REVIEW_NOTE.value(&merge.review_note),
-            facts::ENTRY_ID.value(&merge.entry),
         ],
     )
 }
@@ -260,10 +227,6 @@ pub fn save_event(write: &mut Write, job: JobId, event: &JobEvent) -> Result<(),
 
 pub fn delete_event(write: &mut Write, event: EventId) -> Result<(), Error> {
     write.delete(Events, event.0)
-}
-
-pub fn restore_event(write: &mut Write, event: EventId) -> Result<(), Error> {
-    write.clear(events::DELETED_AT, event.0)
 }
 
 /// The custom section for entries without one of their own, made the first
@@ -387,6 +350,32 @@ mod tests {
         }
     }
 
+    /// Every row it added with `deleted_at` is marked deleted; the rest,
+    /// like the note's text, belong to one of those.
+    #[test]
+    fn undoing_a_note_deletes_everything_it_added() -> Result<(), Error> {
+        let mut writer = empty()?;
+        run(&mut writer, |write| add_note(write, "Organized Code Fest 2019.\nRan a team of 15."))?;
+        let live = |writer: &Writer| -> Result<Vec<usize>, Error> {
+            ["documents", "entries", "facts", "fact_sources", "custom_sections"]
+                .iter()
+                .map(|table| {
+                    count(
+                        writer.kron(),
+                        &format!("SELECT count(*) FROM {table} WHERE deleted_at IS NULL"),
+                        [],
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(live(&writer)?, [1, 1, 2, 2, 1]);
+        assert!(writer.undo()?.is_some());
+        assert_eq!(live(&writer)?, [0, 0, 0, 0, 0]);
+        assert!(writer.redo()?.is_some());
+        assert_eq!(live(&writer)?, [1, 1, 2, 2, 1]);
+        Ok(())
+    }
+
     #[test]
     fn a_note_becomes_one_fact_per_line_grouped_together() -> Result<(), Error> {
         let mut writer = empty()?;
@@ -461,9 +450,16 @@ mod tests {
         both.sort();
         both.dedup();
 
-        let merge = run(&mut writer, |write| {
-            merge_facts(write, keep, &[keep, merged])
-        })?;
+        let review_of_kept = |writer: &Writer| -> Result<Option<String>, Error> {
+            Ok(writer
+                .kron()
+                .query_row("SELECT review FROM facts WHERE id = ?1", [keep.0], |row| row.get(0))?)
+        };
+        // Flagged, so the merge has a review to clear and undo to restore.
+        run(&mut writer, |write| write.set(facts::REVIEW, keep.0, &Some("duplicate")))?;
+        let reviewed_before = review_of_kept(&writer)?;
+
+        run(&mut writer, |write| merge_facts(write, keep, &[keep, merged]))?;
         let (merged_into, review): (Option<Uuid>, Option<String>) = writer.kron().query_row(
             "SELECT merged.merged_into, kept.review FROM facts AS merged, facts AS kept
              WHERE merged.id = ?1 AND kept.id = ?2",
@@ -476,7 +472,8 @@ mod tests {
         assert_eq!(uses(writer.kron(), keep)?, both);
         assert!(uses(writer.kron(), merged)?.is_empty());
 
-        run(&mut writer, |write| undo_merge(write, &merge))?;
+        assert!(writer.undo()?.is_some());
+        assert_eq!(review_of_kept(&writer)?, reviewed_before);
         assert_eq!(sources(writer.kron(), keep)?, 1);
         assert_eq!(uses(writer.kron(), keep)?, kept_uses);
         assert_eq!(uses(writer.kron(), merged)?, merged_uses);
@@ -570,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn an_event_can_change_kind_be_deleted_and_come_back() -> Result<(), Error> {
+    fn an_event_can_change_kind_be_deleted_and_be_undone() -> Result<(), Error> {
         let mut writer = with_sample()?;
         let job = sample::job(writer.kron(), "Ledgerly")?;
         let mut event = JobEvent::new(
@@ -602,8 +599,16 @@ mod tests {
 
         run(&mut writer, |write| delete_event(write, event.id))?;
         assert_eq!(events(&writer)?.len(), before - 1);
-        run(&mut writer, |write| restore_event(write, event.id))?;
+        assert!(writer.undo()?.is_some());
         assert_eq!(events(&writer)?.len(), before);
+
+        // Undone in one statement too, as the CHECKs need.
+        assert!(writer.undo()?.is_some());
+        let undone = events(&writer)?
+            .into_iter()
+            .find(|each| each.id == event.id)
+            .map(|each| each.kind);
+        assert!(matches!(undone, Some(JobEventKind::Interview { .. })), "{undone:?}");
         Ok(())
     }
 

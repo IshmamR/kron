@@ -105,21 +105,47 @@ impl Database {
         cx: &App,
         command: impl FnOnce(&mut Write) -> Result<R, Error> + Send + 'static,
     ) -> Task<Result<R, Error>> {
-        let outcome = self.writer.submit(command);
+        let outcome = self.writer.submit(move |writer| writer.execute(command));
+        cx.background_spawn(async move { outcome.await.unwrap_or(Err(Error::WriterStopped)) })
+    }
+
+    /// Undoes the last command that changed anything, after those queued.
+    /// Resolves to whether there was one.
+    pub fn undo(&self, cx: &App) -> Task<Result<bool, Error>> {
+        self.history(cx, Writer::undo)
+    }
+
+    /// Does again what the last undo undid. Resolves to whether there was one.
+    pub fn redo(&self, cx: &App) -> Task<Result<bool, Error>> {
+        self.history(cx, Writer::redo)
+    }
+
+    fn history(
+        &self,
+        cx: &App,
+        step: fn(&mut Writer) -> Result<Option<Vec<Change>>, Error>,
+    ) -> Task<Result<bool, Error>> {
+        let outcome = self.writer.submit(move |writer| {
+            Ok(match step(writer)? {
+                Some(changes) => (true, changes),
+                None => (false, Vec::new()),
+            })
+        });
         cx.background_spawn(async move { outcome.await.unwrap_or(Err(Error::WriterStopped)) })
     }
 
     /// `write` for a command whose result nobody needs: views hear of its
     /// changes through `Changed`, and the writer logs a failure.
     pub fn queue(&self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
-        drop(self.writer.submit(command));
+        drop(self.writer.submit(move |writer| writer.execute(command)));
     }
 
     /// Waits for the commands queued so far to commit. Their `Changed` events
     /// are sent by then, for the test to deliver.
     #[cfg(test)]
     pub fn flush(&self) {
-        let flushed = futures::executor::block_on(self.writer.submit(|_| Ok(())));
+        let flushed =
+            futures::executor::block_on(self.writer.submit(|writer| writer.execute(|_| Ok(()))));
         assert!(matches!(flushed, Ok(Ok(()))), "the writer has stopped");
     }
 }
@@ -271,16 +297,16 @@ impl WriterThread {
         }
     }
 
-    /// Resolves to the command's outcome, or is cancelled if the writer
-    /// stopped before running it.
+    /// Runs `task` with the writer: a command, or an undo. Resolves to its
+    /// outcome, or is cancelled if the writer stopped before running it.
     fn submit<R: Send + 'static>(
         &self,
-        command: impl FnOnce(&mut Write) -> Result<R, Error> + Send + 'static,
+        task: impl FnOnce(&mut Writer) -> Result<(R, Vec<Change>), Error> + Send + 'static,
     ) -> oneshot::Receiver<Result<R, Error>> {
         let (outcome, receiver) = oneshot::channel();
         let changes = self.changes.clone();
         let queued: Command = Box::new(move |writer| {
-            let result = writer.execute(command).map(|(value, changed)| {
+            let result = task(writer).map(|(value, changed)| {
                 // Fails only once the entity is gone, with no view left to tell.
                 if !changed.is_empty()
                     && changes
@@ -511,7 +537,7 @@ mod tests {
         let (changes, mut changed) = async_mpsc::unbounded();
         let writer = WriterThread::spawn(opened.writer, changes);
         let id = Uuid::now_v7();
-        block_on(writer.submit(move |write| add_note(write, id)))
+        block_on(writer.submit(move |writer| writer.execute(|write| add_note(write, id))))
             .unwrap_or(Err(Error::WriterStopped))?;
         assert_eq!(count(&opened.reader, "documents")?, 1);
         let event = block_on(changed.next());
@@ -528,7 +554,7 @@ mod tests {
         let ids: Vec<Uuid> = (0..50).map(|_| Uuid::now_v7()).collect();
         // Nobody waits for these: dropping the receiver doesn't cancel them.
         for &id in &ids {
-            drop(writer.submit(move |write| add_note(write, id)));
+            drop(writer.submit(move |writer| writer.execute(|write| add_note(write, id))));
         }
         writer.close();
         let written: Vec<[u8; 16]> = opened
@@ -548,7 +574,7 @@ mod tests {
         let (changes, _changed) = async_mpsc::unbounded();
         let mut writer = WriterThread::spawn(opened.writer, changes);
         writer.close();
-        let outcome = block_on(writer.submit(|_| Ok(())));
+        let outcome = block_on(writer.submit(|writer| writer.execute(|_| Ok(()))));
         assert!(outcome.is_err());
         Ok(())
     }

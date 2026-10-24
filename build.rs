@@ -181,12 +181,15 @@ fn write_table(code: &mut String, table: &Table, device: bool) -> Result<(), Box
     if device {
         writeln!(code, "    const DEVICE: bool = true;")?;
     }
-    writeln!(code, "}}\n")?;
-    if table
+    let soft_delete = table
         .columns
         .iter()
-        .any(|column| column.name == "deleted_at")
-    {
+        .any(|column| column.name == "deleted_at");
+    if soft_delete {
+        writeln!(code, "    const SOFT_DELETE: bool = true;")?;
+    }
+    writeln!(code, "}}\n")?;
+    if soft_delete {
         writeln!(code, "impl SoftDelete for {type_name} {{}}\n")?;
     }
     if table.columns.is_empty() {

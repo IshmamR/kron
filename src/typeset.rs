@@ -308,6 +308,7 @@ pub fn template_of_version(version: Option<Uuid>) -> &'static Template {
 /// Writes the bundled templates into the database as catalog templates,
 /// unless they're there already, so generations can refer to their versions.
 pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
+    write.not_undoable();
     for template in &TEMPLATES {
         let installed = write
             .prepare("SELECT 1 FROM template_versions WHERE id = ?1")?
