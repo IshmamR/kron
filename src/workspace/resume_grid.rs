@@ -1,7 +1,8 @@
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
-use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
@@ -13,10 +14,13 @@ use gpui_kit::{
     FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ObjectFit, Pixels,
     Subscription, Window, actions, canvas, div, img, prelude::*, px, white,
 };
+use rusqlite::Connection;
 
 use super::application_view;
 use super::previews::{self, Previews, Render as PageRender};
-use crate::model::{Job, JobId, Library, Nudge, Stage};
+use crate::database::schema::{FactVersions, Facts, Generations, UnsupportedClaims};
+use crate::database::{Changed, Database, Error};
+use crate::model::{Job, JobId, Library, Nudge, ResumeId, Stage};
 
 const KEY_CONTEXT: &str = "ResumeGrid";
 const CARD_WIDTH: Pixels = px(200.);
@@ -71,10 +75,16 @@ pub enum ResumeGridEvent {
     Open(JobId),
 }
 
-/// Home screen: one card per job, showing its résumé's first page.
+/// Home screen: one card per job, showing its résumé's first page. Which
+/// jobs, in what order, and their stages still come from `Library` until the
+/// timeline reads the database (storage.md, step 4).
 pub struct ResumeGrid {
     library: Entity<Library>,
+    database: Entity<Database>,
     previews: Entity<Previews>,
+    /// Each job's current résumé, by job: read when first shown, and again
+    /// after the database changes.
+    current_resumes: Option<HashMap<JobId, CurrentResume>>,
     selected: Option<JobId>,
     filter: JobFilter,
     focus_handle: FocusHandle,
@@ -87,14 +97,17 @@ impl EventEmitter<ResumeGridEvent> for ResumeGrid {}
 
 impl Render for ResumeGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.read_current_resumes(cx);
+        let current_resumes = self.current_resumes.clone().unwrap_or_default();
         let pixels_per_point = previews::pixels_per_point(THUMBNAIL_WIDTH, window);
         let now = Utc::now();
         let jobs = self.visible_jobs(cx, now);
         let renders: Vec<Option<PageRender>> = jobs
             .iter()
-            .map(|&job| {
+            .map(|job| {
+                let resume = current_resumes.get(job)?.id;
                 self.previews
-                    .update(cx, |previews, cx| previews.get(job, pixels_per_point, cx))
+                    .update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
             })
             .collect();
 
@@ -113,10 +126,7 @@ impl Render for ResumeGrid {
             .filter_map(|&id| library.job(id))
             .zip(renders)
             .map(|(job, render)| {
-                let outdated = job
-                    .current_resume()
-                    .is_some_and(|resume| !library.changed_facts(resume).is_empty());
-                self.render_card(job, render, outdated, now, cx)
+                self.render_card(job, current_resumes.get(&job.id), render, now, cx)
                     .into_any_element()
             })
             .collect();
@@ -234,6 +244,7 @@ impl Focusable for ResumeGrid {
 impl ResumeGrid {
     pub fn new(
         library: Entity<Library>,
+        database: Entity<Database>,
         previews: Entity<Previews>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -241,9 +252,21 @@ impl ResumeGrid {
             _subscriptions: vec![
                 cx.observe(&library, |_, _, cx| cx.notify()),
                 cx.observe(&previews, |_, _, cx| cx.notify()),
+                cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+                    if changed.touches(Generations)
+                        || changed.touches(UnsupportedClaims)
+                        || changed.touches(FactVersions)
+                        || changed.touches(Facts)
+                    {
+                        this.current_resumes = None;
+                        cx.notify();
+                    }
+                }),
             ],
             library,
+            database,
             previews,
+            current_resumes: None,
             selected: None,
             filter: JobFilter::default(),
             focus_handle: cx.focus_handle(),
@@ -254,6 +277,17 @@ impl ResumeGrid {
     pub fn select(&mut self, job: JobId, cx: &mut Context<Self>) {
         self.selected = Some(job);
         cx.notify();
+    }
+
+    fn read_current_resumes(&mut self, cx: &App) {
+        if self.current_resumes.is_some() {
+            return;
+        }
+        let connection = self.database.read(cx).connection();
+        self.current_resumes = Some(current_resumes(connection).unwrap_or_else(|error| {
+            eprintln!("résumé grid: couldn't read the résumés: {error}");
+            HashMap::new()
+        }));
     }
 
     fn columns(&self) -> usize {
@@ -302,17 +336,16 @@ impl ResumeGrid {
     fn render_card(
         &self,
         job: &Job,
+        resume: Option<&CurrentResume>,
         render: Option<PageRender>,
-        outdated: bool,
         now: DateTime<Utc>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
         let id = job.id;
         let selected = self.selected == Some(id);
-        let unsupported = job
-            .current_resume()
-            .map_or(0, |resume| resume.unsupported_claims.len());
+        let unsupported = resume.map_or(0, |resume| resume.unsupported);
+        let outdated = resume.is_some_and(|resume| resume.outdated);
         let page_count = match &render {
             Some(PageRender::Ready(pages)) => pages.images.len(),
             _ => 0,
@@ -332,7 +365,7 @@ impl ResumeGrid {
             details.push_str(&format!(" · {page_count} pages"));
         }
 
-        let thumbnail = match (job.current_resume(), render) {
+        let thumbnail = match (resume, render) {
             (None, _) => centered(
                 div()
                     .text_xs()
@@ -484,6 +517,62 @@ impl ResumeGrid {
     }
 }
 
+/// What a card shows of its job's current résumé.
+#[derive(Clone)]
+struct CurrentResume {
+    id: ResumeId,
+    unsupported: usize,
+    /// A fact it was generated from changed since.
+    outdated: bool,
+}
+
+/// Each job's current résumé, by job. A fact merged into another since
+/// counts as the one at the end of its merges.
+fn current_resumes(connection: &Connection) -> Result<HashMap<JobId, CurrentResume>, Error> {
+    let mut statement = connection.prepare_cached(
+        "WITH RECURSIVE
+             chains(fact_id, root_id) AS (
+                 SELECT id, merged_into FROM facts WHERE merged_into IS NOT NULL
+                 UNION
+                 SELECT chains.fact_id, facts.merged_into
+                 FROM chains JOIN facts ON facts.id = chains.root_id
+                 WHERE facts.merged_into IS NOT NULL
+             ),
+             roots(fact_id, root_id) AS (
+                 SELECT chains.fact_id, chains.root_id
+                 FROM chains JOIN facts ON facts.id = chains.root_id
+                 WHERE facts.merged_into IS NULL
+             )
+         SELECT current.job_id, current.generation_id,
+                (SELECT count(*) FROM unsupported_claims
+                 WHERE generation_id = current.generation_id AND deleted_at IS NULL),
+                EXISTS (
+                    SELECT 1 FROM fact_versions
+                    LEFT JOIN roots ON roots.fact_id = fact_versions.fact_id
+                    JOIN facts ON facts.id = coalesce(roots.root_id, fact_versions.fact_id)
+                    WHERE fact_versions.generation_id = current.generation_id
+                      AND facts.merged_into IS NULL AND facts.deleted_at IS NULL
+                      AND (fact_versions.hidden != facts.hidden
+                           OR fact_versions.text != facts.text)
+                )
+         FROM current_generations AS current
+         WHERE current.kind = 'resume'",
+    )?;
+    let current = statement
+        .query_map([], |row| {
+            Ok((
+                JobId(row.get(0)?),
+                CurrentResume {
+                    id: ResumeId(row.get(1)?),
+                    unsupported: usize::try_from(row.get::<_, i64>(2)?).unwrap_or_default(),
+                    outdated: row.get(3)?,
+                },
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(current)
+}
+
 /// Which applications the grid shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum JobFilter {
@@ -564,4 +653,275 @@ fn centered(child: impl IntoElement) -> Div {
         .items_center()
         .justify_center()
         .child(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use gpui_kit::{TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::database::{TemporaryDirectory, Write, Writer};
+    use crate::model::{ClaimId, FactId, commands};
+    use crate::workspace::testing::{self, write_sample};
+
+    fn assert_current_resumes_match_the_library(connection: &Connection) -> Result<(), Error> {
+        let library = Library::load(connection)?;
+        let current = current_resumes(connection)?;
+        for job in &library.jobs {
+            let expected = job.current_resume();
+            let read = current.get(&job.id);
+            assert_eq!(read.map(|resume| resume.id), expected.map(|resume| resume.id));
+            let Some((read, expected)) = read.zip(expected) else {
+                continue;
+            };
+            assert_eq!(read.unsupported, expected.unsupported_claims.len(), "{}", job.company);
+            assert_eq!(
+                read.outdated,
+                !library.changed_facts(expected).is_empty(),
+                "{}",
+                job.company
+            );
+        }
+        Ok(())
+    }
+
+    fn sample_writer() -> Result<Writer, Error> {
+        let mut writer = Writer::open_in_memory()?;
+        writer.execute(write_sample)?;
+        Ok(writer)
+    }
+
+    fn fact(connection: &Connection, start: &str) -> Result<FactId, Error> {
+        Ok(FactId(connection.query_row(
+            "SELECT id FROM facts WHERE text LIKE ?1 || '%' ORDER BY id LIMIT 1",
+            [start],
+            |row| row.get(0),
+        )?))
+    }
+
+    #[test]
+    fn the_current_resumes_read_as_the_library_reads_them() -> Result<(), Error> {
+        assert_current_resumes_match_the_library(sample_writer()?.kron())
+    }
+
+    #[test]
+    fn the_current_resumes_follow_changes_as_the_library_does() -> Result<(), Error> {
+        let mut writer = sample_writer()?;
+        let migration = fact(writer.kron(), "Led the migration")?;
+        let linkedin = fact(writer.kron(), "Migrated 12 backend")?;
+        let latency = fact(writer.kron(), "Cut p99 latency")?;
+        let property_tests = fact(writer.kron(), "Introduced property-based tests")?;
+        let claim = ClaimId(writer.kron().query_row(
+            "SELECT id FROM unsupported_claims WHERE added_as IS NULL
+             AND reason != 'uses_hidden_fact' ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )?);
+        writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
+        assert_current_resumes_match_the_library(writer.kron())?;
+        writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
+        writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
+        writer.execute(|write| commands::add_claim_as_fact(write, claim))?;
+        assert_current_resumes_match_the_library(writer.kron())?;
+        writer.execute(|write| commands::revert_fact(write, latency))?;
+        writer.execute(|write| commands::set_hidden(write, property_tests, true))?;
+        assert_current_resumes_match_the_library(writer.kron())
+    }
+
+    // The grid in a window, driven by keys, with the thumbnails typeset.
+
+    struct Grid<'a> {
+        grid: Entity<ResumeGrid>,
+        previews: Entity<Previews>,
+        database: Entity<Database>,
+        cx: &'a mut VisualTestContext,
+        opened: Rc<Cell<Option<JobId>>>,
+        _directory: TemporaryDirectory,
+    }
+
+    fn open(app: &mut TestAppContext) -> Grid<'_> {
+        let (database, directory) = testing::open_sample(app);
+        let library = database.read_with(app, |database, _| Library::load(database.connection()));
+        let library = match library {
+            Ok(library) => library,
+            Err(error) => panic!("{error}"),
+        };
+        let library = app.new(|_| library);
+        let previews = app.new(|cx| Previews::new(database.clone(), cx));
+        let opened = Rc::new(Cell::new(None));
+        let (grid, cx) = app.add_window_view(|_, cx| {
+            ResumeGrid::new(library, database.clone(), previews.clone(), cx)
+        });
+        cx.update(|window, cx| {
+            grid.focus_handle(cx).focus(window, cx);
+            let opened = opened.clone();
+            cx.subscribe(&grid, move |_, event: &ResumeGridEvent, _| match event {
+                ResumeGridEvent::Open(job) => opened.set(Some(*job)),
+            })
+            .detach();
+        });
+        cx.run_until_parked();
+        Grid {
+            grid,
+            previews,
+            database,
+            cx,
+            opened,
+            _directory: directory,
+        }
+    }
+
+    impl Grid<'_> {
+        fn settle(&mut self) {
+            testing::settle(self.cx, &self.database);
+        }
+
+        fn keys(&mut self, keystrokes: &str) {
+            self.cx.simulate_keystrokes(keystrokes);
+            self.settle();
+        }
+
+        fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
+            testing::run(self.cx, &self.database, command);
+        }
+
+        fn visible(&mut self) -> Vec<JobId> {
+            self.grid
+                .read_with(self.cx, |grid, cx| grid.visible_jobs(cx, Utc::now()))
+        }
+
+        fn selected(&mut self) -> Option<JobId> {
+            self.grid.read_with(self.cx, |grid, _| grid.selected)
+        }
+
+        fn current(&mut self, job: JobId) -> Option<CurrentResume> {
+            self.grid.read_with(self.cx, |grid, _| {
+                grid.current_resumes
+                    .as_ref()
+                    .and_then(|current| current.get(&job).cloned())
+            })
+        }
+
+        fn job(&mut self, company: &str) -> JobId {
+            let job = self.database.read_with(self.cx, |database, _| {
+                database.connection().query_row(
+                    "SELECT id FROM jobs WHERE company = ?1",
+                    [company],
+                    |row| row.get(0),
+                )
+            });
+            match job {
+                Ok(job) => JobId(job),
+                Err(error) => panic!("{company}: {error}"),
+            }
+        }
+
+        fn fact(&mut self, start: &str) -> FactId {
+            let fact = self
+                .database
+                .read_with(self.cx, |database, _| fact(database.connection(), start));
+            match fact {
+                Ok(fact) => fact,
+                Err(error) => panic!("{start}: {error}"),
+            }
+        }
+
+        fn thumbnail(&mut self, job: JobId) -> Option<PageRender> {
+            let resume = self.current(job)?.id;
+            let previews = self.previews.clone();
+            let thumbnail = self.cx.update(|window, cx| {
+                let pixels_per_point = previews::pixels_per_point(THUMBNAIL_WIDTH, window);
+                previews.update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
+            });
+            self.settle();
+            thumbnail
+        }
+    }
+
+    #[test]
+    fn every_generated_resume_gets_a_thumbnail() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let jobs = grid.visible();
+        assert_eq!(jobs.len(), 9);
+        for job in jobs {
+            match grid.thumbnail(job) {
+                Some(PageRender::Ready(pages)) => assert!(!pages.images.is_empty()),
+                Some(PageRender::Failed(reason)) => panic!("couldn't render: {reason}"),
+                None => assert!(grid.current(job).is_none(), "only a job without a résumé"),
+            }
+        }
+        let halcyon = grid.job("Halcyon Cloud");
+        assert!(grid.current(halcyon).is_none());
+    }
+
+    #[test]
+    fn arrow_keys_move_by_card_and_by_row_and_enter_opens() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let jobs = grid.visible();
+        let columns = grid.grid.read_with(grid.cx, |grid, _| grid.columns());
+        assert!(columns > 1, "the test window fits more than one card a row");
+        grid.keys("right");
+        assert_eq!(grid.selected(), Some(jobs[0]), "the first card first");
+        grid.keys("right");
+        assert_eq!(grid.selected(), Some(jobs[1]));
+        grid.keys("left left");
+        assert_eq!(grid.selected(), Some(jobs[0]), "stays at the first");
+        grid.keys("down");
+        assert_eq!(grid.selected(), jobs.get(columns).copied());
+        grid.keys("up");
+        assert_eq!(grid.selected(), Some(jobs[0]));
+        grid.keys("enter");
+        assert_eq!(grid.opened.get(), Some(jobs[0]));
+    }
+
+    #[test]
+    fn filter_keys_narrow_the_grid() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let all = grid.visible().len();
+        grid.keys("ctrl-5");
+        let closed = grid.visible().len();
+        assert!(closed > 0 && closed < all);
+        grid.keys("ctrl-1");
+        assert_eq!(grid.visible().len(), all);
+    }
+
+    #[test]
+    fn a_changed_fact_tags_the_cards_using_it_and_reverting_clears_it() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let ledgerly = grid.job("Ledgerly");
+        assert!(grid.current(ledgerly).is_some_and(|resume| !resume.outdated));
+        let latency = grid.fact("Cut p99 latency");
+        grid.run(move |write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."));
+        assert!(grid.current(ledgerly).is_some_and(|resume| resume.outdated));
+        grid.run(move |write| commands::revert_fact(write, latency));
+        assert!(grid.current(ledgerly).is_some_and(|resume| !resume.outdated));
+    }
+
+    #[test]
+    fn a_template_switch_typesets_again_and_a_fact_edit_does_not() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let ledgerly = grid.job("Ledgerly");
+        let Some(PageRender::Ready(before)) = grid.thumbnail(ledgerly) else {
+            panic!("no thumbnail");
+        };
+        let latency = grid.fact("Cut p99 latency");
+        grid.run(move |write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."));
+        let Some(PageRender::Ready(after_edit)) = grid.thumbnail(ledgerly) else {
+            panic!("no thumbnail");
+        };
+        assert!(Arc::ptr_eq(&before, &after_edit), "the page didn't change");
+
+        grid.run(move |write| commands::set_template(write, ledgerly, "sidebar"));
+        let Some(PageRender::Ready(after_switch)) = grid.thumbnail(ledgerly) else {
+            panic!("no thumbnail");
+        };
+        assert!(!Arc::ptr_eq(&before, &after_switch), "typeset again");
+    }
 }

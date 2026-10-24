@@ -129,8 +129,10 @@ impl Workspace {
     ) -> Self {
         Appearance::current(cx).apply(window, cx);
 
-        let previews = cx.new(|cx| Previews::new(library.clone(), cx));
-        let resume_grid = cx.new(|cx| ResumeGrid::new(library.clone(), previews.clone(), cx));
+        let previews = cx.new(|cx| Previews::new(database.clone(), cx));
+        let resume_grid = cx.new(|cx| {
+            ResumeGrid::new(library.clone(), database.clone(), previews.clone(), cx)
+        });
         let job_view = cx.new(|cx| {
             JobView::new(library.clone(), database.clone(), previews, window, cx)
         });

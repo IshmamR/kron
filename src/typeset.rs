@@ -19,7 +19,7 @@ use crate::database::schema::{
     templates,
 };
 use crate::database::{self, Write};
-use crate::model::{Block, Line, LineId, SectionKind, TailoredResume};
+use crate::model::{Block, Line, LineId, Section, SectionKind};
 
 /// The templates that come with the app. Each defines `render(resume)`; the
 /// shape of `resume` is described in `resume_markup`.
@@ -296,6 +296,15 @@ pub fn template(key: &str) -> &'static Template {
         .unwrap_or(&TEMPLATES[0])
 }
 
+/// The bundled template with this version, or the default one: a generation
+/// keeps its template's version.
+pub fn template_of_version(version: Option<Uuid>) -> &'static Template {
+    TEMPLATES
+        .iter()
+        .find(|template| Some(template.version_id) == version)
+        .unwrap_or(template(DEFAULT_TEMPLATE))
+}
+
 /// Writes the bundled templates into the database as catalog templates,
 /// unless they're there already, so generations can refer to their versions.
 pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
@@ -342,7 +351,7 @@ pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
     Ok(())
 }
 
-/// The résumé's template, then the résumé as a Typst value handed to the
+/// The template, then the résumé's sections as a Typst value handed to the
 /// template's `render`:
 ///
 /// ```typst
@@ -364,10 +373,10 @@ pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
 /// find where it was laid out. A template may style, move or leave out a
 /// line, but must show it as the content it's given: turned into a string,
 /// it loses its label.
-pub fn resume_markup(resume: &TailoredResume) -> String {
-    let mut markup = String::from(template(&resume.template).source);
+pub fn resume_markup(template: &Template, sections: &[Section]) -> String {
+    let mut markup = String::from(template.source);
     markup.push_str("\n#let resume = (sections: (\n");
-    for section in &resume.sections {
+    for section in sections {
         markup.push_str(&format!(
             "  (kind: {}, title: {}, blocks: (\n",
             string_literal(section_kind(section.kind)),
@@ -675,7 +684,7 @@ impl World for SingleFileWorld<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Job, Library, ResumeId, Section};
+    use crate::model::{Job, Library, ResumeId, Section, TailoredResume};
 
     fn sample_library() -> Library {
         match crate::model::sample::library() {
@@ -685,7 +694,8 @@ mod tests {
     }
 
     fn typeset(typesetter: &Typesetter, resume: &TailoredResume) -> TypesetResume {
-        match typesetter.render(&resume_markup(resume), 0.25) {
+        let markup = resume_markup(template(&resume.template), &resume.sections);
+        match typesetter.render(&markup, 0.25) {
             Ok(typeset) => typeset,
             Err(error) => panic!("didn't compile in {:?}: {error}", resume.template),
         }

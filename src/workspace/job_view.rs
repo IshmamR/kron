@@ -18,8 +18,6 @@ use gpui_kit::{
     prelude::*, px, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
-use uuid::Uuid;
-
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector};
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
@@ -28,8 +26,7 @@ use crate::database::schema::{
     Generations, LineCitations, Lines, Sections, UnsupportedClaims,
 };
 use crate::database::{Changed, Database, Error};
-use crate::model::commands;
-use crate::model::{FactChange, FactId, Job, JobId, Library, LineId, ResumeId};
+use crate::model::{self, FactChange, FactId, Job, JobId, Library, LineId, ResumeId, commands};
 use crate::typeset::{self, LineBox, PageSize, Template};
 
 const KEY_CONTEXT: &str = "JobView";
@@ -117,10 +114,9 @@ impl Render for JobView {
         self.read(cx);
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
         let shown = self.shown_id();
-        let render = self.job.zip(shown).and_then(|(job, resume)| {
-            self.previews.update(cx, |previews, cx| {
-                previews.get_version(job, resume, pixels_per_point, cx)
-            })
+        let render = shown.and_then(|resume| {
+            self.previews
+                .update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
         });
         self.pages = match &render {
             Some(PageRender::Ready(pages)) => Some(pages.clone()),
@@ -988,7 +984,7 @@ impl Versions {
             Ok(Version {
                 id: ResumeId(row.get(0)?),
                 generated_at: DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default(),
-                template: template_of(row.get(2)?),
+                template: typeset::template_of_version(row.get(2)?),
             })
         };
         let current = connection
@@ -1064,39 +1060,9 @@ impl ShownResume {
                 })
             })?
             .collect::<Result<_, _>>()?;
-        let citations: Vec<(LineId, FactId)> = connection
-            .prepare_cached(
-                "WITH RECURSIVE
-                     cited(line_id, fact_id, sort_key) AS (
-                         SELECT line_citations.line_id, line_citations.fact_id,
-                                line_citations.sort_key
-                         FROM sections
-                         JOIN blocks ON blocks.section_id = sections.id
-                         JOIN lines ON lines.block_id = blocks.id
-                         JOIN line_citations ON line_citations.line_id = lines.id
-                         WHERE sections.generation_id = ?1
-                     ),
-                     -- Each cited fact and the facts its merges led to.
-                     chains(fact_id, root_id) AS (
-                         SELECT fact_id, fact_id FROM cited
-                         UNION
-                         SELECT chains.fact_id, facts.merged_into
-                         FROM chains JOIN facts ON facts.id = chains.root_id
-                         WHERE facts.merged_into IS NOT NULL
-                     )
-                 SELECT cited.line_id, chains.root_id
-                 FROM cited
-                 JOIN chains ON chains.fact_id = cited.fact_id
-                 JOIN facts AS roots ON roots.id = chains.root_id AND roots.merged_into IS NULL
-                 ORDER BY cited.line_id, cited.sort_key",
-            )?
-            .query_map([resume.0], |row| Ok((LineId(row.get(0)?), FactId(row.get(1)?))))?
-            .collect::<Result<_, _>>()?;
+        let citations = model::citations(connection, resume)?;
         for (line, fact) in citations {
-            if let Some(line) = lines.iter_mut().find(|each| each.id == line)
-                // Two facts it cites may have been merged into one.
-                && !line.cites.contains(&fact)
-            {
+            if let Some(line) = lines.iter_mut().find(|each| each.id == line) {
                 line.cites.push(fact);
             }
         }
@@ -1159,14 +1125,6 @@ fn changes(connection: &Connection, resume: ResumeId) -> Result<Vec<(FactId, Fac
         }
     }
     Ok(changes)
-}
-
-/// The bundled template with this version, or the default one.
-fn template_of(version: Option<Uuid>) -> &'static Template {
-    typeset::TEMPLATES
-        .iter()
-        .find(|template| Some(template.version_id) == version)
-        .unwrap_or(typeset::template(typeset::DEFAULT_TEMPLATE))
 }
 
 /// Whether the change is to anything the view or its inspector shows.
@@ -1406,7 +1364,7 @@ mod tests {
             panic!("no job at {company}");
         };
         let library = app.new(|_| library);
-        let previews = app.new(|cx| Previews::new(library.clone(), cx));
+        let previews = app.new(|cx| Previews::new(database.clone(), cx));
         let closed = Rc::new(RefCell::new(0));
         let (view, cx) = app.add_window_view(|window, cx| {
             let mut view = JobView::new(library, database.clone(), previews, window, cx);

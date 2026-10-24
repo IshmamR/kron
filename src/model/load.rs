@@ -10,8 +10,9 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row};
 use uuid::Uuid;
 
+use super::section::RoledLine;
 use super::{
-    Block, ClaimId, CoverLetter, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind,
+    Block, ClaimId, CoverLetter, DocumentId, DocumentKind, Entry, EntryId, EntryKind,
     Fact, FactId, FactKind, FactOverride, FactSource, FactVersion, Inclusion, InterviewKind, Job,
     JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId, Review, ReviewReason, Section,
     SectionKind, SourceDocument, TailoredResume, UnsupportedClaim, UnsupportedReason,
@@ -271,9 +272,6 @@ fn jobs(connection: &Connection, target: &dyn Fn(Uuid) -> FactId) -> Result<Vec<
     Ok(jobs)
 }
 
-/// A line and its role in its block, like "title" or "bullet".
-type RoledLine = (String, Line);
-
 enum Generation {
     Resume(TailoredResume),
     CoverLetter(CoverLetter),
@@ -443,14 +441,11 @@ fn generations(
                         title,
                         blocks: section_blocks
                             .into_iter()
-                            .filter_map(|(kind, lines)| block(&kind, lines))
+                            .filter_map(|(kind, lines)| Block::from_lines(&kind, lines))
                             .collect(),
                     });
                 }
-                let template = typeset::TEMPLATES
-                    .iter()
-                    .find(|template| Some(template.version_id) == template_version)
-                    .unwrap_or(typeset::template(typeset::DEFAULT_TEMPLATE));
+                let template = typeset::template_of_version(template_version);
                 Generation::Resume(TailoredResume {
                     id: ResumeId(id),
                     generated_at,
@@ -474,47 +469,6 @@ fn generations(
         generations.push((job, generation));
     }
     Ok(generations)
-}
-
-/// The block its lines make, by their roles; `None`, with a log, when a line
-/// it needs is missing.
-fn block(kind: &str, lines: Vec<RoledLine>) -> Option<Block> {
-    let mut by_role: HashMap<String, Vec<Line>> = HashMap::new();
-    for (role, line) in lines {
-        by_role.entry(role).or_default().push(line);
-    }
-    let mut all = |role: &str| by_role.remove(role).unwrap_or_default();
-    let block = match kind {
-        "header" => first(all("name")).map(|name| Block::Header {
-            name,
-            contacts: all("contact"),
-        }),
-        "entry" => first(all("title")).map(|title| {
-            Block::Entry(Box::new(EntryBlock {
-                title,
-                organization: first(all("organization")),
-                dates: first(all("dates")),
-                location: first(all("location")),
-                stack: first(all("stack")),
-                bullets: all("bullet"),
-            }))
-        }),
-        "skills" => first(all("items")).map(|items| Block::Skills {
-            label: first(all("label")),
-            items,
-        }),
-        "text" => first(all("text")).map(Block::Text),
-        "item" => first(all("item")).map(Block::Item),
-        _ => None,
-    };
-    if block.is_none() {
-        eprintln!("a {kind} block without the lines it needs");
-    }
-    block
-}
-
-fn first(lines: Vec<Line>) -> Option<Line> {
-    lines.into_iter().next()
 }
 
 fn query<T>(

@@ -3,6 +3,7 @@ pub mod commands;
 mod load;
 #[cfg(any(debug_assertions, test))]
 pub mod sample;
+mod section;
 mod stored;
 
 use std::collections::HashSet;
@@ -12,6 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use section::citations;
 pub use application::{
     InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
 };
