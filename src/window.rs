@@ -1,21 +1,52 @@
+use gpui_kit::{Bounds, Pixels, WindowBounds, point, px, size};
+
+use crate::model::settings::{SavedWindow, WindowState};
+
+/// The window's state and the bounds it restores to, to save. On X11 gpui
+/// gives a maximized window's own bounds rather than those, so the caller
+/// passes the bounds it last had windowed.
+pub fn saved(bounds: WindowBounds, windowed: Bounds<Pixels>) -> SavedWindow {
+    let (state, bounds) = match bounds {
+        WindowBounds::Windowed(bounds) => (WindowState::Windowed, bounds),
+        WindowBounds::Maximized(_) => (WindowState::Maximized, windowed),
+        WindowBounds::Fullscreen(_) => (WindowState::Fullscreen, windowed),
+    };
+    SavedWindow {
+        state,
+        x: f32::from(bounds.origin.x).round() as i32,
+        y: f32::from(bounds.origin.y).round() as i32,
+        width: f32::from(bounds.size.width).round().max(1.) as u32,
+        height: f32::from(bounds.size.height).round().max(1.) as u32,
+    }
+}
+
+/// The bounds a saved window restores to; its state is applied once it's open.
+pub fn restored(saved: SavedWindow) -> Bounds<Pixels> {
+    Bounds {
+        origin: point(px(saved.x as f32), px(saved.y as f32)),
+        size: size(px(saved.width as f32), px(saved.height as f32)),
+    }
+}
+
 // Window managers like xfwm4 ignore the position gpui requests when creating
-// the window, so it's moved once it is mapped.
+// the window, so it's moved once it is mapped: to `origin`, in the screen's
+// pixels, or centered without one.
 #[cfg(target_os = "linux")]
-pub fn center_window() {
+pub fn place_window(origin: Option<(i32, i32)>) {
     // Wayland clients cannot position their own windows.
     if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
         return;
     }
-    if let Err(error) = center_x11_window() {
-        eprintln!("failed to center window: {error}");
+    if let Err(error) = place_x11_window(origin) {
+        eprintln!("failed to place window: {error}");
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn center_window() {}
+pub fn place_window(_origin: Option<(i32, i32)>) {}
 
 #[cfg(target_os = "linux")]
-fn center_x11_window() -> Result<(), Box<dyn std::error::Error>> {
+fn place_x11_window(origin: Option<(i32, i32)>) -> Result<(), Box<dyn std::error::Error>> {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{AtomEnum, ConfigureWindowAux, ConnectionExt};
 
@@ -100,14 +131,21 @@ fn center_x11_window() -> Result<(), Box<dyn std::error::Error>> {
     let outer_width = geometry.width as i32 + left + right;
     let outer_height = geometry.height as i32 + top + bottom;
 
-    let x = (area_x + (area_width - outer_width) / 2).max(area_x - shadow_left);
-    // Optical centering: slightly less space above the window than below.
-    let y = (area_y + (area_height - outer_height) * 2 / 5).max(area_y - shadow_top);
+    let (x, y) = match origin {
+        // The window manager places the frame, which starts `left` and `top`
+        // before the window gpui reports.
+        Some((x, y)) => (x - left, y - top),
+        None => (
+            (area_x + (area_width - outer_width) / 2).max(area_x - shadow_left),
+            // Optical centering: slightly less space above the window than below.
+            (area_y + (area_height - outer_height) * 2 / 5).max(area_y - shadow_top),
+        ),
+    };
     connection.configure_window(window_id, &ConfigureWindowAux::new().x(x).y(y))?;
     connection.flush()?;
 
     // Wait (briefly) for the window manager to apply the move, so a following
-    // maximize records the centered position as the one to restore to.
+    // maximize records this position as the one to restore to.
     let target = ((x + left) as i16, (y + top) as i16);
     for _ in 0..50 {
         let position = connection

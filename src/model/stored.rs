@@ -4,7 +4,9 @@
 
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 
+use super::settings::WindowState;
 use super::{EntryKind, FactKind, Inclusion, InterviewKind, ReviewReason, SectionKind};
+use crate::appearance::{Appearance, Motion};
 
 macro_rules! stored {
     ($type:ty { $($variant:ident => $text:literal),* $(,)? }) => {
@@ -84,4 +86,22 @@ stored!(ReviewReason {
 stored!(Inclusion {
     Include => "include",
     Exclude => "exclude",
+});
+
+stored!(Appearance {
+    System => "system",
+    Light => "light",
+    Dark => "dark",
+});
+
+stored!(Motion {
+    System => "system",
+    Reduced => "reduced",
+    Full => "full",
+});
+
+stored!(WindowState {
+    Windowed => "windowed",
+    Maximized => "maximized",
+    Fullscreen => "fullscreen",
 });

@@ -31,6 +31,7 @@ impl Writer {
         files: Option<PathBuf>,
     ) -> Result<Self, Error> {
         kron.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
+        device.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         let clock = Clock::recover(&kron, &device)?;
         Ok(Self {
             kron,
@@ -80,6 +81,8 @@ impl Writer {
             transaction: self
                 .kron
                 .transaction_with_behavior(TransactionBehavior::Immediate)?,
+            device: &self.device,
+            device_transaction: None,
             clock,
             now,
             files: self.files.as_deref(),
@@ -88,10 +91,16 @@ impl Writer {
         let value = command(&mut write)?;
         let Write {
             transaction,
+            device_transaction,
             changes,
             ..
         } = write;
         transaction.commit()?;
+        // WAL makes no promise across two files, so a command writing both
+        // could keep its kron.sqlite rows without these. None does yet.
+        if let Some(device_transaction) = device_transaction {
+            device_transaction.commit()?;
+        }
         if let Some(clock) = clock {
             // The records are already committed, so a failure here isn't the
             // command's: the next start recovers the clock from the outbox.
@@ -106,9 +115,9 @@ impl Writer {
     }
 }
 
-/// What a command writes through. Every write to a synced table goes through
-/// `insert`, `set`, `update`, `clear` or `delete`, which also note the change
-/// for sync and for the views. Reads use `prepare`, which refuses anything
+/// What a command writes through. Every write goes through `insert`, `set`,
+/// `update`, `clear` or `delete`, which also note the change for the views,
+/// and for sync when the table is in kron.sqlite. Reads use `prepare`, which refuses anything
 /// that writes.
 ///
 /// Tables and columns are the ones `build.rs` generates from the migrations,
@@ -116,6 +125,9 @@ impl Writer {
 /// a change to a key fails to compile.
 pub struct Write<'a> {
     transaction: Transaction<'a>,
+    device: &'a Connection,
+    /// Begun on the command's first write to a device.sqlite table.
+    device_transaction: Option<Transaction<'a>>,
     /// The command's clock value while sync is on; `None`: sync is off, and
     /// the outbox stays empty.
     clock: Option<i64>,
@@ -152,14 +164,14 @@ impl Write<'_> {
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        self.transaction
+        self.connection_of::<T>()?
             .prepare_cached(&format!(
                 "INSERT INTO \"{}\" ({columns}) VALUES ({placeholders})",
                 T::NAME
             ))?
             .execute(parameters.as_slice())?;
 
-        if let Some(clock) = self.clock {
+        if let Some(clock) = self.clock.filter(|_| !T::DEVICE) {
             self.transaction
                 .prepare_cached(
                     "INSERT INTO outbox (table_name, row_key, field, clock) VALUES (?1, ?2, '', ?3)",
@@ -287,6 +299,18 @@ impl Write<'_> {
         Ok(statement)
     }
 
+    /// The connection `T` is in, inside the command's transaction there.
+    fn connection_of<T: Table>(&mut self) -> Result<&Connection, Error> {
+        if !T::DEVICE {
+            return Ok(&self.transaction);
+        }
+        let transaction = match self.device_transaction.take() {
+            Some(transaction) => transaction,
+            None => Transaction::new_unchecked(self.device, TransactionBehavior::Immediate)?,
+        };
+        Ok(self.device_transaction.insert(transaction))
+    }
+
     fn update_fields<T: Table>(
         &mut self,
         key: &[&dyn ToSql],
@@ -311,7 +335,7 @@ impl Write<'_> {
         let mut parameters: Vec<&dyn ToSql> = fields.iter().map(|(_, value)| *value).collect();
         parameters.extend_from_slice(key);
         let updated = self
-            .transaction
+            .connection_of::<T>()?
             .prepare_cached(&format!(
                 "UPDATE \"{}\" SET {assignments} WHERE {condition}",
                 T::NAME
@@ -331,7 +355,7 @@ impl Write<'_> {
         row_key: &[u8],
         field: &'static str,
     ) -> Result<(), Error> {
-        if let Some(clock) = self.clock {
+        if let Some(clock) = self.clock.filter(|_| !T::DEVICE) {
             // Entries hold no values: the sender reads them from the row. So
             // a field needs one entry, with its latest clock, and none while
             // the row is still unsent: field '' sends it whole, edits included.
@@ -430,7 +454,7 @@ mod tests {
 
     use super::*;
     use crate::database::schema::{
-        FactOverrides, Facts, Jobs, fact_overrides, facts, jobs, settings,
+        FactOverrides, Facts, Jobs, device_settings, fact_overrides, facts, jobs, settings,
     };
 
     fn turn_sync_on(writer: &Writer) -> Result<(), Error> {
@@ -563,6 +587,41 @@ mod tests {
             .map(|(_, field, _)| field)
             .collect();
         assert_eq!(fields, ["deleted_at"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_device_setting_stays_on_the_device() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        turn_sync_on(&writer)?;
+        let ((), changes) =
+            writer.execute(|write| write.set(device_settings::SIDEBAR_COLLAPSED, 1, &true))?;
+        let collapsed: bool = writer.device().query_row(
+            "SELECT sidebar_collapsed FROM device_settings",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(collapsed);
+        assert!(outbox(&writer)?.is_empty());
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].table, "device_settings");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_command_keeps_none_of_its_device_writes() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        let failed = writer.execute(|write| {
+            write.set(device_settings::SIDEBAR_COLLAPSED, 1, &true)?;
+            write.set(facts::TEXT, Uuid::now_v7(), &"No such fact")
+        });
+        assert!(matches!(failed, Err(Error::RowNotFound { .. })));
+        let collapsed: bool = writer.device().query_row(
+            "SELECT sidebar_collapsed FROM device_settings",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!collapsed);
         Ok(())
     }
 

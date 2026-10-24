@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, AppContext as _, Global, SharedString, Window};
+use gpui_kit::{App, AppContext as _, Global, Window};
 
 /// gpui's Linux default (IBM Plex Sans) is rarely installed, and the fallback
 /// it lands on often has no bold. Inter is common and has every weight.
@@ -64,22 +64,6 @@ impl Appearance {
             Self::Dark => "Dark",
         }
     }
-
-    /// Stable name, used as the settings dropdown's value.
-    pub fn key(self) -> SharedString {
-        match self {
-            Self::System => "system",
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-        .into()
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|appearance| appearance.key() == key)
-    }
 }
 
 /// Whether things slide and fade, like the sidebar collapsing. Reduced, they
@@ -135,20 +119,6 @@ impl Motion {
             Self::Reduced => "Reduced",
             Self::Full => "Full",
         }
-    }
-
-    /// Stable name, used as the settings dropdown's value.
-    pub fn key(self) -> SharedString {
-        match self {
-            Self::System => "system",
-            Self::Reduced => "reduced",
-            Self::Full => "full",
-        }
-        .into()
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|motion| motion.key() == key)
     }
 }
 

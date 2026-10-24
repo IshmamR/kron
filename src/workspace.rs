@@ -10,6 +10,8 @@ mod shortcuts;
 #[cfg(test)]
 mod testing;
 
+use std::time::Duration;
+
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::kbd::Kbd;
@@ -21,14 +23,17 @@ use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{IconName, Sizable, h_flex};
 use gpui_kit::{
-    Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
-    Pixels, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    Action, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
+    KeyBinding, Pixels, SharedString, Subscription, Task, Window, WindowBounds, actions, div,
+    prelude::*, px,
 };
 
 use crate::appearance::{Appearance, Motion};
-use crate::database::schema::Facts;
+use crate::database::schema::{self, Facts};
 use crate::database::{Changed, Database};
-use crate::model::{FactId, JobId, LineId};
+use crate::model::settings::{self, DeviceSettings, LastPage};
+use crate::model::{Application, FactId, JobId, LineId};
+use crate::window;
 use facts_page::FactsPage;
 use job_view::{JobView, JobViewEvent};
 use previews::Previews;
@@ -40,6 +45,9 @@ const SIDEBAR_WIDTH: Pixels = px(220.);
 /// The collapse toggle's width: a collapsed menu item's, the strip's 48px
 /// less its padding.
 const TOGGLE_WIDTH: Pixels = px(32.);
+/// How long the window has to stay put before where it is gets saved, so a
+/// drag saves once, not on every step.
+const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
 
 actions!(workspace, [ToggleSidebar, ShowShortcuts]);
 
@@ -77,6 +85,13 @@ pub struct Workspace {
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
+    /// The page last saved to open on start, so it's saved only when it changes.
+    saved_page: LastPage,
+    /// Waits out `WINDOW_SAVE_DELAY`, then saves the window's bounds.
+    saving_window: Task<()>,
+    /// The window's bounds when it was last neither maximized nor full
+    /// screen: what it restores to.
+    windowed_bounds: Bounds<Pixels>,
     /// Focused on pages with nothing focusable of their own, so app-wide keys
     /// still arrive.
     focus_handle: FocusHandle,
@@ -95,7 +110,7 @@ impl Render for Workspace {
             Page::Settings => div()
                 .track_focus(&self.focus_handle)
                 .size_full()
-                .child(settings())
+                .child(settings_page(self.database.clone()))
                 .into_any_element(),
         };
 
@@ -110,6 +125,7 @@ impl Render for Workspace {
                 this.facts_page.update(cx, |facts_page, cx| {
                     facts_page.show_fact(action.fact, window, cx)
                 });
+                this.save_page(cx);
                 cx.notify();
             }))
             .on_action(|_: &ShowShortcuts, window, cx| shortcuts::open(window, cx))
@@ -130,7 +146,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (stored, device) = {
+            let database = database.read(cx);
+            let stored = settings::Settings::read(database.connection());
+            let device = DeviceSettings::read(database.device_connection());
+            (stored, device)
+        };
+        match stored {
+            Ok(stored) => apply_settings(stored, cx),
+            Err(error) => eprintln!("workspace: couldn't read the settings: {error}"),
+        }
         Appearance::current(cx).apply(window, cx);
+        let device = device.unwrap_or_else(|error| {
+            eprintln!("workspace: couldn't read this device's settings: {error}");
+            DeviceSettings::default()
+        });
 
         let previews = cx.new(|cx| Previews::new(database.clone(), cx));
         let resume_grid = cx.new(|cx| {
@@ -144,11 +174,20 @@ impl Workspace {
         resume_grid.focus_handle(cx).focus(window, cx);
 
         let subscriptions = vec![
-            cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+            cx.subscribe(&database, |this, database, changed: &Changed, cx| {
                 if changed.touches(Facts) {
                     this.count_needs_review(cx);
                 }
+                // Read back, not set where they're chosen, so a change synced
+                // from another device applies the same way.
+                if changed.touches(schema::Settings) {
+                    match settings::Settings::read(database.read(cx).connection()) {
+                        Ok(stored) => apply_settings(stored, cx),
+                        Err(error) => eprintln!("workspace: couldn't read the settings: {error}"),
+                    }
+                }
             }),
+            cx.observe_window_bounds(window, |this, window, cx| this.save_window_soon(window, cx)),
             cx.subscribe_in(
                 &resume_grid,
                 window,
@@ -178,7 +217,11 @@ impl Workspace {
             needs_review: 0,
             database,
             page: Page::Resumes,
-            sidebar_collapsed: false,
+            sidebar_collapsed: device.sidebar_collapsed,
+            saved_page: device.last_page,
+            saving_window: Task::ready(()),
+            // Always opened windowed, then maximized once mapped.
+            windowed_bounds: window.bounds(),
             focus_handle: cx.focus_handle(),
             resume_grid,
             job_view,
@@ -186,7 +229,69 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         workspace.count_needs_review(cx);
+        workspace.restore_page(device.last_page, window, cx);
         workspace
+    }
+
+    /// Opens the page that was open when the app last closed, or the grid if
+    /// its job has gone since.
+    fn restore_page(&mut self, page: LastPage, window: &mut Window, cx: &mut Context<Self>) {
+        match page {
+            LastPage::Resumes => {}
+            LastPage::Job(job) => {
+                match Application::read(self.database.read(cx).connection(), job) {
+                    Ok(Some(_)) => self.open_job(job, window, cx),
+                    Ok(None) => self.save_page(cx),
+                    Err(error) => eprintln!("workspace: couldn't read job {}: {error}", job.0),
+                }
+            }
+            LastPage::Facts => self.open_page(Page::Facts, window, cx),
+            LastPage::Settings => self.open_page(Page::Settings, window, cx),
+        }
+    }
+
+    /// Saves the open page to open on start, if it changed.
+    fn save_page(&mut self, cx: &mut Context<Self>) {
+        let page = match self.page {
+            Page::Resumes => LastPage::Resumes,
+            Page::Job => self
+                .job_view
+                .read(cx)
+                .job()
+                .map_or(LastPage::Resumes, LastPage::Job),
+            Page::Facts => LastPage::Facts,
+            Page::Settings => LastPage::Settings,
+        };
+        if page != self.saved_page {
+            self.saved_page = page;
+            self.database
+                .read(cx)
+                .queue(move |write| settings::set_last_page(write, page));
+        }
+    }
+
+    /// The state is read once the delay is over, not with the bounds: on
+    /// X11 the bounds change before gpui hears the window is no longer
+    /// maximized.
+    fn save_window_soon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.saving_window = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(WINDOW_SAVE_DELAY).await;
+            let saving = this.update_in(cx, |this, window, cx| this.save_window(window, cx));
+            if let Err(error) = saving {
+                eprintln!("workspace: couldn't save the window's bounds: {error}");
+            }
+        });
+    }
+
+    fn save_window(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let bounds = window.window_bounds();
+        if let WindowBounds::Windowed(windowed) = bounds {
+            self.windowed_bounds = windowed;
+        }
+        let saved = window::saved(bounds, self.windowed_bounds);
+        self.database
+            .read(cx)
+            .queue(move |write| settings::save_window(write, saved));
     }
 
     fn count_needs_review(&mut self, cx: &mut Context<Self>) {
@@ -207,6 +312,10 @@ impl Workspace {
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        let collapsed = self.sidebar_collapsed;
+        self.database
+            .read(cx)
+            .queue(move |write| settings::set_sidebar_collapsed(write, collapsed));
         cx.notify();
     }
 
@@ -215,6 +324,7 @@ impl Workspace {
         self.job_view
             .update(cx, |job_view, cx| job_view.set_job(job, cx));
         self.job_view.focus_handle(cx).focus(window, cx);
+        self.save_page(cx);
         cx.notify();
     }
 
@@ -226,6 +336,7 @@ impl Workspace {
         }
         self.page = Page::Resumes;
         self.resume_grid.focus_handle(cx).focus(window, cx);
+        self.save_page(cx);
         cx.notify();
     }
 
@@ -238,6 +349,7 @@ impl Workspace {
             Page::Settings => self.focus_handle.focus(window, cx),
             Page::Resumes | Page::Job => {}
         }
+        self.save_page(cx);
         cx.notify();
     }
 
@@ -351,10 +463,27 @@ enum Page {
     Settings,
 }
 
-fn settings() -> AnyElement {
+/// Sets the theme and motion to the stored settings, where they differ.
+fn apply_settings(stored: settings::Settings, cx: &mut App) {
+    if Appearance::current(cx) != stored.appearance {
+        stored.appearance.set(cx);
+    }
+    if Motion::current(cx) != stored.motion {
+        stored.motion.set(cx);
+    }
+}
+
+/// Each choice is written to `settings`; the workspace applies it once the
+/// write commits.
+fn settings_page(database: Entity<Database>) -> AnyElement {
     let options = Appearance::ALL
         .into_iter()
-        .map(|appearance| (appearance.key(), SharedString::from(appearance.label())))
+        .map(|appearance| {
+            (
+                SharedString::from(appearance.stored()),
+                SharedString::from(appearance.label()),
+            )
+        })
         .collect();
 
     Settings::new("settings")
@@ -366,10 +495,15 @@ fn settings() -> AnyElement {
                         "Theme",
                         SettingField::dropdown(
                             options,
-                            |cx| Appearance::current(cx).key(),
-                            |key, cx| {
-                                if let Some(appearance) = Appearance::from_key(&key) {
-                                    appearance.set(cx);
+                            |cx| Appearance::current(cx).stored().into(),
+                            {
+                                let database = database.clone();
+                                move |key, cx| {
+                                    if let Some(appearance) = Appearance::from_stored(&key) {
+                                        database.read(cx).queue(move |write| {
+                                            settings::set_appearance(write, appearance)
+                                        });
+                                    }
                                 }
                             },
                         ),
@@ -382,12 +516,19 @@ fn settings() -> AnyElement {
                         SettingField::dropdown(
                             Motion::ALL
                                 .into_iter()
-                                .map(|motion| (motion.key(), SharedString::from(motion.label())))
+                                .map(|motion| {
+                                    (
+                                        SharedString::from(motion.stored()),
+                                        SharedString::from(motion.label()),
+                                    )
+                                })
                                 .collect(),
-                            |cx| Motion::current(cx).key(),
-                            |key, cx| {
-                                if let Some(motion) = Motion::from_key(&key) {
-                                    motion.set(cx);
+                            |cx| Motion::current(cx).stored().into(),
+                            move |key, cx| {
+                                if let Some(motion) = Motion::from_stored(&key) {
+                                    database
+                                        .read(cx)
+                                        .queue(move |write| settings::set_motion(write, motion));
                                 }
                             },
                         ),
@@ -414,7 +555,8 @@ mod tests {
         workspace: Entity<Workspace>,
         database: Entity<Database>,
         cx: &'a mut VisualTestContext,
-        _directory: TemporaryDirectory,
+        /// `None` for a window on a database another test window opened.
+        _directory: Option<TemporaryDirectory>,
     }
 
     fn open(app: &mut TestAppContext) -> Open<'_> {
@@ -426,7 +568,7 @@ mod tests {
             workspace,
             database,
             cx,
-            _directory: directory,
+            _directory: Some(directory),
         }
     }
 
@@ -494,5 +636,99 @@ mod tests {
             (job_view.job(), job_view.selected_line())
         });
         assert_eq!(shown, (Some(job), Some(line)));
+    }
+
+    /// A second window on the same database, as the next start would open.
+    fn reopen<'a>(app: &'a mut TestAppContext, database: &Entity<Database>) -> Open<'a> {
+        let (workspace, cx) =
+            app.add_window_view(|window, cx| Workspace::new(database.clone(), window, cx));
+        cx.run_until_parked();
+        Open {
+            workspace,
+            database: database.clone(),
+            cx,
+            _directory: None,
+        }
+    }
+
+    fn device_settings(open: &mut Open) -> DeviceSettings {
+        let read = open.database.read_with(open.cx, |database, _| {
+            DeviceSettings::read(database.device_connection())
+        });
+        match read {
+            Ok(settings) => settings,
+            Err(error) => panic!("couldn't read the device settings: {error}"),
+        }
+    }
+
+    #[test]
+    fn the_sidebar_and_page_open_as_they_were_left() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        {
+            let mut open = reopen(&mut app, &database);
+            open.cx.dispatch_action(ToggleSidebar);
+            open.workspace.update_in(open.cx, |workspace, window, cx| {
+                workspace.open_page(Page::Facts, window, cx)
+            });
+            testing::settle(open.cx, &database);
+            let saved = device_settings(&mut open);
+            assert!(saved.sidebar_collapsed);
+            assert_eq!(saved.last_page, LastPage::Facts);
+        }
+        let mut open = reopen(&mut app, &database);
+        assert!(open.read(|workspace, _| workspace.sidebar_collapsed));
+        assert!(open.read(|workspace, _| workspace.page == Page::Facts));
+    }
+
+    #[test]
+    fn the_job_page_opens_on_the_job_it_was_left_on() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        let job = {
+            let mut open = reopen(&mut app, &database);
+            let job = JobId(open.id("SELECT id FROM jobs WHERE company = 'Ledgerly'"));
+            open.workspace
+                .update_in(open.cx, |workspace, window, cx| workspace.open_job(job, window, cx));
+            testing::settle(open.cx, &database);
+            assert_eq!(device_settings(&mut open).last_page, LastPage::Job(job));
+            job
+        };
+        let mut open = reopen(&mut app, &database);
+        assert!(open.read(|workspace, _| workspace.page == Page::Job));
+        assert_eq!(open.read(|workspace, cx| workspace.job_view.read(cx).job()), Some(job));
+
+        open.workspace
+            .update_in(open.cx, |workspace, window, cx| workspace.open_resumes(window, cx));
+        testing::settle(open.cx, &database);
+        assert_eq!(device_settings(&mut open).last_page, LastPage::Resumes);
+    }
+
+    #[test]
+    fn a_job_gone_since_opens_the_grid_instead() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        database.read_with(&app, |database, _| {
+            database.queue(|write| settings::set_last_page(write, LastPage::Job(JobId::new())));
+            database.flush();
+        });
+        let mut open = reopen(&mut app, &database);
+        assert!(open.read(|workspace, _| workspace.page == Page::Resumes));
+        testing::settle(open.cx, &database);
+        assert_eq!(device_settings(&mut open).last_page, LastPage::Resumes);
+    }
+
+    #[test]
+    fn the_theme_and_motion_follow_the_stored_settings() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.run(|write| {
+            settings::set_appearance(write, Appearance::Dark)?;
+            settings::set_motion(write, Motion::Reduced)
+        });
+        assert_eq!(open.read(|_, cx| Appearance::current(cx)), Appearance::Dark);
+        assert_eq!(open.read(|_, cx| Motion::current(cx)), Motion::Reduced);
+        open.run(|write| settings::set_appearance(write, Appearance::Light));
+        assert_eq!(open.read(|_, cx| Appearance::current(cx)), Appearance::Light);
     }
 }

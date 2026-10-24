@@ -17,7 +17,9 @@ use gpui_kit::{
     px, size,
 };
 
+use database::Database;
 use dev_overlay::DevOverlay;
+use model::settings::{DeviceSettings, SavedWindow, WindowState};
 use workspace::Workspace;
 
 const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
@@ -84,6 +86,23 @@ fn window_bounds(cx: &App) -> (Bounds<Pixels>, bool) {
     (Bounds::centered(None, window_size, cx), !fits)
 }
 
+/// Where the window was when it was last left, if it's still on a screen:
+/// the screen it was on may have been unplugged since.
+fn saved_window(database: &Entity<Database>, cx: &App) -> Option<SavedWindow> {
+    let saved = match DeviceSettings::read(database.read(cx).device_connection()) {
+        Ok(settings) => settings.window?,
+        Err(error) => {
+            eprintln!("couldn't read where the window was: {error}");
+            return None;
+        }
+    };
+    let bounds = window::restored(saved);
+    cx.displays()
+        .iter()
+        .any(|display| display.bounds().intersects(&bounds))
+        .then_some(saved)
+}
+
 fn main() {
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
@@ -112,7 +131,17 @@ fn main() {
                 }
             })
             .detach();
-            let (bounds, maximize) = window_bounds(cx);
+            let saved = saved_window(&database, cx);
+            let (bounds, maximize) = match saved {
+                // Opened windowed and set to its state once mapped, like the
+                // default size's maximize.
+                Some(saved) => (
+                    window::restored(saved),
+                    saved.state == WindowState::Maximized,
+                ),
+                None => window_bounds(cx),
+            };
+            let fullscreen = saved.is_some_and(|saved| saved.state == WindowState::Fullscreen);
             let opened = gpui_kit::open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -131,11 +160,20 @@ fn main() {
                     // Position and maximize requests are applied once the window is
                     // mapped; X11 window managers ignore them before that.
                     window.on_next_frame(move |window, _| {
-                        window::center_window();
+                        // Saved in logical pixels; X11 places windows in the screen's.
+                        let scale = window.scale_factor();
+                        window::place_window(saved.map(|saved| {
+                            (
+                                (saved.x as f32 * scale).round() as i32,
+                                (saved.y as f32 * scale).round() as i32,
+                            )
+                        }));
                         // Maximize a frame later so the window manager records the
-                        // centered position as the one to restore to.
+                        // position as the one to restore to.
                         if maximize {
                             window.on_next_frame(|window, _| window.zoom_window());
+                        } else if fullscreen {
+                            window.on_next_frame(|window, _| window.toggle_fullscreen());
                         }
                     });
                     let dev_overlay = cx.new(|cx| DevOverlay::new(database.clone(), cx));

@@ -3,6 +3,7 @@ pub mod commands;
 #[cfg(any(debug_assertions, test))]
 pub mod sample;
 mod section;
+pub mod settings;
 mod stored;
 
 use std::collections::HashSet;

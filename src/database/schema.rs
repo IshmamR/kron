@@ -3,15 +3,16 @@ use std::marker::PhantomData;
 use rusqlite::ToSql;
 use uuid::Uuid;
 
-/// A synced table. `build.rs` makes one unit struct per table in
-/// kron.sqlite, as `Facts` for `facts`, with its columns in a module named
-/// after it: `facts::TEXT`.
+/// A table. `build.rs` makes one unit struct per table, as `Facts` for
+/// `facts`, with its columns in a module named after it: `facts::TEXT`.
 pub trait Table: Copy {
     const NAME: &'static str;
     /// Its primary key columns, in key order.
     const KEY: &'static [&'static str];
     /// The key's column types as a tuple, `(Blob,)` or `(Blob, Text)`.
     type Key;
+    /// In device.sqlite, so never synced; otherwise in kron.sqlite, and synced.
+    const DEVICE: bool = false;
 }
 
 /// A table with `deleted_at`: only these delete.

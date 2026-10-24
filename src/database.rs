@@ -48,6 +48,8 @@ pub fn open_in(directory: &TemporaryDirectory, cx: &mut App) -> Result<Entity<Da
 pub struct Database {
     /// Read-only, on the main thread: queries take well under a ms.
     reader: Connection,
+    /// device.sqlite, read-only too.
+    device_reader: Connection,
     device_id: Uuid,
     writer: WriterThread,
     _changes: Task<()>,
@@ -62,6 +64,7 @@ impl Database {
         let writer = WriterThread::spawn(opened.writer, changes);
         Self {
             reader: opened.reader,
+            device_reader: opened.device_reader,
             device_id: opened.device_id,
             writer,
             _changes: cx.spawn(async move |this, cx| {
@@ -82,6 +85,11 @@ impl Database {
     /// For queries. Read-only: changes go through `write`.
     pub fn connection(&self) -> &Connection {
         &self.reader
+    }
+
+    /// For queries of this device's tables, like `device_settings`.
+    pub fn device_connection(&self) -> &Connection {
+        &self.device_reader
     }
 
     pub fn device_id(&self) -> Uuid {
@@ -198,6 +206,7 @@ impl From<rusqlite::Error> for Error {
 /// Both databases opened and migrated, before the entity exists.
 struct Opened {
     reader: Connection,
+    device_reader: Connection,
     writer: Writer,
     device_id: Uuid,
 }
@@ -207,20 +216,20 @@ impl Opened {
         std::fs::create_dir_all(directory)
             .map_err(|error| Error::Directory(directory.to_path_buf(), error))?;
         let kron_path = directory.join(KRON_DB);
+        let device_path = directory.join(DEVICE_DB);
         let mut kron = open_connection(&kron_path, OpenFlags::default())?;
-        let mut device = open_connection(&directory.join(DEVICE_DB), OpenFlags::default())?;
+        let mut device = open_connection(&device_path, OpenFlags::default())?;
         migrate(&mut kron, KRON_DB, KRON_MIGRATIONS)?;
         migrate(&mut device, DEVICE_DB, DEVICE_MIGRATIONS)?;
         let device_id = device_id(&device)?;
-        // Opened after migrating, so the file and its WAL exist, which a
+        // Opened after migrating, so the files and their WALs exist, which a
         // read-only connection can't create.
-        let reader = open_connection(
-            &kron_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
+        let read_only = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let reader = open_connection(&kron_path, read_only)?;
         reader.set_prepared_statement_cache_capacity(write::STATEMENT_CACHE);
         Ok(Self {
             reader,
+            device_reader: open_connection(&device_path, read_only)?,
             writer: Writer::new(kron, device, Some(directory.join(FILES_DIRECTORY)))?,
             device_id,
         })
