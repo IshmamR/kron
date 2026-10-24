@@ -1131,150 +1131,186 @@ fn centered_message(text: &'static str, cx: &App) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use gpui_kit::{TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::database::{TemporaryDirectory, Write};
-    use crate::model::{ClaimId, FactId, Library, TailoredResume, UnsupportedReason, sample};
-    use crate::workspace::parts::Source;
+    use crate::model::{ClaimId, FactId, UnsupportedReason, sample};
     use crate::workspace::testing;
 
-    /// The queries read back each job's versions, each version's lines and
-    /// changes, and what the inspector shows of each line, as `library` has
-    /// them.
-    fn assert_queries_match(connection: &Connection, library: &Library) -> Result<(), Error> {
-        for job in &library.jobs {
-            let versions = Versions::read(connection, job.id)?;
-            assert_eq!(
-                versions.current.as_ref().map(|version| version.id),
-                job.current_resume().map(|resume| resume.id),
-                "{}",
-                job.company
-            );
-            assert_eq!(
-                versions.sent.as_ref().map(|version| version.id),
-                job.sent_older_resume().map(|resume| resume.id),
-                "{}",
-                job.company
-            );
-            for version in versions.current.iter().chain(&versions.sent) {
-                let Some(resume) = job.resume(version.id) else {
-                    panic!("{}: no such résumé", job.company);
-                };
-                assert_eq!(version.generated_at, resume.generated_at);
-                assert_eq!(version.template.key, resume.template);
-            }
-            for resume in &job.resumes {
-                assert_resume_matches(connection, library, resume)?;
-            }
-        }
-        Ok(())
+    /// A job's company, its current résumé's template, and whether an older
+    /// one was sent.
+    type JobVersions = (String, Option<&'static str>, bool);
+    /// A claim's reason, the fact added from it, and whether the hidden fact
+    /// it needs is shown again.
+    type ClaimState = (UnsupportedReason, Option<FactId>, bool);
+
+    /// Each job's versions, in the board's order.
+    fn versions(connection: &Connection) -> Result<Vec<JobVersions>, Error> {
+        let jobs: Vec<(JobId, String)> = connection
+            .prepare("SELECT id, company FROM jobs ORDER BY board_sort_key, id")?
+            .query_map([], |row| Ok((JobId(row.get(0)?), row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        jobs.into_iter()
+            .map(|(job, company)| {
+                let versions = Versions::read(connection, job)?;
+                Ok((
+                    company,
+                    versions.current.map(|version| version.template.key),
+                    versions.sent.is_some(),
+                ))
+            })
+            .collect()
     }
 
-    fn assert_resume_matches(
+    /// What the job's current résumé shows changed, and its unsupported
+    /// claims.
+    fn current(
         connection: &Connection,
-        library: &Library,
-        resume: &TailoredResume,
-    ) -> Result<(), Error> {
-        let shown = ShownResume::read(connection, resume.id)?;
-        // As sets: the library reads a block's lines by role, the query by
-        // their order on the page.
-        let lines: BTreeSet<(LineId, &str, &str, &[FactId])> = shown
-            .lines
-            .iter()
-            .map(|line| {
-                (line.id, line.text.as_str(), line.generated.as_str(), line.cites.as_slice())
-            })
-            .collect();
-        let expected: BTreeSet<(LineId, &str, &str, &[FactId])> = resume
-            .lines()
-            .map(|line| {
-                (line.id, line.text.as_str(), line.generated.as_str(), line.cites.as_slice())
-            })
-            .collect();
-        assert_eq!(lines, expected);
-        let mut changes = shown.changes.clone();
-        changes.sort_by_key(|(fact, _)| *fact);
-        let expected: Vec<(FactId, FactChange)> = library
-            .changed_facts(resume)
+        company: &str,
+    ) -> Result<(Vec<FactChange>, Vec<ClaimState>), Error> {
+        let Some(version) = Versions::read(connection, sample::job(connection, company)?)?.current else {
+            return Ok(Default::default());
+        };
+        let shown = ShownResume::read(connection, version.id)?;
+        let mut changes: Vec<FactChange> = shown.changes.iter().map(|(_, change)| *change).collect();
+        changes.sort_by_key(|change| format!("{change:?}"));
+        let claims = Inspection::read(connection, &shown, None)?
+            .claims
             .into_iter()
-            .filter_map(|fact| Some((fact, library.fact_change(resume, fact)?)))
+            .map(|claim| (claim.reason, claim.added_as, claim.hidden_fact_shown))
             .collect();
-        assert_eq!(changes, expected);
-
-        for line in resume.lines() {
-            let inspection = Inspection::read(connection, &shown, Some(line.id))?;
-            assert_eq!(
-                inspection.facts.iter().map(|cited| cited.id).collect::<Vec<_>>(),
-                line.cites
-            );
-            for cited in &inspection.facts {
-                let expected = library.fact(cited.id);
-                assert_eq!(cited.fact.is_some(), expected.is_some());
-                let (Some(fact), Some(expected)) = (&cited.fact, expected) else {
-                    continue;
-                };
-                assert_eq!(fact.text, expected.text);
-                assert_eq!(fact.kind, expected.kind);
-                assert_eq!(fact.hidden, expected.hidden);
-                assert_eq!(fact.review, expected.review);
-                assert_eq!(
-                    fact.entry,
-                    expected.entry.and_then(|entry| library.entry_label(entry))
-                );
-                let labels: Vec<&str> = fact.sources.iter().map(|source| source.label.as_str()).collect();
-                let expected_labels: Vec<String> = expected
-                    .sources
-                    .iter()
-                    .map(|source| Source::from_library(library, source).label)
-                    .collect();
-                assert_eq!(labels, expected_labels);
-            }
-        }
-
-        let inspection = Inspection::read(connection, &shown, None)?;
-        assert_eq!(inspection.claims.len(), resume.unsupported_claims.len());
-        for (claim, expected) in inspection.claims.iter().zip(&resume.unsupported_claims) {
-            assert_eq!(claim.id, expected.id);
-            assert_eq!(claim.text, expected.text);
-            assert_eq!(claim.reason, expected.reason);
-            assert_eq!(claim.added_as, expected.added_as);
-            let shown_again = match expected.reason {
-                UnsupportedReason::UsesHiddenFact(fact) => {
-                    library.fact(fact).is_some_and(|fact| !fact.hidden)
-                }
-                _ => false,
-            };
-            assert_eq!(claim.hidden_fact_shown, shown_again);
-        }
-        Ok(())
-    }
-
-    fn fact(connection: &Connection, start: &str) -> Result<FactId, Error> {
-        Ok(FactId(connection.query_row(
-            "SELECT id FROM facts WHERE text LIKE ?1 || '%' ORDER BY id LIMIT 1",
-            [start],
-            |row| row.get(0),
-        )?))
+        Ok((changes, claims))
     }
 
     #[test]
-    fn the_queries_read_back_what_the_sample_wrote() -> Result<(), Error> {
-        let (writer, library) = sample::written()?;
-        assert_queries_match(writer.kron(), &library)
+    fn each_job_shows_its_current_resume_and_the_older_one_sent() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let expected = [
+            ("Cinder Labs", Some("classic"), false),
+            ("Ledgerly", Some("modern"), true),
+            ("Atlas Freight", Some("modern"), false),
+            ("Tidewater Systems", Some("sidebar"), false),
+            ("Quillpay", Some("modern"), false),
+            ("Northstar Metrics", Some("classic"), false),
+            ("Brightwave", Some("sidebar"), false),
+            ("Kestrel Labs", Some("modern"), false),
+            ("Halcyon Cloud", None, false),
+        ];
+        assert_eq!(
+            versions(writer.kron())?,
+            expected.map(|(company, template, sent)| (company.to_string(), template, sent))
+        );
+        Ok(())
     }
 
-    /// The commands, and the same changes made to the sample as written.
+    #[test]
+    fn a_shown_resume_reads_back_its_lines_and_what_they_cite() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let resumes: Vec<ResumeId> = connection
+            .prepare("SELECT id FROM generations WHERE kind = 'resume'")?
+            .query_map([], |row| Ok(ResumeId(row.get(0)?)))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(resumes.len(), 9);
+        for resume in resumes {
+            let shown = ShownResume::read(connection, resume)?;
+            let mut lines: Vec<(LineId, String, String)> = shown
+                .lines
+                .iter()
+                .map(|line| (line.id, line.text.clone(), line.generated.clone()))
+                .collect();
+            let mut stored: Vec<(LineId, String, String)> = connection
+                .prepare(
+                    "SELECT lines.id, lines.text, lines.generated FROM lines
+                     JOIN blocks ON blocks.id = lines.block_id
+                     JOIN sections ON sections.id = blocks.section_id
+                     WHERE sections.generation_id = ?1",
+                )?
+                .query_map([resume.0], |row| Ok((LineId(row.get(0)?), row.get(1)?, row.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            lines.sort();
+            stored.sort();
+            assert_eq!(lines, stored);
+
+            for line in &shown.lines {
+                let cited: Vec<FactId> = connection
+                    .prepare("SELECT fact_id FROM line_citations WHERE line_id = ?1 ORDER BY sort_key")?
+                    .query_map([line.id.0], |row| Ok(FactId(row.get(0)?)))?
+                    .collect::<Result<_, _>>()?;
+                assert_eq!(line.cites, cited, "{:?}", line.text);
+                let inspection = Inspection::read(connection, &shown, Some(line.id))?;
+                assert_eq!(
+                    inspection.facts.iter().map(|cited| cited.id).collect::<Vec<_>>(),
+                    cited
+                );
+                for cited in &inspection.facts {
+                    let Some(fact) = &cited.fact else {
+                        panic!("{:?} cites a missing fact", line.text);
+                    };
+                    let text: String = connection.query_row(
+                        "SELECT text FROM facts WHERE id = ?1",
+                        [cited.id.0],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(fact.text, text);
+                    assert!(!fact.sources.is_empty(), "{:?} has no source", fact.text);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_current_resume_shows_its_changed_facts_and_unsupported_claims() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let property_tests = sample::fact(connection, "Introduced property-based tests")?;
+        assert_eq!(
+            current(connection, "Cinder Labs")?,
+            (
+                vec![FactChange::Reworded],
+                vec![
+                    (UnsupportedReason::InventedFigure("30%".into()), None, false),
+                    (UnsupportedReason::InventedYear(2016), None, false),
+                    (UnsupportedReason::NoSupportingFact, None, false),
+                ]
+            )
+        );
+        assert_eq!(
+            current(connection, "Ledgerly")?,
+            (
+                vec![],
+                vec![
+                    (UnsupportedReason::UsesHiddenFact(property_tests), None, false),
+                    (UnsupportedReason::InventedFigure("$2M".into()), None, false),
+                ]
+            )
+        );
+        assert_eq!(
+            current(connection, "Atlas Freight")?,
+            (
+                vec![FactChange::Hidden, FactChange::Reworded],
+                vec![(UnsupportedReason::InventedFigure("12%".into()), None, false)]
+            )
+        );
+        assert_eq!(current(connection, "Brightwave")?, (vec![FactChange::Reworded], vec![]));
+        for company in ["Tidewater Systems", "Quillpay", "Northstar Metrics", "Kestrel Labs", "Halcyon Cloud"] {
+            assert_eq!(current(connection, company)?, (vec![], vec![]), "{company}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn the_queries_follow_changes_to_facts_and_claims() -> Result<(), Error> {
-        let (mut writer, mut library) = sample::written()?;
-        let latency = fact(writer.kron(), "Cut p99 latency")?;
-        let property_tests = fact(writer.kron(), "Introduced property-based tests")?;
+        let mut writer = sample::written()?;
+        let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
+        let property_tests = sample::fact(writer.kron(), "Introduced property-based tests")?;
         let claim: ClaimId = ClaimId(writer.kron().query_row(
-            "SELECT id FROM unsupported_claims WHERE added_as IS NULL
-             AND reason != 'uses_hidden_fact' ORDER BY id LIMIT 1",
+            "SELECT unsupported_claims.id FROM unsupported_claims
+             JOIN generations ON generations.id = unsupported_claims.generation_id
+             JOIN jobs ON jobs.id = generations.job_id
+             WHERE jobs.company = 'Cinder Labs' AND unsupported_claims.figure = '30%'",
             [],
             |row| row.get(0),
         )?);
@@ -1282,31 +1318,39 @@ mod tests {
         writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
         let (added, _) = writer.execute(|write| commands::add_claim_as_fact(write, claim))?;
         writer.execute(|write| commands::set_hidden(write, latency, true))?;
+        let connection = writer.kron();
 
-        for fact in &mut library.facts {
-            if fact.id == latency {
-                fact.text = "Cut p99 latency by 80%.".into();
-                fact.review = None;
-                fact.hidden = true;
-            } else if fact.id == property_tests {
-                fact.hidden = false;
-            }
-        }
-        for each in library
-            .jobs
-            .iter_mut()
-            .flat_map(|job| &mut job.resumes)
-            .flat_map(|resume| &mut resume.unsupported_claims)
-            .filter(|each| each.id == claim)
-        {
-            each.added_as = added.first().copied();
-        }
-        assert_queries_match(writer.kron(), &library)
+        // The claim is marked added, and the latency fact shows as hidden.
+        assert_eq!(
+            current(connection, "Cinder Labs")?,
+            (
+                vec![FactChange::Hidden, FactChange::Reworded],
+                vec![
+                    (UnsupportedReason::InventedFigure("30%".into()), added.first().copied(), false),
+                    (UnsupportedReason::InventedYear(2016), None, false),
+                    (UnsupportedReason::NoSupportingFact, None, false),
+                ]
+            )
+        );
+        // The hidden fact Ledgerly's claim needed is shown again.
+        assert_eq!(
+            current(connection, "Ledgerly")?,
+            (
+                vec![FactChange::Hidden, FactChange::Shown],
+                vec![
+                    (UnsupportedReason::UsesHiddenFact(property_tests), None, true),
+                    (UnsupportedReason::InventedFigure("$2M".into()), None, false),
+                ]
+            )
+        );
+        assert_eq!(current(connection, "Tidewater Systems")?, (vec![FactChange::Hidden], vec![]));
+        assert_eq!(current(connection, "Quillpay")?, (vec![], vec![]));
+        Ok(())
     }
 
     #[test]
     fn a_job_without_a_resume_has_no_versions() -> Result<(), Error> {
-        let (writer, _) = sample::written()?;
+        let writer = sample::written()?;
         let job = JobId(writer.kron().query_row(
             "SELECT id FROM jobs WHERE company = 'Halcyon Cloud'",
             [],

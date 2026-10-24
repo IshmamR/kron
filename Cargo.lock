@@ -4209,9 +4209,7 @@ dependencies = [
  "dirs 7.0.0",
  "futures",
  "gpui-kit",
- "ron",
  "rusqlite",
- "serde",
  "sysinfo 0.39.6",
  "typst",
  "typst-kit",
@@ -6522,20 +6520,6 @@ name = "roman-numerals-rs"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c85cd47a33a4510b1424fe796498e174c6a9cf94e606460ef022a19f3e4ff85e"
-
-[[package]]
-name = "ron"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
-dependencies = [
- "bitflags 2.13.2",
- "once_cell",
- "serde",
- "serde_derive",
- "typeid",
- "unicode-ident",
-]
 
 [[package]]
 name = "ropey"

@@ -13,8 +13,6 @@ use rusqlite::Connection;
 
 use crate::database::Error;
 use crate::model::{EntryId, FactId, FactKind};
-#[cfg(test)]
-use crate::model::{DocumentKind, FactSource, Library};
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
@@ -119,22 +117,6 @@ impl Source {
                 .and(text)
                 .and_then(|text| source_context(text, span)),
         }
-    }
-
-    #[cfg(test)]
-    pub fn from_library(library: &Library, source: &FactSource) -> Self {
-        let document = library.document(source.document);
-        Self::new(
-            document.map(|document| {
-                let file_name = match &document.kind {
-                    DocumentKind::File { file_name } => Some(file_name.as_str()),
-                    DocumentKind::Note => None,
-                };
-                (file_name, document.added_at)
-            }),
-            document.map(|document| document.text.as_str()),
-            &source.span,
-        )
     }
 }
 

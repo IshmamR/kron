@@ -130,7 +130,7 @@ impl DevOverlay {
         let reset = self.database.read(cx).write(cx, |write| {
             write.erase_everything()?;
             typeset::install_templates(write)?;
-            sample::write_library(write)
+            sample::write_sample(write)
         });
         self.reset = Some(cx.spawn(async move |this, cx| {
             if let Err(error) = reset.await {

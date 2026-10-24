@@ -275,6 +275,24 @@ impl Write<'_> {
         }
         self.transaction
             .execute("INSERT INTO settings (singleton) VALUES (1)", [])?;
+        self.touch_every_table();
+        Ok(())
+    }
+
+    /// Runs `sql` as written, for the development sample. Like
+    /// `erase_everything`, not a sync change: nothing goes in the outbox.
+    #[cfg(any(debug_assertions, test))]
+    pub fn seed(&mut self, sql: &str) -> Result<(), Error> {
+        // Checked at commit, so the tables can be written in any order.
+        self.transaction
+            .pragma_update(None, "defer_foreign_keys", true)?;
+        self.transaction.execute_batch(sql)?;
+        self.touch_every_table();
+        Ok(())
+    }
+
+    #[cfg(any(debug_assertions, test))]
+    fn touch_every_table(&mut self) {
         // An empty key matches no row: views that show any of a table hear
         // of it through `Changed::touches`.
         self.changes
@@ -283,7 +301,6 @@ impl Write<'_> {
                 key: Box::default(),
                 field: None,
             }));
-        Ok(())
     }
 
     /// Prepares a read inside the command's transaction, so it sees what the

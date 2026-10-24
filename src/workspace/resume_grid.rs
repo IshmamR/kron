@@ -667,85 +667,95 @@ mod tests {
 
     use super::*;
     use crate::database::{TemporaryDirectory, Write};
-    use crate::model::{FactId, Library, commands, sample};
+    use crate::model::{FactId, commands, sample};
     use crate::workspace::testing;
 
-    fn assert_current_resumes_match(connection: &Connection, library: &Library) -> Result<(), Error> {
+    /// A job's company and its current résumé's unsupported claims and
+    /// whether a fact it was generated from changed since; `None` for a job
+    /// without one.
+    type Summary = (String, Option<(usize, bool)>);
+
+    /// Each job's, in the board's order.
+    fn summary(connection: &Connection) -> Result<Vec<Summary>, Error> {
         let current = current_resumes(connection)?;
-        for job in &library.jobs {
-            let expected = job.current_resume();
-            let read = current.get(&job.id);
-            assert_eq!(read.map(|resume| resume.id), expected.map(|resume| resume.id));
-            let Some((read, expected)) = read.zip(expected) else {
-                continue;
-            };
-            assert_eq!(read.unsupported, expected.unsupported_claims.len(), "{}", job.company);
-            assert_eq!(
-                read.outdated,
-                !library.changed_facts(expected).is_empty(),
-                "{}",
-                job.company
-            );
-        }
-        Ok(())
+        let jobs: Vec<(JobId, String)> = connection
+            .prepare("SELECT id, company FROM jobs ORDER BY board_sort_key, id")?
+            .query_map([], |row| Ok((JobId(row.get(0)?), row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(jobs
+            .into_iter()
+            .map(|(job, company)| {
+                let resume = current.get(&job).map(|resume| (resume.unsupported, resume.outdated));
+                (company, resume)
+            })
+            .collect())
     }
 
-    fn fact(connection: &Connection, start: &str) -> Result<FactId, Error> {
-        Ok(FactId(connection.query_row(
-            "SELECT id FROM facts WHERE text LIKE ?1 || '%' ORDER BY id LIMIT 1",
-            [start],
-            |row| row.get(0),
-        )?))
+    fn expected(rows: &[(&str, Option<(usize, bool)>)]) -> Vec<Summary> {
+        rows.iter()
+            .map(|&(company, resume)| (company.to_string(), resume))
+            .collect()
+    }
+
+    /// The sample as written: some résumés have unsupported claims, and
+    /// some were generated before their facts were edited or hidden.
+    const SAMPLE: [(&str, Option<(usize, bool)>); 9] = [
+        ("Cinder Labs", Some((3, true))),
+        ("Ledgerly", Some((2, false))),
+        ("Atlas Freight", Some((1, true))),
+        ("Tidewater Systems", Some((0, false))),
+        ("Quillpay", Some((0, false))),
+        ("Northstar Metrics", Some((0, false))),
+        ("Brightwave", Some((0, true))),
+        ("Kestrel Labs", Some((0, false))),
+        ("Halcyon Cloud", None),
+    ];
+
+    /// The sample, with these companies' résumés outdated too.
+    fn outdated(companies: &[&str]) -> Vec<Summary> {
+        let mut rows = expected(&SAMPLE);
+        for (company, resume) in &mut rows {
+            if let Some((_, outdated)) = resume
+                && companies.contains(&company.as_str())
+            {
+                *outdated = true;
+            }
+        }
+        rows
     }
 
     #[test]
     fn the_current_resumes_read_back_what_the_sample_wrote() -> Result<(), Error> {
-        let (writer, library) = sample::written()?;
-        assert_current_resumes_match(writer.kron(), &library)
+        let writer = sample::written()?;
+        assert_eq!(summary(writer.kron())?, expected(&SAMPLE));
+        Ok(())
     }
 
     #[test]
     fn the_current_resumes_follow_changes_to_facts() -> Result<(), Error> {
-        let (mut writer, mut library) = sample::written()?;
-        let migration = fact(writer.kron(), "Led the migration")?;
-        let linkedin = fact(writer.kron(), "Migrated 12 backend")?;
-        let latency = fact(writer.kron(), "Cut p99 latency")?;
-        let property_tests = fact(writer.kron(), "Introduced property-based tests")?;
-
-        // A merged fact is compared with the fact it was merged into.
-        writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
-        for version in library
-            .jobs
-            .iter_mut()
-            .flat_map(|job| &mut job.resumes)
-            .flat_map(|resume| &mut resume.basis)
-            .filter(|version| version.fact == migration)
-        {
-            version.fact = linkedin;
-        }
-        assert_current_resumes_match(writer.kron(), &library)?;
+        let mut writer = sample::written()?;
+        let migration = sample::fact(writer.kron(), "Led the migration")?;
+        let linkedin = sample::fact(writer.kron(), "Migrated 12 backend")?;
+        let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
+        let property_tests = sample::fact(writer.kron(), "Introduced property-based tests")?;
 
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
-        for fact in &mut library.facts {
-            if fact.id == latency {
-                fact.text = "Cut p99 latency by 80%.".into();
-            } else if fact.id == property_tests {
-                fact.hidden = false;
-            }
-        }
-        assert_current_resumes_match(writer.kron(), &library)?;
+        assert_eq!(summary(writer.kron())?, outdated(&["Ledgerly", "Tidewater Systems"]));
 
+        // Back as they were generated from.
         writer.execute(|write| commands::revert_fact(write, latency))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, true))?;
-        for fact in &mut library.facts {
-            if fact.id == latency {
-                fact.text = fact.extracted.clone();
-            } else if fact.id == property_tests {
-                fact.hidden = true;
-            }
-        }
-        assert_current_resumes_match(writer.kron(), &library)
+        assert_eq!(summary(writer.kron())?, expected(&SAMPLE));
+
+        // A merged fact is compared with the fact it was merged into, which
+        // reads differently.
+        writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
+        assert_eq!(
+            summary(writer.kron())?,
+            outdated(&["Ledgerly", "Tidewater Systems", "Quillpay"])
+        );
+        Ok(())
     }
 
     // The grid in a window, driven by keys, with the thumbnails typeset.
@@ -833,7 +843,7 @@ mod tests {
         fn fact(&mut self, start: &str) -> FactId {
             let fact = self
                 .database
-                .read_with(self.cx, |database, _| fact(database.connection(), start));
+                .read_with(self.cx, |database, _| sample::fact(database.connection(), start));
             match fact {
                 Ok(fact) => fact,
                 Err(error) => panic!("{start}: {error}"),

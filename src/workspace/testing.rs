@@ -30,7 +30,7 @@ pub fn open_sample(app: &mut TestAppContext) -> (Entity<Database>, TemporaryDire
 
 pub fn write_sample(write: &mut Write) -> Result<(), Error> {
     typeset::install_templates(write)?;
-    sample::write_library(write)
+    sample::write_sample(write)
 }
 
 /// Lets queued commands commit, delivers what they changed, and draws.

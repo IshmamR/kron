@@ -4,10 +4,9 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{EventId, Job, JobId, ResumeId, TailoredResume};
+use super::{EventId, JobId, ResumeId};
 use crate::database::Error;
 
 /// After this long with no answer to an application, it's worth a follow-up,
@@ -17,7 +16,7 @@ const NO_REPLY_DAYS: i64 = 14;
 const NO_NEWS_AFTER_INTERVIEW_DAYS: i64 = 7;
 
 /// Something that happened, or will, in an application.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct JobEvent {
     pub id: EventId,
     /// When it happened; for an interview, when it's held.
@@ -38,7 +37,7 @@ impl JobEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobEventKind {
     /// `resume` is the version sent, which regenerating doesn't change.
     Applied { resume: Option<ResumeId> },
@@ -59,7 +58,7 @@ impl JobEventKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterviewKind {
     Phone,
     Technical,
@@ -300,29 +299,6 @@ impl Application {
     }
 }
 
-impl Job {
-    /// The résumé sent with the latest application.
-    pub fn sent_resume(&self) -> Option<&TailoredResume> {
-        self.events
-            .iter()
-            .filter_map(|event| match event.kind {
-                JobEventKind::Applied {
-                    resume: Some(resume),
-                } => Some((event.at, resume)),
-                _ => None,
-            })
-            .max_by_key(|(at, _)| *at)
-            .and_then(|(_, resume)| self.resume(resume))
-    }
-
-    /// The résumé sent, when it's no longer the current one.
-    pub fn sent_older_resume(&self) -> Option<&TailoredResume> {
-        let sent = self.sent_resume()?;
-        let current = self.current_resume()?;
-        (sent.id != current.id).then_some(sent)
-    }
-}
-
 /// An event from its row: job_id, id, at, kind, resume_id, interview_kind,
 /// interview_with, note.
 fn event(row: &Row) -> rusqlite::Result<JobEvent> {
@@ -494,33 +470,52 @@ mod tests {
     }
 
     #[test]
-    fn the_applications_read_back_as_the_sample_wrote_them() -> Result<(), Error> {
-        let (writer, library) = super::super::sample::written()?;
-        let applications = Application::read_all(writer.kron())?;
+    fn the_sample_applications_read_back_in_the_boards_order() -> Result<(), Error> {
+        let writer = super::super::sample::written()?;
+        let now = Utc::now();
+        let stage = |stage: Stage| match stage {
+            Stage::NotApplied => "not applied",
+            Stage::Applied => "applied",
+            Stage::Replied => "replied",
+            Stage::Interview { .. } => "interview",
+            Stage::Offer => "offer",
+            Stage::Rejected => "rejected",
+            Stage::Withdrawn => "withdrawn",
+            Stage::NoResponse => "no response",
+        };
+        let read: Vec<(String, usize, &str, bool)> = Application::read_all(writer.kron())?
+            .iter()
+            .map(|each| {
+                (
+                    each.company.clone(),
+                    each.events.len(),
+                    stage(each.stage(now)),
+                    each.sent_resume().is_some(),
+                )
+            })
+            .collect();
+        // Company, events (`wishlisted` isn't one), stage, and whether a
+        // résumé was sent.
+        let expected = [
+            ("Cinder Labs", 1, "not applied", false),
+            ("Ledgerly", 3, "interview", true),
+            ("Atlas Freight", 1, "applied", true),
+            ("Tidewater Systems", 1, "applied", true),
+            ("Quillpay", 3, "interview", true),
+            ("Northstar Metrics", 5, "rejected", true),
+            ("Brightwave", 5, "offer", true),
+            ("Kestrel Labs", 3, "withdrawn", true),
+            ("Halcyon Cloud", 0, "not applied", false),
+        ];
         assert_eq!(
-            applications.iter().map(|each| each.job).collect::<Vec<_>>(),
-            library.jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
-            "in the board's order"
+            read,
+            expected
+                .map(|(company, events, stage, sent)| (company.to_string(), events, stage, sent))
+                .to_vec()
         );
-        for (application, job) in applications.iter().zip(&library.jobs) {
-            assert_eq!(application.title, job.title);
-            assert_eq!(application.company, job.company);
-            assert_eq!(application.created_at.timestamp_millis(), job.created_at.timestamp_millis());
-            let ids = |events: &[JobEvent]| events.iter().map(|event| event.id).collect::<Vec<_>>();
-            assert_eq!(ids(&application.events), ids(&job.events));
-            for (read, expected) in application.events.iter().zip(&job.events) {
-                assert_eq!(read.at.timestamp_millis(), expected.at.timestamp_millis());
-                assert_eq!(read.kind, expected.kind);
-                assert_eq!(read.note, expected.note);
-            }
-            assert_eq!(
-                application.sent_resume(),
-                job.sent_resume().map(|resume| resume.id),
-                "{}",
-                job.company
-            );
-            let one = Application::read(writer.kron(), job.id)?;
-            assert_eq!(one.map(|one| one.events.len()), Some(job.events.len()));
+        for each in Application::read_all(writer.kron())? {
+            let one = Application::read(writer.kron(), each.job)?;
+            assert_eq!(one.map(|one| one.events.len()), Some(each.events.len()));
         }
         assert!(Application::read(writer.kron(), JobId::new())?.is_none());
         Ok(())

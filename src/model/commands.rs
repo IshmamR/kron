@@ -316,7 +316,7 @@ mod tests {
     use super::*;
     use crate::database::Writer;
     use crate::model::{
-        Application, FactChange, InterviewKind, LineId, ResumeId, Section, citations,
+        Application, FactChange, InterviewKind, LineId, ResumeId, citations,
         fact_changes, sample,
     };
 
@@ -325,7 +325,7 @@ mod tests {
     }
 
     fn with_sample() -> Result<Writer, Error> {
-        Ok(sample::written()?.0)
+        sample::written()
     }
 
     fn run<R>(
@@ -338,23 +338,6 @@ mod tests {
     fn count(connection: &Connection, sql: &str, parameters: impl Params) -> Result<usize, Error> {
         let count: i64 = connection.query_row(sql, parameters, |row| row.get(0))?;
         usize::try_from(count).map_err(|error| Error::Misuse(error.to_string()))
-    }
-
-    fn fact_with_text(connection: &Connection, start: &str) -> Result<FactId, Error> {
-        Ok(FactId(connection.query_row(
-            "SELECT id FROM facts WHERE text LIKE ?1 || '%' AND merged_into IS NULL
-             ORDER BY id LIMIT 1",
-            [start],
-            |row| row.get(0),
-        )?))
-    }
-
-    fn job_at(connection: &Connection, company: &str) -> Result<JobId, Error> {
-        Ok(JobId(connection.query_row(
-            "SELECT id FROM jobs WHERE company = ?1",
-            [company],
-            |row| row.get(0),
-        )?))
     }
 
     fn current_resume(connection: &Connection, job: JobId) -> Result<Option<ResumeId>, Error> {
@@ -398,87 +381,10 @@ mod tests {
     }
 
     fn changed(connection: &Connection, company: &str) -> Result<Vec<(FactId, FactChange)>, Error> {
-        match current_resume(connection, job_at(connection, company)?)? {
+        match current_resume(connection, sample::job(connection, company)?)? {
             Some(resume) => fact_changes(connection, resume),
             None => Ok(Vec::new()),
         }
-    }
-
-    #[test]
-    fn the_sample_reads_back_as_it_was_written() -> Result<(), Error> {
-        let (writer, written) = sample::written()?;
-        let connection = writer.kron();
-        let rows = |table: &str| count(connection, &format!("SELECT count(*) FROM {table}"), []);
-        assert_eq!(rows("documents")?, written.documents.len());
-        assert_eq!(rows("entries")?, written.entries.len());
-        assert_eq!(rows("facts")?, written.facts.len());
-        assert_eq!(
-            rows("fact_sources")?,
-            written.facts.iter().map(|fact| fact.sources.len()).sum::<usize>()
-        );
-        assert_eq!(rows("jobs")?, written.jobs.len());
-        for job in &written.jobs {
-            let of_job = |sql: &str| count(connection, sql, [job.id.0]);
-            assert_eq!(
-                of_job(
-                    "SELECT count(*) FROM events
-                     WHERE job_id = ?1 AND kind != 'wishlisted' AND deleted_at IS NULL"
-                )?,
-                job.events.len(),
-                "{}",
-                job.company
-            );
-            assert_eq!(
-                of_job("SELECT count(*) FROM generations WHERE job_id = ?1 AND kind = 'resume'")?,
-                job.resumes.len(),
-                "{}",
-                job.company
-            );
-            assert_eq!(
-                of_job("SELECT count(*) FROM fact_overrides WHERE job_id = ?1")?,
-                job.overrides.len(),
-                "{}",
-                job.company
-            );
-            assert_eq!(
-                of_job(
-                    "SELECT count(*) FROM generations
-                     JOIN sections ON sections.generation_id = generations.id
-                     JOIN blocks ON blocks.section_id = sections.id
-                     WHERE generations.job_id = ?1 AND generations.kind = 'cover_letter'"
-                )?,
-                job.cover_letter
-                    .as_ref()
-                    .map_or(0, |letter| letter.paragraphs.len()),
-                "{}",
-                job.company
-            );
-            for resume in &job.resumes {
-                let of_resume = |sql: &str| count(connection, sql, [resume.id.0]);
-                let sections = Section::read_all(connection, resume.id)?;
-                let lines = sections
-                    .iter()
-                    .flat_map(|section| &section.blocks)
-                    .map(|block| block.lines().len())
-                    .sum::<usize>();
-                assert_eq!(lines, resume.lines().count());
-                let version: Option<Uuid> = connection.query_row(
-                    "SELECT template_version_id FROM generations WHERE id = ?1",
-                    [resume.id.0],
-                    |row| row.get(0),
-                )?;
-                assert_eq!(typeset::template_of_version(version).key, resume.template);
-                assert_eq!(
-                    of_resume("SELECT count(*) FROM fact_versions WHERE generation_id = ?1")?,
-                    resume.basis.len()
-                );
-                assert_eq!(
-                    of_resume("SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1")?,
-                    resume.unsupported_claims.len()
-                );
-            }
-        }
-        Ok(())
     }
 
     #[test]
@@ -546,8 +452,8 @@ mod tests {
     #[test]
     fn merging_moves_sources_and_citations_and_undoing_puts_them_back() -> Result<(), Error> {
         let mut writer = with_sample()?;
-        let keep = fact_with_text(writer.kron(), "Migrated 12 backend")?;
-        let merged = fact_with_text(writer.kron(), "Led the migration")?;
+        let keep = sample::fact(writer.kron(), "Migrated 12 backend")?;
+        let merged = sample::fact(writer.kron(), "Led the migration")?;
         let kept_uses = uses(writer.kron(), keep)?;
         let merged_uses = uses(writer.kron(), merged)?;
         assert!(!merged_uses.is_empty());
@@ -582,7 +488,7 @@ mod tests {
         let mut writer = with_sample()?;
         assert_eq!(changed(writer.kron(), "Ledgerly")?, Vec::new());
 
-        let latency = fact_with_text(writer.kron(), "Cut p99 latency")?;
+        let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
         run(&mut writer, |write| confirm_fact(write, latency))?;
         assert_eq!(changed(writer.kron(), "Ledgerly")?, Vec::new(), "confirming changes nothing");
 
@@ -625,7 +531,7 @@ mod tests {
     #[test]
     fn showing_a_hidden_fact_a_resume_needed_outdates_it() -> Result<(), Error> {
         let mut writer = with_sample()?;
-        let property_tests = fact_with_text(writer.kron(), "Introduced property-based tests")?;
+        let property_tests = sample::fact(writer.kron(), "Introduced property-based tests")?;
         run(&mut writer, |write| {
             set_hidden(write, property_tests, false)
         })?;
@@ -666,7 +572,7 @@ mod tests {
     #[test]
     fn an_event_can_change_kind_be_deleted_and_come_back() -> Result<(), Error> {
         let mut writer = with_sample()?;
-        let job = job_at(writer.kron(), "Ledgerly")?;
+        let job = sample::job(writer.kron(), "Ledgerly")?;
         let mut event = JobEvent::new(
             Utc::now(),
             JobEventKind::Interview {
@@ -704,7 +610,7 @@ mod tests {
     #[test]
     fn a_template_switch_lays_out_the_current_resume() -> Result<(), Error> {
         let mut writer = with_sample()?;
-        let job = job_at(writer.kron(), "Ledgerly")?;
+        let job = sample::job(writer.kron(), "Ledgerly")?;
         run(&mut writer, |write| set_template(write, job, "sidebar"))?;
         let version: Option<Uuid> = writer.kron().query_row(
             "SELECT template_version_id FROM current_generations

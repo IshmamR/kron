@@ -240,82 +240,123 @@ fn first(lines: Vec<Line>) -> Option<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{FactId, Library, commands, sample};
-    use crate::typeset::{self, resume_markup};
+    use crate::model::{FactId, commands, sample};
 
-    /// Every résumé reads back with the markup and citations it was written
-    /// with, so it typesets the same.
-    fn assert_resumes_match(connection: &Connection, library: &Library) -> Result<(), Error> {
-        let mut checked = 0;
-        for resume in library.jobs.iter().flat_map(|job| &job.resumes) {
-            let sections = Section::read_all(connection, resume.id)?;
-            let template = typeset::template(&resume.template);
-            assert_eq!(
-                resume_markup(template, &sections),
-                resume_markup(template, &resume.sections)
-            );
-            let cites = |sections: &[Section]| -> Vec<(LineId, Vec<FactId>)> {
-                sections
-                    .iter()
-                    .flat_map(|section| &section.blocks)
-                    .flat_map(Block::lines)
-                    .map(|line| (line.id, line.cites.clone()))
-                    .collect()
-            };
-            assert_eq!(cites(&sections), cites(&resume.sections));
-            checked += 1;
+    fn resumes(connection: &Connection) -> Result<Vec<ResumeId>, Error> {
+        Ok(connection
+            .prepare("SELECT id FROM generations WHERE kind = 'resume' ORDER BY id")?
+            .query_map([], |row| Ok(ResumeId(row.get(0)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    fn lines(sections: &[Section]) -> Vec<&Line> {
+        sections
+            .iter()
+            .flat_map(|section| &section.blocks)
+            .flat_map(Block::lines)
+            .collect()
+    }
+
+    /// The facts the line's row cites, in their order.
+    fn cited(connection: &Connection, line: LineId) -> Result<Vec<FactId>, Error> {
+        Ok(connection
+            .prepare("SELECT fact_id FROM line_citations WHERE line_id = ?1 ORDER BY sort_key")?
+            .query_map([line.0], |row| Ok(FactId(row.get(0)?)))?
+            .collect::<Result<_, _>>()?)
+    }
+
+    #[test]
+    fn every_sample_resume_reads_back_every_line_with_its_citations() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let resumes = resumes(connection)?;
+        assert_eq!(resumes.len(), 9);
+        for resume in resumes {
+            let sections = Section::read_all(connection, resume)?;
+            let rows: i64 = connection.query_row(
+                "SELECT count(*) FROM lines
+                 JOIN blocks ON blocks.id = lines.block_id
+                 JOIN sections ON sections.id = blocks.section_id
+                 WHERE sections.generation_id = ?1",
+                [resume.0],
+                |row| row.get(0),
+            )?;
+            let lines = lines(&sections);
+            assert_eq!(lines.len() as i64, rows, "no line is lost to its block");
+            for line in lines {
+                assert!(!line.cites.is_empty(), "{:?} cites nothing", line.text);
+                assert_eq!(line.cites, cited(connection, line.id)?, "{:?}", line.text);
+            }
         }
-        assert!(checked > 0);
         Ok(())
     }
 
     #[test]
-    fn every_sample_resume_reads_back_as_it_was_written() -> Result<(), Error> {
-        let (writer, library) = sample::written()?;
-        assert_resumes_match(writer.kron(), &library)
+    fn a_sample_resume_reads_back_its_sections_in_order() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let job = sample::job(connection, "Atlas Freight")?;
+        let resume = ResumeId(connection.query_row(
+            "SELECT id FROM generations WHERE job_id = ?1 AND kind = 'resume'",
+            [job.0],
+            |row| row.get(0),
+        )?);
+        let sections: Vec<(SectionKind, String, usize)> = Section::read_all(connection, resume)?
+            .into_iter()
+            .map(|section| (section.kind, section.title, section.blocks.len()))
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                (SectionKind::Header, String::new(), 1),
+                (SectionKind::Summary, "Summary".into(), 1),
+                (SectionKind::Experience, "Experience".into(), 4),
+                (SectionKind::Projects, "Projects".into(), 2),
+                (SectionKind::Other, "Talks".into(), 2),
+                (SectionKind::Education, "Education".into(), 1),
+                (SectionKind::Skills, "Skills".into(), 3),
+            ]
+        );
+        Ok(())
     }
 
     #[test]
     fn citations_follow_merges_to_the_kept_fact() -> Result<(), Error> {
-        let (mut writer, mut library) = sample::written()?;
-        let fact = |start: &str| -> Result<FactId, Error> {
-            library
-                .facts
-                .iter()
-                .find(|fact| fact.text.starts_with(start))
-                .map(|fact| fact.id)
-                .ok_or_else(|| Error::Misuse(format!("no sample fact starts with {start:?}")))
-        };
-        let migration = fact("Led the migration")?;
-        let linkedin = fact("Migrated 12 backend")?;
-        let latency = fact("Cut p99 latency")?;
+        let mut writer = sample::written()?;
+        let migration = sample::fact(writer.kron(), "Led the migration")?;
+        let linkedin = sample::fact(writer.kron(), "Migrated 12 backend")?;
+        let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
+        let citing_merged: Vec<LineId> = writer
+            .kron()
+            .prepare("SELECT line_id FROM line_citations WHERE fact_id IN (?1, ?2)")?
+            .query_map([migration.0, linkedin.0], |row| Ok(LineId(row.get(0)?)))?
+            .collect::<Result<_, _>>()?;
+        assert!(!citing_merged.is_empty());
+
         writer.execute(|write| commands::merge_facts(write, linkedin, &[migration]))?;
         writer.execute(|write| commands::merge_facts(write, latency, &[linkedin]))?;
-
-        let mut merged = 0;
-        for line in library
-            .jobs
-            .iter_mut()
-            .flat_map(|job| &mut job.resumes)
-            .flat_map(|resume| resume.lines_mut())
-        {
-            let mut cites: Vec<FactId> = Vec::with_capacity(line.cites.len());
-            for &cited in &line.cites {
-                let kept = if cited == migration || cited == linkedin { latency } else { cited };
-                merged += usize::from(kept != cited);
-                if !cites.contains(&kept) {
-                    cites.push(kept);
+        for resume in resumes(writer.kron())? {
+            for line in lines(&Section::read_all(writer.kron(), resume)?) {
+                assert!(
+                    !line.cites.contains(&migration) && !line.cites.contains(&linkedin),
+                    "{:?} still cites a merged fact",
+                    line.text
+                );
+                let mut unique = line.cites.clone();
+                unique.sort();
+                unique.dedup();
+                assert_eq!(unique.len(), line.cites.len(), "{:?} cites a fact twice", line.text);
+                if citing_merged.contains(&line.id) {
+                    assert!(line.cites.contains(&latency), "{:?}", line.text);
                 }
             }
-            line.cites = cites;
         }
-        assert!(merged > 0);
-        assert_resumes_match(writer.kron(), &library)
+        Ok(())
     }
 
     #[test]
     fn a_missing_resume_has_no_sections() -> Result<(), Error> {
-        let (writer, _) = sample::written()?;
+        let writer = sample::written()?;
         let sections = Section::read_all(writer.kron(), ResumeId::new())?;
         assert!(sections.is_empty());
         Ok(())

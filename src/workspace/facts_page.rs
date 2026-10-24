@@ -1313,106 +1313,167 @@ mod tests {
     use super::*;
     use crate::database::schema::facts;
     use crate::database::{TemporaryDirectory, Write, Writer};
-    use crate::model::{Library, sample};
+    use crate::model::{EntryId, FactKind, ResumeId, Review, ReviewReason, sample};
     use crate::workspace::testing::{self, write_sample};
 
-    /// The queries read back the facts the sample wrote, and each one's
-    /// sources and uses.
-    fn assert_queries_match(connection: &Connection, library: &Library) -> Result<(), Error> {
+    /// What the page shows of a sample fact: its entry, where it was found,
+    /// and the lines that use it, with how many are outdated.
+    fn shown(
+        connection: &Connection,
+        list: &FactList,
+        start: &str,
+    ) -> Result<(Option<String>, Vec<String>, usize, usize), Error> {
+        let fact = sample::fact(connection, start)?;
+        let entry = list
+            .fact(fact)
+            .and_then(|listed| listed.entry)
+            .and_then(|entry| list.entry_label(entry));
+        let detail = Detail::read(connection, fact, list.all())?;
+        let sources = detail.sources.iter().map(|source| source.label.clone()).collect();
+        let outdated = detail.uses.iter().filter(|used| used.outdated).count();
+        Ok((entry, sources, detail.uses.len(), outdated))
+    }
+
+    #[test]
+    fn the_list_reads_every_live_fact_as_stored() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
         let mut list = FactList::new();
         list.load(connection)?;
-        let listed: Vec<FactId> = list.all().iter().map(|fact| fact.id).collect();
-        let loaded: Vec<FactId> = library.facts.iter().map(|fact| fact.id).collect();
-        assert_eq!(listed, loaded);
-        for (fact, expected) in list.all().iter().zip(&library.facts) {
-            assert_eq!(fact.text, expected.text);
-            assert_eq!(fact.kind, expected.kind);
-            assert_eq!(fact.hidden, expected.hidden);
-            assert_eq!(fact.review, expected.review);
-            assert_eq!(fact.entry, expected.entry);
-            if let Some(entry) = fact.entry {
-                assert_eq!(list.entry_label(entry), library.entry_label(entry));
-            }
-
-            let detail = Detail::read(connection, fact.id, list.all())?;
-            assert_eq!(detail.extracted, expected.extracted);
-            let labels: Vec<String> = detail
-                .sources
-                .iter()
-                .map(|source| source.label.clone())
-                .collect();
-            let expected_labels: Vec<String> = expected
-                .sources
-                .iter()
-                .map(|source| Source::from_library(library, source).label)
-                .collect();
-            assert_eq!(labels, expected_labels, "{}", fact.text);
-
-            // As sets: the library reads a block's lines by role, the
-            // query by their order on the page.
-            let uses: BTreeSet<(LineId, bool)> = detail
-                .uses
-                .iter()
-                .map(|used| (used.line, used.outdated))
-                .collect();
-            let expected_uses: BTreeSet<(LineId, bool)> = library
-                .fact_uses(fact.id)
-                .into_iter()
-                .map(|(job, line)| {
-                    let outdated = job
-                        .current_resume()
-                        .is_some_and(|resume| library.fact_change(resume, fact.id).is_some());
-                    (line.id, outdated)
-                })
-                .collect();
-            assert_eq!(uses, expected_uses, "{}", fact.text);
-        }
+        type Row = (FactId, FactKind, String, Option<EntryId>, bool, Option<Review>);
+        let mut stored: Vec<Row> = connection
+            .prepare(
+                "SELECT id, kind, text, entry_id, hidden, review, review_note FROM facts
+                 WHERE deleted_at IS NULL AND merged_into IS NULL",
+            )?
+            .query_map([], |row| {
+                let reason: Option<ReviewReason> = row.get(5)?;
+                Ok((
+                    FactId(row.get(0)?),
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, Option<uuid::Uuid>>(3)?.map(EntryId),
+                    row.get(4)?,
+                    reason.map(|reason| Review {
+                        reason,
+                        note: row.get(6).ok().flatten(),
+                    }),
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut listed: Vec<Row> = list
+            .all()
+            .iter()
+            .map(|fact| {
+                (fact.id, fact.kind, fact.text.clone(), fact.entry, fact.hidden, fact.review.clone())
+            })
+            .collect();
+        stored.sort_by_key(|row| row.0);
+        listed.sort_by_key(|row| row.0);
+        assert_eq!(listed.len(), 83);
+        assert_eq!(listed, stored);
         Ok(())
     }
 
     #[test]
-    fn the_queries_read_back_what_the_sample_wrote() -> Result<(), Error> {
-        let (writer, library) = sample::written()?;
-        assert_queries_match(writer.kron(), &library)
+    fn a_fact_shows_its_entry_sources_and_uses() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let mut list = FactList::new();
+        list.load(connection)?;
+        let northwind = Some("Senior Software Engineer, Northwind Logistics".to_string());
+        let cv = || "From alex_rahman_cv.pdf".to_string();
+        // Found in both documents, as if duplicates had been merged.
+        assert_eq!(
+            shown(connection, &list, "Tracing async Rust")?,
+            (None, vec![cv(), "From linkedin_profile.pdf".into()], 1, 0)
+        );
+        assert_eq!(shown(connection, &list, "Cut p99 latency")?, (northwind.clone(), vec![cv()], 5, 0));
+        assert_eq!(shown(connection, &list, "Led the migration")?, (northwind.clone(), vec![cv()], 6, 0));
+        // The likely duplicate, which no résumé uses.
+        assert_eq!(
+            shown(connection, &list, "Migrated 12 backend")?,
+            (northwind, vec!["From linkedin_profile.pdf".into()], 0, 0)
+        );
+        // Written in a note, which is dated rather than named.
+        let (entry, sources, uses, _) = shown(connection, &list, "Gave a guest lecture")?;
+        assert_eq!((entry, uses), (None, 0));
+        assert!(
+            matches!(sources.as_slice(), [only] if only.starts_with("From your note, ")),
+            "{sources:?}"
+        );
+        Ok(())
+    }
+
+    /// The facts page and each résumé agree on which facts changed since
+    /// the résumé was generated from them.
+    #[test]
+    fn a_fact_changed_since_a_resume_shows_its_use_there_as_outdated() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let mut list = FactList::new();
+        list.load(connection)?;
+        let current: Vec<(ResumeId, JobId)> = connection
+            .prepare("SELECT generation_id, job_id FROM current_generations WHERE kind = 'resume'")?
+            .query_map([], |row| Ok((ResumeId(row.get(0)?), JobId(row.get(1)?))))?
+            .collect::<Result<_, _>>()?;
+        let mut checked = 0;
+        for (resume, job) in current {
+            for (fact, _) in crate::model::fact_changes(connection, resume)? {
+                let detail = Detail::read(connection, fact, list.all())?;
+                for used in detail.uses.iter().filter(|used| used.job == job) {
+                    assert!(used.outdated, "{:?}", used.text);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
+        Ok(())
     }
 
     #[test]
     fn the_queries_follow_a_chain_of_merges() -> Result<(), Error> {
-        let (mut writer, library) = sample::written()?;
-        let text = |start: &str| {
-            library
-                .facts
-                .iter()
-                .find(|fact| fact.text.starts_with(start))
-                .map(|fact| fact.id)
+        let mut writer = sample::written()?;
+        let migration = sample::fact(writer.kron(), "Led the migration")?;
+        let linkedin = sample::fact(writer.kron(), "Migrated 12 backend")?;
+        let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
+        let used_by = |connection: &Connection, facts: [FactId; 3]| -> Result<BTreeSet<LineId>, Error> {
+            let mut lines = BTreeSet::new();
+            for fact in facts {
+                let mut statement = connection.prepare(
+                    "SELECT line_citations.line_id FROM line_citations
+                     JOIN lines ON lines.id = line_citations.line_id
+                     JOIN blocks ON blocks.id = lines.block_id
+                     JOIN sections ON sections.id = blocks.section_id
+                     JOIN current_generations
+                       ON current_generations.generation_id = sections.generation_id
+                     WHERE line_citations.fact_id = ?1",
+                )?;
+                for line in statement.query_map([fact.0], |row| Ok(LineId(row.get(0)?)))? {
+                    lines.insert(line?);
+                }
+            }
+            Ok(lines)
         };
-        let (Some(migration), Some(linkedin), Some(latency)) = (
-            text("Led the migration"),
-            text("Migrated 12 backend"),
-            text("Cut p99 latency"),
-        ) else {
-            panic!("the sample changed");
-        };
+        let expected = used_by(writer.kron(), [migration, linkedin, latency])?;
+        let mut list = FactList::new();
+        list.load(writer.kron())?;
+        let before = list.all().len();
+
         // A chain: the LinkedIn bullet into the migration, which then goes
         // into the latency fact.
         writer.execute(|write| commands::merge_facts(write, migration, &[linkedin]))?;
         writer.execute(|write| commands::merge_facts(write, latency, &[migration]))?;
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
 
-        let mut list = FactList::new();
         list.load(writer.kron())?;
-        assert_eq!(list.all().len(), library.facts.len() - 2);
+        assert_eq!(list.all().len(), before - 2);
         assert!(list.fact(migration).is_none() && list.fact(linkedin).is_none());
         let detail = Detail::read(writer.kron(), latency, list.all())?;
         assert_eq!(detail.sources.len(), 3, "its own and both merged into it");
         // Every line that cited any of the three cites it now, and was
         // generated before its new wording.
         let uses: BTreeSet<LineId> = detail.uses.iter().map(|used| used.line).collect();
-        let expected: BTreeSet<LineId> = [migration, linkedin, latency]
-            .into_iter()
-            .flat_map(|fact| library.fact_uses(fact))
-            .map(|(_, line)| line.id)
-            .collect();
         assert_eq!(uses, expected);
         assert!(detail.uses.iter().all(|used| used.outdated));
         Ok(())

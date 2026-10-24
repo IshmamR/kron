@@ -684,17 +684,61 @@ impl World for SingleFileWorld<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Job, Library, ResumeId, Section, TailoredResume};
+    use crate::model::{ResumeId, sample};
 
-    fn sample_library() -> Library {
-        match crate::model::sample::library() {
-            Ok(library) => library,
+    /// A résumé to lay out: its template and what it says.
+    #[derive(Clone)]
+    struct Resume {
+        template: &'static str,
+        sections: Vec<Section>,
+    }
+
+    impl Resume {
+        fn lines(&self) -> impl Iterator<Item = &Line> {
+            self.sections
+                .iter()
+                .flat_map(|section| &section.blocks)
+                .flat_map(Block::lines)
+        }
+
+        fn line(&self, id: LineId) -> Option<&Line> {
+            self.lines().find(|line| line.id == id)
+        }
+    }
+
+    /// Each sample job's current résumé, with its template.
+    fn sample_resumes() -> Vec<Resume> {
+        let read = || -> Result<Vec<Resume>, crate::database::Error> {
+            let writer = sample::written()?;
+            let connection = writer.kron();
+            let generations: Vec<(ResumeId, Option<uuid::Uuid>)> = connection
+                .prepare(
+                    "SELECT generations.id, generations.template_version_id
+                     FROM current_generations
+                     JOIN generations ON generations.id = current_generations.generation_id
+                     WHERE current_generations.kind = 'resume'
+                     ORDER BY generations.id",
+                )?
+                .query_map([], |row| Ok((ResumeId(row.get(0)?), row.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            generations
+                .into_iter()
+                .map(|(id, version)| {
+                    Ok(Resume {
+                        template: template_of_version(version).key,
+                        sections: Section::read_all(connection, id)?,
+                    })
+                })
+                .collect()
+        };
+        match read() {
+            Ok(resumes) => resumes,
             Err(error) => panic!("{error}"),
         }
     }
 
-    fn typeset(typesetter: &Typesetter, resume: &TailoredResume) -> TypesetResume {
-        let markup = resume_markup(template(&resume.template), &resume.sections);
+    fn typeset(typesetter: &Typesetter, resume: &Resume) -> TypesetResume {
+        let markup = resume_markup(template(resume.template), &resume.sections);
         match typesetter.render(&markup, 0.25) {
             Ok(typeset) => typeset,
             Err(error) => panic!("didn't compile in {:?}: {error}", resume.template),
@@ -702,16 +746,13 @@ mod tests {
     }
 
     /// Every sample résumé, laid out with every template.
-    fn every_sample_in_every_template() -> Vec<(TailoredResume, TypesetResume)> {
+    fn every_sample_in_every_template() -> Vec<(Resume, TypesetResume)> {
         let typesetter = Typesetter::new();
-        let library = sample_library();
-        library
-            .jobs
-            .iter()
-            .filter_map(Job::current_resume)
+        sample_resumes()
+            .into_iter()
             .flat_map(|resume| {
-                TEMPLATES.iter().map(|template| TailoredResume {
-                    template: template.key.to_string(),
+                TEMPLATES.iter().map(move |template| Resume {
+                    template: template.key,
                     ..resume.clone()
                 })
             })
@@ -885,17 +926,13 @@ mod tests {
             text,
             cites: Vec::new(),
         };
-        let resume = TailoredResume {
-            id: ResumeId::new(),
-            generated_at: chrono::Utc::now(),
-            template: DEFAULT_TEMPLATE.to_string(),
+        let resume = Resume {
+            template: DEFAULT_TEMPLATE,
             sections: vec![Section {
                 kind: SectionKind::Summary,
                 title: String::new(),
                 blocks: vec![Block::Text(line.clone())],
             }],
-            unsupported_claims: Vec::new(),
-            basis: Vec::new(),
         };
         let typeset = typeset(&Typesetter::new(), &resume);
         let pages: Vec<usize> = typeset
@@ -911,16 +948,13 @@ mod tests {
 
     #[test]
     fn the_long_sample_runs_onto_a_second_page() {
-        let library = sample_library();
-        let Some(long) = library
-            .jobs
-            .iter()
-            .filter_map(Job::current_resume)
+        let Some(long) = sample_resumes()
+            .into_iter()
             .max_by_key(|resume| resume.lines().count())
         else {
             panic!("no sample résumés");
         };
-        assert!(typeset(&Typesetter::new(), long).layout.pages.len() >= 2);
+        assert!(typeset(&Typesetter::new(), &long).layout.pages.len() >= 2);
     }
 
     #[test]
