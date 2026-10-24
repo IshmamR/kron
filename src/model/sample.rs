@@ -1,16 +1,28 @@
 // Loads the sample library in `assets/sample/` for building the UI before
 // import and generation exist. The data file's header explains its format.
+// Development only: release builds start empty.
 
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, DurationRound, Local, TimeZone, Utc};
 use serde::Deserialize;
+use uuid::{NoContext, Timestamp, Uuid};
+
+use crate::database::schema::{
+    Blocks, CustomSections, DocumentTexts, Documents, Entries, Events, FactOverrides, FactSources,
+    FactVersions, Facts, Generations, JobDescriptions, Jobs, LineCitations, Lines, Sections,
+    UnsupportedClaims, blocks, custom_sections, document_texts, documents, entries, events,
+    fact_overrides, fact_sources, fact_versions, facts, generations, job_descriptions, jobs,
+    line_citations, lines, sections, unsupported_claims,
+};
+use crate::database::{self, Write};
+use crate::typeset;
 
 use crate::model::{
-    Block, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind, Extraction, Fact,
-    FactId, FactKind, FactSource, FactStatus, FactVersion, InterviewKind, Job, JobEvent,
-    JobEventKind, JobId, Library, Line, LineId, ResumeId, Section, SectionKind, SourceDocument,
-    TailoredResume, UnsupportedClaim, UnsupportedReason,
+    Block, CoverLetter, DocumentId, DocumentKind, Entry, EntryBlock, EntryId, EntryKind,
+    Extraction, Fact, FactId, FactKind, FactSource, FactStatus, FactVersion, Inclusion,
+    InterviewKind, Job, JobEvent, JobEventKind, JobId, Library, Line, LineId, ResumeId, Section,
+    SectionKind, SourceDocument, TailoredResume, UnsupportedClaim, UnsupportedReason,
 };
 
 const LIBRARY: &str = include_str!("../../assets/sample/library.ron");
@@ -20,6 +32,13 @@ const TEXT_FILES: [(&str, &str); 2] = [
     ("linkedin.txt", include_str!("../../assets/sample/linkedin.txt")),
 ];
 const DEFAULT_DOCUMENT: &str = "cv";
+/// What the sample's imported documents are saved as: their text, since the
+/// sample has no PDFs.
+const DOCUMENT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
+/// The paper the bundled templates set.
+const PAPER: &str = "letter";
+/// The custom section the sample's `Other` entries go in.
+const CUSTOM_SECTION: &str = "Other";
 
 pub fn library() -> Result<Library, String> {
     let data: SampleData =
@@ -44,6 +63,72 @@ pub fn library() -> Result<Library, String> {
         loader.library.jobs.push(job);
     }
     Ok(loader.library)
+}
+
+/// Writes the sample library unless the database has documents or jobs
+/// already, so a first run has something on every screen.
+pub fn write_if_empty(write: &mut Write) -> Result<(), database::Error> {
+    let has_data: bool = write
+        .prepare("SELECT EXISTS (SELECT 1 FROM documents) OR EXISTS (SELECT 1 FROM jobs)")?
+        .query_row([], |row| row.get(0))?;
+    if has_data {
+        Ok(())
+    } else {
+        write_library(write)
+    }
+}
+
+/// Writes the sample library into the database. Its templates must be
+/// installed (`typeset::install_templates`).
+pub fn write_library(write: &mut Write) -> Result<(), database::Error> {
+    let library = library().map_err(database::Error::Misuse)?;
+    for document in &library.documents {
+        write_document(write, document)?;
+    }
+    let mut custom_section = None;
+    for entry in &library.entries {
+        let kind = match entry.kind {
+            EntryKind::Experience => "experience",
+            EntryKind::Education => "education",
+            EntryKind::Project => "project",
+            EntryKind::Certification => "certification",
+            EntryKind::Skills => "skills",
+            EntryKind::Other => "custom",
+        };
+        let section = match (entry.kind, custom_section) {
+            (EntryKind::Other, None) => {
+                let id = Uuid::now_v7();
+                let now = write.now();
+                write.insert(
+                    CustomSections,
+                    id,
+                    &[
+                        custom_sections::NAME.value(&CUSTOM_SECTION),
+                        custom_sections::ADDED_AT.value(&now),
+                    ],
+                )?;
+                custom_section = Some(id);
+                custom_section
+            }
+            (EntryKind::Other, section) => section,
+            _ => None,
+        };
+        write.insert(
+            Entries,
+            entry.id.0,
+            &[
+                entries::KIND.value(&kind),
+                entries::CUSTOM_SECTION_ID.value(&section),
+            ],
+        )?;
+    }
+    for fact in &library.facts {
+        write_fact(write, fact)?;
+    }
+    for (position, job) in library.jobs.iter().enumerate() {
+        write_job(write, job, position)?;
+    }
+    Ok(())
 }
 
 struct Loader {
@@ -701,12 +786,464 @@ fn default_template() -> String {
     crate::typeset::DEFAULT_TEMPLATE.to_string()
 }
 
+fn write_document(write: &mut Write, document: &SourceDocument) -> Result<(), database::Error> {
+    let (file_name, file_hash) = match &document.kind {
+        DocumentKind::File { file_name } => (
+            Some(file_name.as_str()),
+            Some(write.add_file(document.text.as_bytes(), DOCUMENT_MEDIA_TYPE)?),
+        ),
+        DocumentKind::Note => (None, None),
+    };
+    write.insert(
+        Documents,
+        document.id.0,
+        &[
+            documents::FILE_NAME.value(&file_name),
+            documents::FILE_HASH.value(&file_hash),
+            documents::ADDED_AT.value(&document.added_at.timestamp_millis()),
+        ],
+    )?;
+    write.insert(
+        DocumentTexts,
+        document.id.0,
+        &[document_texts::TEXT.value(&document.text)],
+    )
+}
+
+fn write_fact(write: &mut Write, fact: &Fact) -> Result<(), database::Error> {
+    let kind = match fact.kind {
+        FactKind::Name => "name",
+        FactKind::Bullet => "bullet",
+        FactKind::Title => "title",
+        FactKind::Organization => "organization",
+        FactKind::Date => "date",
+        FactKind::Skill => "skill",
+        FactKind::Contact => "contact",
+        FactKind::Summary => "summary",
+        FactKind::Location => "location",
+        FactKind::SkillGroup => "skill_group",
+    };
+    // Every flag in the sample is text the extraction had to clean up.
+    let (review, review_note) = match &fact.extraction {
+        Extraction::Clean => (None, None),
+        Extraction::Flagged { reason } => (Some("cleaned"), Some(reason.as_str())),
+    };
+    write.insert(
+        Facts,
+        fact.id.0,
+        &[
+            facts::KIND.value(&kind),
+            facts::TEXT.value(&fact.text),
+            facts::EXTRACTED.value(&fact.extracted),
+            facts::ENTRY_ID.value(&fact.entry.map(|entry| entry.0)),
+            facts::HIDDEN.value(&(fact.status == FactStatus::Hidden)),
+            facts::REVIEW.value(&review),
+            facts::REVIEW_NOTE.value(&review_note),
+        ],
+    )?;
+    for source in &fact.sources {
+        write.insert(
+            FactSources,
+            Uuid::now_v7(),
+            &[
+                fact_sources::FACT_ID.value(&fact.id.0),
+                fact_sources::DOCUMENT_ID.value(&source.document.0),
+                fact_sources::SPAN_START.value(&(source.span.start as i64)),
+                fact_sources::SPAN_END.value(&(source.span.end as i64)),
+                fact_sources::ORIGINAL_TEXT.value(&source.original_text),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_job(write: &mut Write, job: &Job, position: usize) -> Result<(), database::Error> {
+    let created_at = job.created_at.timestamp_millis();
+    write.insert(
+        Jobs,
+        job.id.0,
+        &[
+            jobs::TITLE.value(&job.title),
+            jobs::COMPANY.value(&job.company),
+            jobs::URL.value(&job.url),
+            jobs::CREATED_AT.value(&created_at),
+            jobs::BOARD_SORT_KEY.value(&sort_key(position)?),
+        ],
+    )?;
+    write.insert(
+        JobDescriptions,
+        job.id.0,
+        &[job_descriptions::TEXT.value(&job.description)],
+    )?;
+    for override_ in &job.overrides {
+        let inclusion = override_.inclusion.map(|inclusion| match inclusion {
+            Inclusion::Include => "include",
+            Inclusion::Exclude => "exclude",
+        });
+        write.insert(
+            FactOverrides,
+            (job.id.0, override_.fact.0),
+            &[
+                fact_overrides::INCLUSION.value(&inclusion),
+                fact_overrides::TEXT.value(&override_.text),
+            ],
+        )?;
+    }
+    for resume in &job.resumes {
+        write_resume(write, job.id, resume)?;
+    }
+    if let Some(letter) = &job.cover_letter {
+        write_cover_letter(write, job.id, letter)?;
+    }
+
+    // Adding a job logs `wishlisted`; the model leaves it out. Its id is from
+    // when the job was added, so it sorts before anything logged later.
+    let added = Timestamp::from_unix(
+        NoContext,
+        job.created_at.timestamp().max(0) as u64,
+        job.created_at.timestamp_subsec_nanos(),
+    );
+    write.insert(
+        Events,
+        Uuid::new_v7(added),
+        &[
+            events::JOB_ID.value(&job.id.0),
+            events::AT.value(&created_at),
+            events::KIND.value(&"wishlisted"),
+        ],
+    )?;
+    for event in &job.events {
+        let (kind, resume, interview) = match &event.kind {
+            JobEventKind::Applied { resume } => ("applied", *resume, None),
+            JobEventKind::RecruiterReplied => ("recruiter_replied", None, None),
+            JobEventKind::Interview { kind, with } => ("interview", None, Some((*kind, with))),
+            JobEventKind::Offer => ("offer", None, None),
+            JobEventKind::Rejected => ("rejected", None, None),
+            JobEventKind::Withdrawn => ("withdrawn", None, None),
+            JobEventKind::NoResponse => ("no_response", None, None),
+            JobEventKind::Note => ("note", None, None),
+        };
+        let interview_kind = interview.map(|(kind, _)| match kind {
+            InterviewKind::Phone => "phone",
+            InterviewKind::Technical => "technical",
+            InterviewKind::Onsite => "onsite",
+            InterviewKind::Other => "other",
+        });
+        write.insert(
+            Events,
+            event.id.0,
+            &[
+                events::JOB_ID.value(&job.id.0),
+                events::AT.value(&event.at.timestamp_millis()),
+                events::KIND.value(&kind),
+                events::RESUME_ID.value(&resume.map(|resume| resume.0)),
+                events::INTERVIEW_KIND.value(&interview_kind),
+                events::INTERVIEW_WITH.value(&interview.map(|(_, with)| with.as_str())),
+                events::NOTE.value(&event.note),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn write_resume(
+    write: &mut Write,
+    job: JobId,
+    resume: &TailoredResume,
+) -> Result<(), database::Error> {
+    let template = typeset::template(&resume.template);
+    write.insert(
+        Generations,
+        resume.id.0,
+        &[
+            generations::JOB_ID.value(&job.0),
+            generations::KIND.value(&"resume"),
+            generations::GENERATED_AT.value(&resume.generated_at.timestamp_millis()),
+            generations::TEMPLATE_VERSION_ID.value(&Some(template.version_id)),
+            generations::PAPER.value(&Some(PAPER)),
+        ],
+    )?;
+    for (position, section) in resume.sections.iter().enumerate() {
+        let kind = match section.kind {
+            SectionKind::Header => "header",
+            SectionKind::Summary => "summary",
+            SectionKind::Experience => "experience",
+            SectionKind::Education => "education",
+            SectionKind::Projects => "projects",
+            SectionKind::Skills => "skills",
+            SectionKind::Other => "custom",
+        };
+        let section_id = write_section(write, resume.id.0, position, kind, &section.title)?;
+        for (position, block) in section.blocks.iter().enumerate() {
+            let (kind, lines): (_, Vec<(&str, &Line)>) = match block {
+                Block::Header { name, contacts } => (
+                    "header",
+                    std::iter::once(("name", name))
+                        .chain(contacts.iter().map(|line| ("contact", line)))
+                        .collect(),
+                ),
+                Block::Entry(entry) => (
+                    "entry",
+                    [
+                        Some(("title", &entry.title)),
+                        entry
+                            .organization
+                            .as_ref()
+                            .map(|line| ("organization", line)),
+                        entry.dates.as_ref().map(|line| ("dates", line)),
+                        entry.location.as_ref().map(|line| ("location", line)),
+                        entry.stack.as_ref().map(|line| ("stack", line)),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .chain(entry.bullets.iter().map(|line| ("bullet", line)))
+                    .collect(),
+                ),
+                Block::Skills { label, items } => (
+                    "skills",
+                    label
+                        .iter()
+                        .map(|line| ("label", line))
+                        .chain([("items", items)])
+                        .collect(),
+                ),
+                Block::Text(line) => ("text", vec![("text", line)]),
+                Block::Item(line) => ("item", vec![("item", line)]),
+            };
+            write_block(write, section_id, position, kind, &lines)?;
+        }
+    }
+    for version in &resume.basis {
+        write.insert(
+            FactVersions,
+            (resume.id.0, version.fact.0),
+            &[
+                fact_versions::TEXT.value(&version.text),
+                fact_versions::HIDDEN.value(&version.hidden),
+            ],
+        )?;
+    }
+    write_claims(write, resume.id.0, &resume.unsupported_claims)
+}
+
+/// Plain text, without a template: a body of paragraphs.
+fn write_cover_letter(
+    write: &mut Write,
+    job: JobId,
+    letter: &CoverLetter,
+) -> Result<(), database::Error> {
+    let id = Uuid::now_v7();
+    write.insert(
+        Generations,
+        id,
+        &[
+            generations::JOB_ID.value(&job.0),
+            generations::KIND.value(&"cover_letter"),
+            generations::GENERATED_AT.value(&letter.generated_at.timestamp_millis()),
+        ],
+    )?;
+    let body = write_section(write, id, 0, "body", "")?;
+    for (position, paragraph) in letter.paragraphs.iter().enumerate() {
+        let lines: Vec<_> = paragraph.iter().map(|line| ("sentence", line)).collect();
+        write_block(write, body, position, "paragraph", &lines)?;
+    }
+    write_claims(write, id, &letter.unsupported_claims)
+}
+
+fn write_section(
+    write: &mut Write,
+    generation: Uuid,
+    position: usize,
+    kind: &str,
+    title: &str,
+) -> Result<Uuid, database::Error> {
+    let id = Uuid::now_v7();
+    write.insert(
+        Sections,
+        id,
+        &[
+            sections::GENERATION_ID.value(&generation),
+            sections::SORT_KEY.value(&sort_key(position)?),
+            sections::KIND.value(&kind),
+            sections::TITLE.value(&title),
+        ],
+    )?;
+    Ok(id)
+}
+
+/// The block and its lines, each with its role.
+fn write_block(
+    write: &mut Write,
+    section: Uuid,
+    position: usize,
+    kind: &str,
+    lines: &[(&str, &Line)],
+) -> Result<(), database::Error> {
+    let block = Uuid::now_v7();
+    write.insert(
+        Blocks,
+        block,
+        &[
+            blocks::SECTION_ID.value(&section),
+            blocks::SORT_KEY.value(&sort_key(position)?),
+            blocks::KIND.value(&kind),
+        ],
+    )?;
+    for (position, (role, line)) in lines.iter().enumerate() {
+        write.insert(
+            Lines,
+            line.id.0,
+            &[
+                lines::BLOCK_ID.value(&block),
+                lines::ROLE.value(role),
+                lines::SORT_KEY.value(&sort_key(position)?),
+                lines::GENERATED.value(&line.generated),
+                lines::TEXT.value(&line.text),
+            ],
+        )?;
+        let mut cited = Vec::new();
+        for fact in &line.cites {
+            // A fact is cited once per line: it's the key.
+            if cited.contains(fact) {
+                continue;
+            }
+            write.insert(
+                LineCitations,
+                (line.id.0, fact.0),
+                &[line_citations::SORT_KEY.value(&sort_key(cited.len())?)],
+            )?;
+            cited.push(*fact);
+        }
+    }
+    Ok(())
+}
+
+fn write_claims(
+    write: &mut Write,
+    generation: Uuid,
+    claims: &[UnsupportedClaim],
+) -> Result<(), database::Error> {
+    for (position, claim) in claims.iter().enumerate() {
+        let (reason, figure, year, hidden_fact) = match &claim.reason {
+            UnsupportedReason::InventedFigure(figure) => {
+                ("invented_figure", Some(figure.as_str()), None, None)
+            }
+            UnsupportedReason::InventedYear(year) => ("invented_year", None, Some(*year), None),
+            UnsupportedReason::NoSupportingFact => ("no_supporting_fact", None, None, None),
+            UnsupportedReason::UsesHiddenFact(fact) => {
+                ("uses_hidden_fact", None, None, Some(fact.0))
+            }
+        };
+        write.insert(
+            UnsupportedClaims,
+            Uuid::now_v7(),
+            &[
+                unsupported_claims::GENERATION_ID.value(&generation),
+                unsupported_claims::SORT_KEY.value(&sort_key(position)?),
+                unsupported_claims::TEXT.value(&claim.text),
+                unsupported_claims::REASON.value(&reason),
+                unsupported_claims::FIGURE.value(&figure),
+                unsupported_claims::YEAR.value(&year),
+                unsupported_claims::HIDDEN_FACT_ID.value(&hidden_fact),
+                unsupported_claims::ADDED_AS.value(&claim.added_as.map(|fact| fact.0)),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+/// The key for the `position`th item of a list, in the integer form of
+/// fractional indexing ("a0" … "az", then "b00" …), so an item can later go
+/// between two without renumbering the rest.
+fn sort_key(position: usize) -> Result<String, database::Error> {
+    const DIGITS: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let digit = |index: usize| DIGITS[index % 62] as char;
+    match position {
+        0..62 => Ok(format!("a{}", digit(position))),
+        62..3844 => Ok(format!("b{}{}", digit(position / 62), digit(position))),
+        _ => Err(database::Error::Misuse(format!(
+            "no sort key for position {position}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
+    use super::*;
+    use crate::database::{Error, Writer};
+
+    fn count(connection: &Connection, table: &str) -> Result<i64, Error> {
+        Ok(
+            connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?,
+        )
+    }
+
     #[test]
     fn sample_library_loads() {
         if let Err(error) = super::library() {
             panic!("{error}");
         }
+    }
+
+    #[test]
+    fn the_sample_fits_the_schema_once() -> Result<(), Error> {
+        let library = library().map_err(Error::Misuse)?;
+        let mut writer = Writer::open_in_memory()?;
+        for _ in 0..2 {
+            writer.execute(|write| {
+                typeset::install_templates(write)?;
+                write_if_empty(write)
+            })?;
+        }
+        let kron = writer.kron();
+        assert_eq!(count(kron, "documents")?, library.documents.len() as i64);
+        assert_eq!(count(kron, "facts")?, library.facts.len() as i64);
+        assert_eq!(count(kron, "jobs")?, library.jobs.len() as i64);
+        let resumes: usize = library.jobs.iter().map(|job| job.resumes.len()).sum();
+        assert_eq!(
+            count(kron, "generations WHERE kind = 'resume'")?,
+            resumes as i64
+        );
+        assert_eq!(
+            count(kron, "template_versions")?,
+            typeset::TEMPLATES.len() as i64
+        );
+        // Every job's stage comes from its events, starting with `wishlisted`.
+        assert_eq!(count(kron, "latest_steps")?, library.jobs.len() as i64);
+        let violations: i64 =
+            kron.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(violations, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn erasing_lets_the_sample_be_written_again() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        let write_sample = |write: &mut Write| {
+            typeset::install_templates(write)?;
+            write_library(write)
+        };
+        writer.execute(write_sample)?;
+        let facts = count(writer.kron(), "facts")?;
+        writer.execute(|write| {
+            write.erase_everything()?;
+            write_sample(write)
+        })?;
+        assert_eq!(count(writer.kron(), "facts")?, facts);
+        assert_eq!(count(writer.kron(), "settings")?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn sort_keys_sort_in_order() -> Result<(), Error> {
+        let keys = (0..200).map(sort_key).collect::<Result<Vec<_>, _>>()?;
+        assert!(keys.is_sorted());
+        Ok(())
     }
 }

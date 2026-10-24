@@ -1,4 +1,5 @@
 mod application;
+#[cfg(any(debug_assertions, test))]
 pub mod sample;
 
 use std::collections::HashSet;

@@ -9,21 +9,22 @@ mod resume_grid;
 mod shortcuts;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::group_box::GroupBoxVariant;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::setting::{
     SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::{IconName, Sizable, h_flex};
 use gpui_kit::{
-    Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
-    Subscription, Window, actions, div, prelude::*, px,
+    Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding,
+    Pixels, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 
 use crate::appearance::{Appearance, Motion};
+use crate::database::Database;
 use crate::model::{FactId, JobId, Library, LineId};
 use facts_page::FactsPage;
 use job_view::{JobView, JobViewEvent};
@@ -67,6 +68,9 @@ pub struct ShowFact {
 /// The sidebar and whichever page it has open.
 pub struct Workspace {
     library: Entity<Library>,
+    /// Handed to each view as it moves off `Library` (storage.md, step 4).
+    #[allow(dead_code)]
+    database: Entity<Database>,
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
@@ -100,8 +104,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, action: &ShowFact, window, cx| {
                 this.page = Page::Facts;
-                this.facts_page
-                    .update(cx, |facts_page, cx| facts_page.show_fact(action.fact, window, cx));
+                this.facts_page.update(cx, |facts_page, cx| {
+                    facts_page.show_fact(action.fact, window, cx)
+                });
                 cx.notify();
             }))
             .on_action(|_: &ShowShortcuts, window, cx| shortcuts::open(window, cx))
@@ -117,7 +122,12 @@ impl Render for Workspace {
 }
 
 impl Workspace {
-    pub fn new(library: Entity<Library>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        library: Entity<Library>,
+        database: Entity<Database>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Appearance::current(cx).apply(window, cx);
 
         let previews = cx.new(|cx| Previews::new(library.clone(), cx));
@@ -155,6 +165,7 @@ impl Workspace {
 
         Self {
             library,
+            database,
             page: Page::Resumes,
             sidebar_collapsed: false,
             focus_handle: cx.focus_handle(),
@@ -206,9 +217,7 @@ impl Workspace {
         let mut facts = SidebarMenuItem::new("Facts")
             .icon(IconName::BookOpen)
             .active(self.page == Page::Facts)
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.open_page(Page::Facts, window, cx)
-            }));
+            .on_click(cx.listener(|this, _, window, cx| this.open_page(Page::Facts, window, cx)));
         if unreviewed > 0 {
             facts = facts.suffix(move |_, _| {
                 let tooltip = SharedString::from(if unreviewed == 1 {
@@ -272,7 +281,11 @@ impl Workspace {
                 IconName::PanelLeftClose
             })
             .tooltip_with_action(
-                if collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+                if collapsed {
+                    "Expand sidebar"
+                } else {
+                    "Collapse sidebar"
+                },
                 &ToggleSidebar,
                 None,
             )

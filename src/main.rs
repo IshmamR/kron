@@ -1,4 +1,6 @@
 mod appearance;
+#[allow(dead_code)] // Views don't read it until they move off `Library`.
+mod database;
 mod dev_overlay;
 #[allow(dead_code)] // Parts of it aren't used by the UI yet.
 mod model;
@@ -88,6 +90,26 @@ fn main() {
             appearance::init(cx);
             dev_overlay::init(cx);
             workspace::init(cx);
+            let database = match database::open(cx) {
+                Ok(db) => db,
+                Err(err) => {
+                    eprintln!("couldn't open the database: {err}");
+                    cx.quit();
+                    return;
+                }
+            };
+            let setup = database.read(cx).write(cx, |write| {
+                typeset::install_templates(write)?;
+                #[cfg(debug_assertions)]
+                model::sample::write_if_empty(write)?;
+                Ok(())
+            });
+            cx.background_spawn(async move {
+                if let Err(error) = setup.await {
+                    eprintln!("couldn't set up the database: {error}");
+                }
+            })
+            .detach();
             let (bounds, maximize) = window_bounds(cx);
             let opened = gpui_kit::open_window(
                 WindowOptions {
@@ -114,14 +136,18 @@ fn main() {
                             window.on_next_frame(|window, _| window.zoom_window());
                         }
                     });
+                    #[cfg(debug_assertions)]
                     let library = model::sample::library().unwrap_or_else(|error| {
                         eprintln!("couldn't load the sample library: {error}");
                         model::Library::default()
                     });
+                    #[cfg(not(debug_assertions))]
+                    let library = model::Library::default();
                     let library = cx.new(|_| library);
+                    let dev_overlay = cx.new(|cx| DevOverlay::new(database.clone(), cx));
                     cx.new(|cx| MainWindow {
-                        workspace: cx.new(|cx| Workspace::new(library, window, cx)),
-                        dev_overlay: cx.new(DevOverlay::new),
+                        workspace: cx.new(|cx| Workspace::new(library, database, window, cx)),
+                        dev_overlay,
                     })
                 },
             );

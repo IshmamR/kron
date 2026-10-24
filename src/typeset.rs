@@ -12,8 +12,13 @@ use typst::{Library as TypstLibrary, LibraryExt, World};
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 use typst_render::RenderOptions;
-use uuid::Uuid;
+use uuid::{Uuid, uuid};
 
+use crate::database::schema::{
+    TemplateFiles, TemplateKinds, TemplateVersions, Templates, template_files, template_versions,
+    templates,
+};
+use crate::database::{self, Write};
 use crate::model::{Block, Line, LineId, SectionKind, TailoredResume};
 
 /// The templates that come with the app. Each defines `render(resume)`; the
@@ -21,21 +26,29 @@ use crate::model::{Block, Line, LineId, SectionKind, TailoredResume};
 pub static TEMPLATES: [Template; 3] = [
     Template {
         key: "modern",
+        id: uuid!("01a16db8-7ec0-7dd1-8c5a-e14576725c0f"),
+        version_id: uuid!("01a16db8-7ec2-72ed-8e79-1686548e0043"),
         name: "Modern",
         source: include_str!("../assets/typst/modern.typ"),
     },
     Template {
         key: "classic",
+        id: uuid!("01a16db8-7ec3-7e01-88cf-cf169ebf7ea1"),
+        version_id: uuid!("01a16db8-7ec4-73b0-a60a-381ca9e50c47"),
         name: "Classic",
         source: include_str!("../assets/typst/classic.typ"),
     },
     Template {
         key: "sidebar",
+        id: uuid!("01a16db8-7ec5-78f6-a660-6b4c6b170f3a"),
+        version_id: uuid!("01a16db8-7ec6-7392-8452-4a71f048a231"),
         name: "Sidebar",
         source: include_str!("../assets/typst/sidebar.typ"),
     },
 ];
 pub const DEFAULT_TEMPLATE: &str = "modern";
+/// Typst has no registered media type.
+const TYPST_MEDIA_TYPE: &str = "text/x-typst";
 const LINE_LABEL_PREFIX: &str = "line-";
 /// Clicks this close above or below a line still hit it, so the gaps
 /// between lines aren't dead space.
@@ -265,6 +278,10 @@ fn shares_row(line_box: &LineBox, other: &LineBox) -> bool {
 /// A design for résumés: Typst source that defines `render(resume)`.
 pub struct Template {
     pub key: &'static str,
+    /// Its catalog id, the same on every device.
+    pub id: Uuid,
+    /// The bundled release's id: version 1 for now.
+    pub version_id: Uuid,
     pub name: &'static str,
     pub source: &'static str,
 }
@@ -277,6 +294,52 @@ pub fn template(key: &str) -> &'static Template {
         .find(|template| template.key == key)
         .or_else(|| TEMPLATES.iter().find(|template| template.key == DEFAULT_TEMPLATE))
         .unwrap_or(&TEMPLATES[0])
+}
+
+/// Writes the bundled templates into the database as catalog templates,
+/// unless they're there already, so generations can refer to their versions.
+pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
+    for template in &TEMPLATES {
+        let installed = write
+            .prepare("SELECT 1 FROM template_versions WHERE id = ?1")?
+            .exists([template.version_id])?;
+        if installed {
+            continue;
+        }
+        let now = write.now();
+        let template_exists = write
+            .prepare("SELECT 1 FROM templates WHERE id = ?1")?
+            .exists([template.id])?;
+        if !template_exists {
+            write.insert(
+                Templates,
+                template.id,
+                &[
+                    templates::NAME.value(&template.name),
+                    templates::ORIGIN.value(&"catalog"),
+                    templates::ADDED_AT.value(&now),
+                ],
+            )?;
+        }
+        write.insert(
+            TemplateVersions,
+            template.version_id,
+            &[
+                template_versions::TEMPLATE_ID.value(&template.id),
+                template_versions::VERSION.value(&1),
+                template_versions::INTERFACE.value(&1),
+                template_versions::ADDED_AT.value(&now),
+            ],
+        )?;
+        let source = write.add_file(template.source.as_bytes(), TYPST_MEDIA_TYPE)?;
+        write.insert(
+            TemplateFiles,
+            (template.version_id, "main.typ"),
+            &[template_files::FILE_HASH.value(&source)],
+        )?;
+        write.insert(TemplateKinds, (template.version_id, "resume"), &[])?;
+    }
+    Ok(())
 }
 
 /// The résumé's template, then the résumé as a Typst value handed to the

@@ -10,6 +10,9 @@
 .claude/
 .idea/
 .zed/
+.cursor/*
+!.cursor/rules/
+!.cursor/skills/
 *.swp
 *~
 
