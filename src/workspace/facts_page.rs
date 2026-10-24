@@ -11,13 +11,12 @@ use gpui_kit::{
     Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
     KeyBinding, Keystroke, Pixels, ScrollStrategy, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
-use chrono::DateTime;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::OpenLine;
 use super::fact_list::{FactList, Filter, ListedFact};
 use super::parts::{
-    Source, caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt,
+    Source, caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt, sources,
 };
 use crate::database::schema::{
     Blocks, Documents, Entries, FactSources, FactVersions, Facts, Generations, Jobs, LineCitations,
@@ -1244,43 +1243,6 @@ fn shows(changed: &Changed) -> bool {
         || changed.touches(FactVersions)
 }
 
-/// Where the fact and the facts merged into it were found, in the order they
-/// were found.
-fn sources(connection: &Connection, fact: FactId) -> Result<Vec<Source>, Error> {
-    let mut statement = connection.prepare_cached(
-        "WITH RECURSIVE members(id) AS (
-             SELECT ?1
-             UNION
-             SELECT facts.id FROM facts JOIN members ON facts.merged_into = members.id
-         )
-         SELECT documents.file_name, documents.added_at, documents.deleted_at IS NULL,
-                document_texts.text, fact_sources.span_start, fact_sources.span_end
-         FROM members
-         -- CROSS JOIN keeps this order: by its index, not every source by id.
-         CROSS JOIN fact_sources ON fact_sources.fact_id = members.id
-         JOIN documents ON documents.id = fact_sources.document_id
-         LEFT JOIN document_texts ON document_texts.document_id = documents.id
-         WHERE fact_sources.deleted_at IS NULL
-         ORDER BY fact_sources.id",
-    )?;
-    let sources = statement
-        .query_map([fact.0], |row| {
-            let file_name: Option<String> = row.get(0)?;
-            let added_at = DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default();
-            let kept: bool = row.get(2)?;
-            let text: Option<String> = row.get(3)?;
-            // The schema keeps spans non-negative.
-            let span = offset(row.get(4)?)..offset(row.get(5)?);
-            Ok(Source::new(
-                kept.then_some((file_name.as_deref(), added_at)),
-                text.as_deref(),
-                &span,
-            ))
-        })?
-        .collect::<Result<_, _>>()?;
-    Ok(sources)
-}
-
 /// The lines of each job's current résumé that cite the fact, or a fact
 /// merged into it, in the order of the board and then the page.
 fn uses(connection: &Connection, fact: FactId) -> Result<Vec<Use>, Error> {
@@ -1336,10 +1298,6 @@ fn uses(connection: &Connection, fact: FactId) -> Result<Vec<Use>, Error> {
     Ok(uses)
 }
 
-fn offset(value: i64) -> usize {
-    usize::try_from(value).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1349,19 +1307,14 @@ mod tests {
 
     use super::*;
     use crate::database::schema::facts;
-    use crate::database::{self, TemporaryDirectory, Write, Writer};
-    use crate::model::{Library, sample};
-    use crate::typeset;
+    use crate::database::{TemporaryDirectory, Write, Writer};
+    use crate::model::Library;
+    use crate::workspace::testing::{self, write_sample};
 
     fn sample_writer() -> Result<Writer, Error> {
         let mut writer = Writer::open_in_memory()?;
         writer.execute(write_sample)?;
         Ok(writer)
-    }
-
-    fn write_sample(write: &mut Write) -> Result<(), Error> {
-        typeset::install_templates(write)?;
-        sample::write_library(write)
     }
 
     /// The queries read what `Library::load` does, which they replace: the
@@ -1481,21 +1434,7 @@ mod tests {
     }
 
     fn open(app: &mut TestAppContext) -> Page<'_> {
-        let directory = TemporaryDirectory::new();
-        let database = app.update(|cx| {
-            gpui_kit::init(cx);
-            init(cx);
-            database::open_in(&directory, cx)
-        });
-        let database = match database {
-            Ok(database) => database,
-            Err(error) => panic!("couldn't open the database: {error}"),
-        };
-        database.read_with(app, |database, _| {
-            database.queue(write_sample);
-            database.flush();
-        });
-        app.run_until_parked();
+        let (database, directory) = testing::open_sample(app);
         let (page, cx) =
             app.add_window_view(|window, cx| FactsPage::new(database.clone(), window, cx));
         cx.update(|window, cx| page.focus_handle(cx).focus(window, cx));
@@ -1511,8 +1450,7 @@ mod tests {
     impl Page<'_> {
         /// Lets queued commands commit, delivers what they changed, and draws.
         fn settle(&mut self) {
-            self.database.read_with(self.cx, |database, _| database.flush());
-            self.cx.run_until_parked();
+            testing::settle(self.cx, &self.database);
         }
 
         fn keys(&mut self, keystrokes: &str) {
@@ -1522,9 +1460,7 @@ mod tests {
 
         /// A command from elsewhere in the app, like the inspector's.
         fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
-            self.database
-                .read_with(self.cx, |database, _| database.queue(command));
-            self.settle();
+            testing::run(self.cx, &self.database, command);
         }
 
         fn update<R>(

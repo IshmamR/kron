@@ -475,11 +475,11 @@ mod tests {
         assert_eq!(count(&connection, "documents")?, 1);
         let indexes: i64 = connection.query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'index'
-             AND name IN ('facts_by_merged_into', 'line_citations_by_fact')",
+             AND name IN ('facts_by_merged_into', 'line_citations_by_fact', 'lines_by_block')",
             [],
             |row| row.get(0),
         )?;
-        assert_eq!(indexes, 2);
+        assert_eq!(indexes, 3);
         Ok(())
     }
 

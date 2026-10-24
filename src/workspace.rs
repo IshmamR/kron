@@ -7,6 +7,8 @@ mod parts;
 mod previews;
 mod resume_grid;
 mod shortcuts;
+#[cfg(test)]
+mod testing;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBoxVariant;

@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 use rusqlite::Connection;
 
-use super::parts::fact_kind_label;
+use super::parts::{EntryLabel, fact_kind_label};
 use crate::database::Error;
 use crate::model::{EntryId, FactId, FactKind, Review, ReviewReason};
 
@@ -328,11 +328,11 @@ impl FactList {
     /// "Senior Software Engineer, Northwind Logistics", from the entry's title
     /// and organization facts.
     pub fn entry_label(&self, entry: EntryId) -> Option<String> {
-        let mut naming = EntryNaming::default();
+        let mut label = EntryLabel::default();
         for fact in self.facts.iter().filter(|fact| fact.entry == Some(entry)) {
-            naming.add(fact);
+            label.add(fact.kind, &fact.text);
         }
-        naming.label()
+        label.text()
     }
 
     /// Each group's title and its listed facts, top to bottom.
@@ -409,37 +409,21 @@ impl Group {
 /// What an entry is called, from its facts, oldest first.
 #[derive(Default)]
 struct EntryNaming<'a> {
-    title: Option<&'a str>,
-    skill_group: Option<&'a str>,
-    organization: Option<&'a str>,
+    label: EntryLabel<'a>,
     /// When its first fact's note was written, if it came from one.
     noted_at: Option<Option<DateTime<Utc>>>,
 }
 
 impl<'a> EntryNaming<'a> {
     fn add(&mut self, fact: &'a ListedFact) {
-        let text = Some(fact.text.as_str());
-        match fact.kind {
-            FactKind::Title => self.title = self.title.or(text),
-            FactKind::SkillGroup => self.skill_group = self.skill_group.or(text),
-            FactKind::Organization => self.organization = self.organization.or(text),
-            _ => {}
-        }
+        self.label.add(fact.kind, &fact.text);
         self.noted_at.get_or_insert(fact.noted_at);
-    }
-
-    fn label(&self) -> Option<String> {
-        match (self.title.or(self.skill_group), self.organization) {
-            (Some(title), Some(organization)) => Some(format!("{title}, {organization}")),
-            (Some(label), None) | (None, Some(label)) => Some(label.to_string()),
-            (None, None) => None,
-        }
     }
 
     /// The label, or, for facts written together in a note, when they were
     /// written.
     fn title(&self) -> String {
-        if let Some(label) = self.label() {
+        if let Some(label) = self.label.text() {
             return label;
         }
         match self.noted_at.flatten() {

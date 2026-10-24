@@ -9,7 +9,12 @@ use gpui_kit::{
     prelude::*, px,
 };
 
-use crate::model::{DocumentKind, FactKind, FactSource, Library};
+use rusqlite::Connection;
+
+use crate::database::Error;
+use crate::model::{EntryId, FactId, FactKind};
+#[cfg(test)]
+use crate::model::{DocumentKind, FactSource, Library};
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
@@ -116,6 +121,7 @@ impl Source {
         }
     }
 
+    #[cfg(test)]
     pub fn from_library(library: &Library, source: &FactSource) -> Self {
         let document = library.document(source.document);
         Self::new(
@@ -158,6 +164,89 @@ pub fn source_excerpt(source: &Source, cx: &App) -> impl IntoElement + use<> {
         })
 }
 
+/// Where the fact and the facts merged into it were found, in the order they
+/// were found.
+pub fn sources(connection: &Connection, fact: FactId) -> Result<Vec<Source>, Error> {
+    let mut statement = connection.prepare_cached(
+        "WITH RECURSIVE members(id) AS (
+             SELECT ?1
+             UNION
+             SELECT facts.id FROM facts JOIN members ON facts.merged_into = members.id
+         )
+         SELECT documents.file_name, documents.added_at, documents.deleted_at IS NULL,
+                document_texts.text, fact_sources.span_start, fact_sources.span_end
+         FROM members
+         -- CROSS JOIN keeps this order: by its index, not every source by id.
+         CROSS JOIN fact_sources ON fact_sources.fact_id = members.id
+         JOIN documents ON documents.id = fact_sources.document_id
+         LEFT JOIN document_texts ON document_texts.document_id = documents.id
+         WHERE fact_sources.deleted_at IS NULL
+         ORDER BY fact_sources.id",
+    )?;
+    let sources = statement
+        .query_map([fact.0], |row| {
+            let file_name: Option<String> = row.get(0)?;
+            let added_at = DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default();
+            let kept: bool = row.get(2)?;
+            let text: Option<String> = row.get(3)?;
+            let span = offset(row.get(4)?)..offset(row.get(5)?);
+            Ok(Source::new(
+                kept.then_some((file_name.as_deref(), added_at)),
+                text.as_deref(),
+                &span,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(sources)
+}
+
+/// What an entry is called, from its facts, oldest first: "Senior Software
+/// Engineer, Northwind Logistics".
+#[derive(Default)]
+pub struct EntryLabel<'a> {
+    title: Option<&'a str>,
+    skill_group: Option<&'a str>,
+    organization: Option<&'a str>,
+}
+
+impl<'a> EntryLabel<'a> {
+    pub fn add(&mut self, kind: FactKind, text: &'a str) {
+        match kind {
+            FactKind::Title => self.title = self.title.or(Some(text)),
+            FactKind::SkillGroup => self.skill_group = self.skill_group.or(Some(text)),
+            FactKind::Organization => self.organization = self.organization.or(Some(text)),
+            _ => {}
+        }
+    }
+
+    /// From the title, or else the skill group, and the organization.
+    pub fn text(&self) -> Option<String> {
+        match (self.title.or(self.skill_group), self.organization) {
+            (Some(title), Some(organization)) => Some(format!("{title}, {organization}")),
+            (Some(label), None) | (None, Some(label)) => Some(label.to_string()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The entry's label, from the facts in it.
+pub fn entry_label(connection: &Connection, entry: EntryId) -> Result<Option<String>, Error> {
+    let mut statement = connection.prepare_cached(
+        "SELECT kind, text FROM facts
+         WHERE entry_id = ?1 AND merged_into IS NULL AND deleted_at IS NULL
+           AND kind IN ('title', 'skill_group', 'organization')
+         ORDER BY id",
+    )?;
+    let facts: Vec<(FactKind, String)> = statement
+        .query_map([entry.0], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    let mut label = EntryLabel::default();
+    for (kind, text) in &facts {
+        label.add(*kind, text);
+    }
+    Ok(label.text())
+}
+
 /// The source lines around `span`, and where `span` falls within them.
 fn source_context(text: &str, span: &Range<usize>) -> Option<(String, Range<usize>)> {
     let start = text
@@ -170,6 +259,11 @@ fn source_context(text: &str, span: &Range<usize>) -> Option<(String, Range<usiz
         .map_or(text.len(), |newline| span.end + newline);
     let context = text.get(start..end)?;
     Some((context.to_string(), span.start - start..span.end - start))
+}
+
+/// Spans are kept non-negative by the schema.
+fn offset(value: i64) -> usize {
+    usize::try_from(value).unwrap_or_default()
 }
 
 #[cfg(test)]
