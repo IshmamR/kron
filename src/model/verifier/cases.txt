@@ -1,0 +1,297 @@
+# Fact–line pairs for measuring the verifier. Each case: its label, the
+# facts the line cites, then the line. Fails are small edits of valid lines,
+# so the fabrication is the only difference.
+#
+# Labels:
+#   paraphrase, number_rewording: should pass
+#   invented_figure, invented_year, unit_swap, wrong_referent,
+#   scope_inflation, invented_term, unrelated, borrowed_figure: should fail
+#
+# borrowed_figure cases cite two facts and take a figure from the one that
+# isn't about the line.
+
+paraphrase
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Reduced the routing API's p99 latency from 480 ms to 95 ms.
+
+paraphrase
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Migrated 12 backend services from Python to Rust as the lead.
+
+paraphrase
+fact: Mentored four junior engineers through their first production launches; two now lead teams of their own.
+line: Mentored 4 junior engineers through their first production launches.
+
+paraphrase
+fact: Introduced structured logging and distributed tracing across the routing services, so most incidents can now be diagnosed from a single dashboard.
+line: Introduced structured logging and tracing across the routing services, letting most incidents be diagnosed from one dashboard.
+
+paraphrase
+fact: Ran a volunteer team of 15 students over the three days.
+line: Ran a team of 15 student volunteers over three days.
+
+paraphrase
+fact: Found two capacity bottlenecks in the routing API before the 2023 peak season.
+line: Found 2 capacity bottlenecks in the routing API ahead of the 2023 peak season.
+
+paraphrase
+fact: An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
+line: Open-source Rust crate that propagates trace context across async tasks (about 900 GitHub stars).
+
+paraphrase
+fact: Worked with product managers to scope the multi-depot routing project and delivered it across two quarters.
+line: Scoped the multi-depot routing project with product managers and delivered it over two quarters.
+
+paraphrase
+fact: Grew test coverage of the billing service from 40% to 85%.
+line: Raised the billing service's test coverage from 40 percent to 85 percent.
+
+paraphrase
+fact: Cut build times 3x by caching dependencies in CI.
+line: Made CI builds 3 times faster by caching dependencies.
+
+paraphrase
+fact: 2016 – 2018
+line: 2016 – 2018
+
+paraphrase
+fact: Tracing async Rust in production, RustConf 2024.
+line: Spoke at RustConf 2024 on tracing async Rust in production.
+
+paraphrase
+fact: Led the migration of 12 backend services from Python to Rust.
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Migrated 12 backend services to Rust, cutting the routing API's p99 latency from 480 ms to 95 ms.
+
+number_rewording
+fact: The event pipeline processes 1,200,000 shipment updates a day.
+line: The event pipeline processes 1.2M shipment updates a day.
+
+number_rewording
+fact: The event pipeline processes 1,200,000 shipment updates a day.
+line: The event pipeline processes 1.2 million shipment updates daily.
+
+number_rewording
+fact: Reduced cloud spend by $40,000 a year.
+line: Reduced cloud spend by $40K a year.
+
+number_rewording
+fact: The app served 3 million users.
+line: The app served three million users.
+
+number_rewording
+fact: Onboarded 25 engineers to the new deployment platform.
+line: Onboarded twenty-five engineers to the new deployment platform.
+
+number_rewording
+fact: Supported 120 enterprise customers.
+line: Supported one hundred and twenty enterprise customers.
+
+number_rewording
+fact: 2019 – 2021
+line: 2019–21
+
+number_rewording
+fact: Doubled checkout throughput by batching database writes.
+line: Achieved 2x checkout throughput by batching database writes.
+
+number_rewording
+fact: Halved the error rate of the payment webhooks.
+line: Cut the error rate of the payment webhooks by 50%.
+
+invented_figure
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Cut p99 latency of the routing API from 480 ms to 90 ms.
+
+invented_figure
+fact: Grew test coverage of the billing service from 40% to 85%.
+line: Grew test coverage of the billing service from 40% to 90%.
+
+invented_figure
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led the migration of 15 backend services from Python to Rust.
+
+invented_figure
+fact: Built a capacity model for the routing cluster that the infrastructure team now uses for quarterly budgeting.
+line: Built a capacity model for the routing cluster that cut infrastructure costs by 20%.
+
+invented_figure
+fact: Mentored four junior engineers through their first production launches.
+line: Mentored six junior engineers through their first production launches.
+
+invented_figure
+fact: An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
+line: Open-source Rust crate for propagating trace context, with over 1,000 GitHub stars.
+
+invented_figure
+fact: The event pipeline processes 1,200,000 shipment updates a day.
+line: The event pipeline processes 1.5M shipment updates a day.
+
+invented_figure
+fact: Ran the on-call rotation for the routing team and wrote the runbooks that new engineers still start from.
+line: Ran the on-call rotation for the routing team, cutting incidents by 30%.
+
+invented_figure
+fact: Wrote unit tests for the billing reconciliation scripts and fixed the bugs they found.
+line: Wrote unit tests for the billing reconciliation scripts and fixed 14 bugs they found.
+
+# Rounded: 80% can't be defended when the fact says 80.2%.
+invented_figure
+fact: Cut p99 latency of the routing API by 80.2%.
+line: Cut p99 latency of the routing API by about 80%.
+
+invented_year
+fact: Found two capacity bottlenecks in the routing API before the 2023 peak season.
+line: Found two capacity bottlenecks in the routing API before the 2022 peak season.
+
+invented_year
+fact: Backend engineer with eight years of experience building reliable services in Rust, Go and Python.
+line: Writing production Rust since 2016.
+
+invented_year
+fact: Tracing async Rust in production, RustConf 2024.
+line: Spoke at RustConf 2025 on tracing async Rust in production.
+
+invented_year
+fact: 2021 – present
+line: 2020 – present
+
+invented_year
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led the 2022 migration of 12 backend services from Python to Rust.
+
+unit_swap
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Cut p99 latency of the routing API by 95%.
+
+unit_swap
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Migrated 12% of the backend services from Python to Rust.
+
+unit_swap
+fact: Reduced cloud spend by $40,000 a year.
+line: Reduced cloud spend by €40,000 a year.
+
+unit_swap
+fact: Cut build times 3x by caching dependencies in CI.
+line: Cut build times by 3% by caching dependencies in CI.
+
+unit_swap
+fact: The event pipeline processes 1,200,000 shipment updates a day.
+line: The event pipeline processes $1.2M of shipments a day.
+
+wrong_referent
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led a team of 12 backend engineers.
+
+wrong_referent
+fact: Mentored four junior engineers through their first production launches.
+line: Mentored four engineering teams through their first production launches.
+
+wrong_referent
+fact: Ran a volunteer team of 15 students over the three days.
+line: Ran a volunteer team of 15 students over three weeks.
+
+wrong_referent
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Cut p99 latency of the routing API from 480 s to 95 s.
+
+wrong_referent
+fact: The event pipeline processes 1,200,000 shipment updates a day.
+line: The event pipeline processes 1,200,000 shipment updates an hour.
+
+wrong_referent
+fact: An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
+line: Open-source Rust crate for propagating trace context, used by about 900 companies.
+
+wrong_referent
+fact: Supported 120 enterprise customers.
+line: Supported 120 enterprise engineers.
+
+scope_inflation
+fact: Mentored four junior engineers through their first production launches.
+line: Managed a team of four junior engineers.
+
+scope_inflation
+fact: Worked with product managers to scope the multi-depot routing project and delivered it across two quarters.
+line: Led the multi-depot routing project, delivering it across two quarters.
+
+scope_inflation
+fact: Contributed to the migration of 12 backend services from Python to Rust.
+line: Led the migration of 12 backend services from Python to Rust.
+
+scope_inflation
+fact: Helped design the event pipeline that processes shipment updates.
+line: Designed the event pipeline that processes shipment updates.
+
+scope_inflation
+fact: Wrote the internal guide to building Rust services at Northwind, covering error handling, testing and observability.
+line: Set the engineering standards for Rust services at Northwind.
+
+scope_inflation
+fact: Gave a guest lecture on async Rust to final-year students at BRAC University.
+line: Taught a course on async Rust to final-year students at BRAC University.
+
+scope_inflation
+fact: Found two capacity bottlenecks in the routing API before the 2023 peak season.
+line: Fixed two capacity bottlenecks in the routing API before the 2023 peak season.
+
+invented_term
+fact: Introduced structured logging and distributed tracing across the routing services.
+line: Built observability for the routing services on Kubernetes.
+
+invented_term
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led the migration of 12 backend services from Python to Rust on AWS.
+
+invented_term
+fact: Designed the event pipeline that processes shipment updates.
+line: Designed the Kafka event pipeline that processes shipment updates.
+
+invented_term
+fact: Rust
+line: Experienced with embedded, no_std Rust.
+
+invented_term
+fact: Built the audit log the compliance team uses to review who accessed patient records and when.
+line: Built the HIPAA-compliant audit log for patient records.
+
+invented_term
+fact: Wrote unit tests for the billing reconciliation scripts and fixed the bugs they found.
+line: Wrote pytest suites for the billing reconciliation scripts and fixed the bugs they found.
+
+unrelated
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Designed routing algorithms that cut fuel costs by 12%.
+
+unrelated
+fact: Worked with product managers to scope the multi-depot routing project and delivered it across two quarters.
+line: Improved the team's delivery speed by two quarters.
+
+unrelated
+fact: Replaced a hand-maintained spreadsheet of client reports with a self-service dashboard used by the sales team.
+line: Built a machine-learning model to forecast sales.
+
+unrelated
+fact: Ran the on-call rotation for the routing team and wrote the runbooks that new engineers still start from.
+line: Negotiated vendor contracts for the routing team.
+
+borrowed_figure
+fact: Reduced cloud spend by moving batch jobs to spot instances.
+fact: Grew test coverage of the billing service from 40% to 85%.
+line: Reduced cloud spend by 85% by moving batch jobs to spot instances.
+
+borrowed_figure
+fact: Designed the event pipeline that processes shipment updates.
+fact: Cut build times 3x by caching dependencies in CI.
+line: Designed the event pipeline that processes shipment updates 3x faster.
+
+borrowed_figure
+fact: Wrote the internal guide to building Rust services at Northwind.
+fact: Reduced cloud spend by $40,000 a year.
+line: Wrote the internal Rust guide at Northwind, saving $40,000 a year.
+
+borrowed_figure
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Cut p99 latency of the routing API for 12 services.

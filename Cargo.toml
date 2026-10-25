@@ -14,7 +14,11 @@ gpui-kit = "0.7.1"
 # GPUI's own, for building its images from rendered pages.
 image = { version = "0.25.10", default-features = false }
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
+rust-stemmers = "1.2.0"
+# NLTK's English list: the Snowball project's, matching rust-stemmers.
+stop-words = { version = "0.10.1", default-features = false, features = ["nltk"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+text2num = { version = "2.8.0", default-features = false, features = ["std", "en"] }
 typst = "0.15.1"
 typst-kit = { version = "0.15.1", features = ["scan-fonts", "embedded-fonts"] }
 typst-layout = "0.15.1"

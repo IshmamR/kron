@@ -1584,6 +1584,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "daachorse"
+version = "3.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
+
+[[package]]
 name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4211,7 +4217,10 @@ dependencies = [
  "gpui-kit",
  "image",
  "rusqlite",
+ "rust-stemmers",
+ "stop-words",
  "sysinfo 0.39.6",
+ "text2num",
  "typst",
  "typst-kit",
  "typst-layout",
@@ -6658,6 +6667,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-stemmers"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
 name = "rust_decimal"
 version = "1.43.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7341,6 +7360,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stop-words"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ed527ae13a020ac2404e32746ecee62d632aafe64f8e0df2bb3545ae96f6d1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "str_indices"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7731,6 +7759,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "text2num"
+version = "2.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "372f8f5b672792938479cc6b13774c0f13a23fcc925511d82ddd4462f6f6ebd7"
+dependencies = [
+ "bitflags 1.3.2",
+ "daachorse",
+ "phf 0.13.1",
 ]
 
 [[package]]

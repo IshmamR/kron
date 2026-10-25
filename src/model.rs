@@ -5,6 +5,7 @@ pub mod sample;
 mod section;
 pub mod settings;
 mod stored;
+pub mod verifier;
 
 use std::collections::HashSet;
 
