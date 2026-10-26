@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- Test CV for src/import/pdf.rs: a sidebar beside the main column, as
+     LinkedIn's and many builders' PDFs are. Build: google-chrome --headless
+     --no-pdf-header-footer --print-to-pdf=sidebar.pdf sidebar.html -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 0; }
+  body { margin: 0; font-family: "DejaVu Sans", sans-serif; font-size: 10pt; }
+  .page { display: flex; min-height: 297mm; }
+  aside { width: 60mm; padding: 14mm 8mm; background: #eef1f4; }
+  main { flex: 1; padding: 14mm 12mm; }
+  h1 { font-size: 24pt; margin: 0 0 2mm; }
+  h2 { font-size: 13pt; margin: 6mm 0 2mm; }
+  h3 { font-size: 11pt; margin: 4mm 0 0; }
+  p, li { margin: 0 0 1mm; }
+  ul { padding-left: 4mm; margin: 1mm 0; }
+  a { color: inherit; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="page">
+  <aside>
+    <h2>Contact</h2>
+    <p><a href="mailto:alex.rahman@example.com">alex.rahman@example.com</a></p>
+    <p>+880 1711 555 210 (Mobile)</p>
+    <p><a href="https://www.linkedin.com/in/alexrahman">www.linkedin.com/in/alexrahman</a></p>
+    <h2>Top Skills</h2>
+    <p>Rust</p>
+    <p>Kafka</p>
+    <p>OpenTelemetry</p>
+    <h2>Languages</h2>
+    <p>Bangla (Native)</p>
+    <p>English (Professional)</p>
+  </aside>
+  <main>
+    <h1>Alex Rahman</h1>
+    <p>Senior Software Engineer at Northwind Logistics</p>
+    <p>Dhaka, Bangladesh</p>
+    <h2>Summary</h2>
+    <p>Backend engineer with eight years of experience building reliable services in Rust, Go and Python, most recently leading the routing platform at a logistics company.</p>
+    <h2>Experience</h2>
+    <h3>Northwind Logistics</h3>
+    <p>Senior Software Engineer</p>
+    <p>2021 – present · Dhaka, Bangladesh</p>
+    <ul>
+      <li>Led the migration of 12 backend services from Python to Rust.</li>
+      <li>Cut p99 latency of the routing API from 480 ms to 95 ms.</li>
+    </ul>
+    <h3>Brightline Health</h3>
+    <p>Backend Engineer</p>
+    <p>2018 – 2021 · Remote</p>
+    <ul>
+      <li>Built the appointment scheduling service used by 40 clinics.</li>
+    </ul>
+    <h2>Education</h2>
+    <h3>University of Dhaka</h3>
+    <p>B.Sc. Computer Science · 2014 – 2018</p>
+  </main>
+</div>
+</body>
+</html>

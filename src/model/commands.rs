@@ -7,7 +7,7 @@ use std::ops::Range;
 use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
-use super::{ClaimId, EventId, FactId, JobEvent, JobEventKind, JobId};
+use super::{ClaimId, DocumentId, EventId, FactId, JobEvent, JobEventKind, JobId};
 use crate::database::schema::{
     CustomSections, DocumentTexts, Documents, Entries, Events, FactSources, Facts, custom_sections,
     document_texts, documents, entries, events, fact_sources, facts, generations,
@@ -78,6 +78,35 @@ pub fn add_note(write: &mut Write, text: &str) -> Result<Vec<FactId>, Error> {
         added.push(FactId(fact));
     }
     Ok(added)
+}
+
+/// Saves an imported file, and the text read from it as the user corrected
+/// it: what facts are found in.
+pub fn import_document(
+    write: &mut Write,
+    file_name: &str,
+    bytes: &[u8],
+    media_type: &str,
+    text: &str,
+) -> Result<DocumentId, Error> {
+    let hash = write.add_file(bytes, media_type)?;
+    let document = Uuid::now_v7();
+    let now = write.now();
+    write.insert(
+        Documents,
+        document,
+        &[
+            documents::FILE_NAME.value(&Some(file_name)),
+            documents::FILE_HASH.value(&Some(hash)),
+            documents::ADDED_AT.value(&now),
+        ],
+    )?;
+    write.insert(
+        DocumentTexts,
+        document,
+        &[document_texts::TEXT.value(&text)],
+    )?;
+    Ok(DocumentId(document))
 }
 
 /// Makes the claim a fact, as a note, and points the claim at it. Nothing
@@ -373,6 +402,28 @@ mod tests {
         assert_eq!(live(&writer)?, [0, 0, 0, 0, 0]);
         assert!(writer.redo()?.is_some());
         assert_eq!(live(&writer)?, [1, 1, 2, 2, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn an_imported_document_keeps_its_file_and_corrected_text_until_undone() -> Result<(), Error> {
+        let mut writer = empty()?;
+        let document = run(&mut writer, |write| {
+            import_document(write, "cv.pdf", b"%PDF-", "application/pdf", "Alex Rahman")
+        })?;
+        let stored: (String, i64, String) = writer.kron().query_row(
+            "SELECT documents.file_name, files.size, document_texts.text
+             FROM documents
+             JOIN files ON files.hash = documents.file_hash
+             JOIN document_texts ON document_texts.document_id = documents.id
+             WHERE documents.id = ?1 AND documents.deleted_at IS NULL",
+            [document.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(stored, ("cv.pdf".to_owned(), 5, "Alex Rahman".to_owned()));
+        writer.undo()?;
+        let live = "SELECT count(*) FROM documents WHERE deleted_at IS NULL";
+        assert_eq!(count(writer.kron(), live, [])?, 0);
         Ok(())
     }
 

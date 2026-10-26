@@ -4,6 +4,7 @@ mod appearance;
 #[allow(dead_code)]
 mod database;
 mod dev_overlay;
+mod import;
 #[allow(dead_code)] // Parts of it aren't used by the UI yet.
 mod model;
 mod typeset;

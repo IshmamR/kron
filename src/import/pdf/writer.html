@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- Test CV for src/import/pdf.rs, built the way word-processor CVs often
+     are: a layout table puts dates beside employers. Build:
+     soffice --headless --convert-to docx:"MS Word 2007 XML" writer.html
+     soffice --headless --convert-to pdf writer.docx -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: "Liberation Serif", serif; font-size: 11pt; }
+  h1 { font-size: 22pt; text-align: center; margin: 0; }
+  .contact { text-align: center; }
+  h2 { font-size: 13pt; border-bottom: 1px solid black; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 0; vertical-align: top; }
+  td.when { text-align: right; }
+</style>
+</head>
+<body>
+<h1>Alex Rahman</h1>
+<p class="contact">alex.rahman@example.com | +880 1711 555 210 | <a href="https://github.com/alexr">github.com/alexr</a></p>
+<h2>Experience</h2>
+<table>
+  <tr><td><b>Northwind Logistics</b>, Senior Software Engineer</td><td class="when">2021 – present</td></tr>
+</table>
+<ul>
+  <li>Led the migration of 12 backend services from Python to Rust.</li>
+  <li>Ran the on-call rotation for the routing team and wrote the runbooks that new engineers still start from.</li>
+</ul>
+<table>
+  <tr><td><b>Kite Analytics</b>, Junior Developer</td><td class="when">2016 – 2018</td></tr>
+</table>
+<ul>
+  <li>Wrote the nightly ETL jobs that loaded customer usage data into the reporting warehouse.</li>
+</ul>
+<h2>Education</h2>
+<table>
+  <tr><td><b>University of Dhaka</b>, B.Sc. Computer Science</td><td class="when">2014 – 2018</td></tr>
+</table>
+</body>
+</html>

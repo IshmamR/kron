@@ -1,6 +1,7 @@
 mod application_view;
 mod fact_list;
 mod facts_page;
+mod import_page;
 mod inspector;
 mod job_view;
 mod parts;
@@ -36,6 +37,7 @@ use crate::model::settings::{self, DeviceSettings, LastPage};
 use crate::model::{Application, FactId, JobId, LineId};
 use crate::window;
 use facts_page::FactsPage;
+use import_page::ImportPage;
 use job_view::{JobView, JobViewEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
@@ -102,6 +104,7 @@ pub struct Workspace {
     resume_grid: Entity<ResumeGrid>,
     job_view: Entity<JobView>,
     facts_page: Entity<FactsPage>,
+    import_page: Entity<ImportPage>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -111,6 +114,7 @@ impl Render for Workspace {
             Page::Resumes => self.resume_grid.clone().into_any_element(),
             Page::Job => self.job_view.clone().into_any_element(),
             Page::Facts => self.facts_page.clone().into_any_element(),
+            Page::Import => self.import_page.clone().into_any_element(),
             Page::Settings => div()
                 .track_focus(&self.focus_handle)
                 .size_full()
@@ -177,6 +181,7 @@ impl Workspace {
         });
         let facts_page =
             cx.new(|cx| FactsPage::new(database.clone(), window, cx));
+        let import_page = cx.new(|cx| ImportPage::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
 
         let subscriptions = vec![
@@ -232,6 +237,7 @@ impl Workspace {
             resume_grid,
             job_view,
             facts_page,
+            import_page,
             _subscriptions: subscriptions,
         };
         workspace.count_needs_review(cx);
@@ -267,6 +273,8 @@ impl Workspace {
                 .map_or(LastPage::Resumes, LastPage::Job),
             Page::Facts => LastPage::Facts,
             Page::Settings => LastPage::Settings,
+            // Not opened on start: an import half done isn't kept.
+            Page::Import => return,
         };
         if page != self.saved_page {
             self.saved_page = page;
@@ -381,6 +389,7 @@ impl Workspace {
         // Ctrl+B have nowhere to go.
         match page {
             Page::Facts => self.facts_page.focus_handle(cx).focus(window, cx),
+            Page::Import => self.import_page.focus_handle(cx).focus(window, cx),
             Page::Settings => self.focus_handle.focus(window, cx),
             Page::Resumes | Page::Job => {}
         }
@@ -436,6 +445,14 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, window, cx| this.open_resumes(window, cx))),
             ))
             .child(item(facts))
+            .child(item(
+                SidebarMenuItem::new("Import")
+                    .icon(IconName::Inbox)
+                    .active(self.page == Page::Import)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_page(Page::Import, window, cx)
+                    })),
+            ))
             .child(item(
                 SidebarMenuItem::new("Settings")
                     .icon(IconName::Settings)
@@ -495,6 +512,7 @@ enum Page {
     Resumes,
     Job,
     Facts,
+    Import,
     Settings,
 }
 

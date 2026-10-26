@@ -11,8 +11,13 @@ futures = "0.3.34"
 # Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
 # re-exports gpui, gpui-base, gpui-component and the Lucide icons.
 gpui-kit = "0.7.1"
+# Typst's PDF reader, already built for its PDF images; reads imported PDFs.
+hayro-interpret = "0.7.0"
+hayro-syntax = "0.7.2"
 # GPUI's own, for building its images from rendered pages.
 image = { version = "0.25.10", default-features = false }
+# hayro's geometry types.
+kurbo = "0.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
 rust-stemmers = "1.2.0"
 # NLTK's English list: the Snowball project's, matching rust-stemmers.

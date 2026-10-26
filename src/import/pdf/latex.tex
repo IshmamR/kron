@@ -1,0 +1,56 @@
+% Test CV for src/import/pdf.rs, laid out like a common LaTeX résumé: icons in
+% the contact row, a two-column skills grid, dates set flush right, and
+% project links that are icons only. Build: pdflatex latex.tex
+\documentclass[10pt,letterpaper]{article}
+\usepackage[margin=0.5in]{geometry}
+\usepackage{charter}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fontawesome5}
+\usepackage{enumitem}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlist[itemize]{leftmargin=1.2em,label=--,nosep}
+\newcommand{\entry}[2]{\textbf{#1}\hfill #2\\}
+\begin{document}
+\begin{center}
+{\fontsize{24}{28}\selectfont Alex Rahman}\\[4pt]
+\small
+\href{tel:+8801711555210}{\faPhone\ +880 1711 555 210} ---
+\href{mailto:alex.rahman@example.com}{\faEnvelope\ alex.rahman@example.com} ---
+\href{https://www.linkedin.com/in/alexrahman/}{\faLinkedin\ alexrahman} ---
+\href{https://github.com/alexr}{\faGithub\ alexr} ---
+\faMapMarker*\ Dhaka, Bangladesh
+\end{center}
+
+\section*{Skills}
+\begin{tabular}{@{}rl@{\hspace{3em}}rl@{}}
+\textbf{Languages} & Rust, Go, Python, SQL & \textbf{Tools} & Git, Grafana, Terraform \\
+\textbf{Infrastructure} & PostgreSQL, Kafka, Kubernetes, & \textbf{Tracing} & OpenTelemetry \\
+ & Docker & & \\
+\end{tabular}
+
+\section*{Experience}
+\entry{Northwind Logistics}{2021 -- present}
+\textit{Senior Software Engineer}\hfill Dhaka, Bangladesh
+\begin{itemize}
+\item Led the migration of 12 backend services from Python to Rust, one service at a time, without a single customer-facing outage during the move.
+\item Cut p99 latency of the routing API from 480 ms to 95 ms.
+\item Introduced structured logging and distributed tracing across the routing services, so most incidents can now be diagnosed from a single dashboard.
+\end{itemize}
+\entry{Brightline Health}{2018 -- 2021}
+\textit{Backend Engineer}\hfill Remote
+\begin{itemize}
+\item Built the appointment scheduling service used by 40 clinics.
+\end{itemize}
+
+\section*{Projects}
+\textbf{tracewire} \hfill \href{https://github.com/alexr/tracewire}{\faGithub}\ \href{https://crates.io/crates/tracewire}{\faBox}\\
+\textit{Open-source Rust crate}
+\begin{itemize}
+\item An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
+\end{itemize}
+
+\section*{Education}
+\entry{University of Dhaka}{2014 -- 2018}
+B.Sc. Computer Science
+\end{document}
