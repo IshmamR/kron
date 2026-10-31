@@ -1,5 +1,6 @@
-// Adding a CV: a PDF is dropped or chosen, read on the device, and its text
-// shown to check and correct before it's saved. What's saved is the text as
+// Adding a CV: a PDF, Markdown or text file is dropped or chosen, read on
+// the device, and its text shown to check and correct before it's saved; or
+// text is pasted or written straight in. What's saved is the text as
 // corrected, since facts are found in it. Files added together are taken one
 // at a time, each asked about first in case it was added by mistake, as is a
 // file imported before.
@@ -18,18 +19,35 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
-    PathPromptOptions, SharedString, Task, Window, div, prelude::*, px,
+    KeyBinding, PathPromptOptions, SharedString, Task, Window, actions, div, prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice};
 use crate::database::{Database, Error};
-use crate::import::{self, Warning, pdf};
-use crate::model::commands;
+use crate::import::{self, Format, Warning};
+use crate::model::commands::{self, DocumentFile};
 
-const PDF_MEDIA_TYPE: &str = "application/pdf";
+const KEY_CONTEXT: &str = "ImportPage";
 /// Past this, lines of text get too long to read comfortably.
 const PAGE_MAX_WIDTH: gpui_kit::Pixels = px(760.);
+
+actions!(import_page, [Paste, Write, Cancel, Save]);
+
+pub fn init(cx: &mut App) {
+    // A text field's own paste comes first: its key context is deeper.
+    cx.bind_keys([
+        KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-n", Write, Some(KEY_CONTEXT)),
+        KeyBinding::new("escape", Cancel, Some(KEY_CONTEXT)),
+        // In the text field, where its own Ctrl+Enter would add a line.
+        KeyBinding::new(
+            "secondary-enter",
+            Save,
+            Some(&format!("{KEY_CONTEXT} > Input")),
+        ),
+    ]);
+}
 
 pub struct ImportPage {
     database: Entity<Database>,
@@ -63,6 +81,15 @@ impl Render for ImportPage {
         };
         div()
             .track_focus(&self.focus_handle)
+            .key_context(KEY_CONTEXT)
+            .on_action(cx.listener(|this, _: &Paste, window, cx| this.paste(window, cx)))
+            .on_action(cx.listener(|this, _: &Write, window, cx| this.start_writing(window, cx)))
+            .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
+                if !matches!(this.step, Step::Choose) {
+                    this.skip_rest(window, cx)
+                }
+            }))
             .size_full()
             .flex()
             .justify_center()
@@ -84,7 +111,10 @@ impl ImportPage {
             queue: VecDeque::new(),
             added: 0,
             problem: None,
-            text: cx.new(|cx| TextareaState::new(window, cx)),
+            text: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder("Your CV, or anything else about your work.")
+            }),
             focus_handle: cx.focus_handle(),
             task: Task::ready(()),
         }
@@ -131,6 +161,11 @@ impl ImportPage {
     /// none. A file is loaded and checked against earlier imports before
     /// its text is read.
     fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The text field is about to go, and with nothing focused the
+        // page's keys, and the app's, stop working.
+        if self.text.focus_handle(cx).is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }
         self.text
             .update(cx, |text, cx| text.set_value("", window, cx));
         let Some(path) = self.queue.pop_front() else {
@@ -155,8 +190,13 @@ impl ImportPage {
         });
         self.task = cx.spawn_in(window, async move |this, cx| {
             let loaded = loaded.await;
+            let loaded = loaded.map(|(bytes, hash)| (Format::of(&file_name, &bytes), bytes, hash));
             let updated = this.update_in(cx, |this, window, cx| match loaded {
-                Ok((bytes, hash)) => {
+                Ok((Err(error), _, _)) => {
+                    this.problem = Some(format!("{file_name}: {}", error_message(error)).into());
+                    this.next(window, cx);
+                }
+                Ok((Ok(format), bytes, hash)) => {
                     let imported = imported_before(this.database.read(cx).connection(), hash)
                         .unwrap_or_else(|error| {
                             eprintln!("import page: couldn't look for earlier imports: {error}");
@@ -164,6 +204,7 @@ impl ImportPage {
                         });
                     let file = File {
                         file_name,
+                        format,
                         bytes: Arc::new(bytes),
                         imported,
                     };
@@ -192,8 +233,8 @@ impl ImportPage {
         self.step = Step::Reading {
             file_name: file.file_name.clone(),
         };
-        let bytes = file.bytes.to_vec();
-        let reading = cx.background_spawn(async move { pdf::read(bytes) });
+        let (format, bytes) = (file.format, file.bytes.to_vec());
+        let reading = cx.background_spawn(async move { import::read(format, bytes) });
         self.task = cx.spawn_in(window, async move |this, cx| {
             let reading = reading.await;
             let updated = this.update_in(cx, |this, window, cx| match reading {
@@ -201,7 +242,7 @@ impl ImportPage {
                     this.text
                         .update(cx, |text, cx| text.set_value(reading.text, window, cx));
                     this.step = Step::Confirm(Read {
-                        file,
+                        file: Some(file),
                         warnings: reading.warnings,
                         saving: false,
                     });
@@ -216,6 +257,43 @@ impl ImportPage {
             if let Err(error) = updated {
                 eprintln!("import page: {error}");
             }
+        });
+        cx.notify();
+    }
+
+    /// Opens the text on the clipboard to check, or an empty page to write
+    /// on when there's none.
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.step, Step::Choose) {
+            return;
+        }
+        let text = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        self.write(text, window, cx);
+    }
+
+    /// Opens an empty page to write on.
+    fn start_writing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.step, Step::Choose) {
+            self.write(String::new(), window, cx);
+        }
+    }
+
+    /// Opens text with no file to check and save, or to write when empty.
+    fn write(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.queue.clear();
+        self.added = 0;
+        self.problem = None;
+        self.text.update(cx, |state, cx| {
+            state.set_value(text, window, cx);
+            state.focus(window, cx);
+        });
+        self.step = Step::Confirm(Read {
+            file: None,
+            warnings: Vec::new(),
+            saving: false,
         });
         cx.notify();
     }
@@ -253,10 +331,21 @@ impl ImportPage {
         }
         read.saving = true;
         self.problem = None;
-        let (file_name, bytes) = (read.file.file_name.clone(), read.file.bytes.clone());
-        let saved = self.database.read(cx).write(cx, {
-            let file_name = file_name.clone();
-            move |write| commands::import_document(write, &file_name, &bytes, PDF_MEDIA_TYPE, &text)
+        let file = read.file.as_ref().map(|file| {
+            (
+                file.file_name.clone(),
+                file.bytes.clone(),
+                file.format.media_type(),
+            )
+        });
+        let file_name = file.as_ref().map(|(name, _, _)| name.clone());
+        let saved = self.database.read(cx).write(cx, move |write| {
+            let file = file.as_ref().map(|(name, bytes, media_type)| DocumentFile {
+                name,
+                bytes,
+                media_type,
+            });
+            commands::import_document(write, file, &text)
         });
         self.task = cx.spawn_in(window, async move |this, cx| {
             let saved = saved.await;
@@ -266,7 +355,10 @@ impl ImportPage {
                     // test's window may not have.
                     if window.root::<Root>().flatten().is_some() {
                         window.push_notification(
-                            Notification::new().message(format!("Saved {file_name}")),
+                            Notification::new().message(match &file_name {
+                                Some(file_name) => format!("Saved {file_name}"),
+                                None => "Saved your text".to_owned(),
+                            }),
                             cx,
                         );
                     }
@@ -277,8 +369,12 @@ impl ImportPage {
                     if let Step::Confirm(read) = &mut this.step {
                         read.saving = false;
                     }
-                    this.problem =
-                        Some(format!("{file_name}: couldn't save it. Try again.").into());
+                    this.problem = Some(match &file_name {
+                        Some(file_name) => {
+                            format!("{file_name}: couldn't save it. Try again.").into()
+                        }
+                        None => "Couldn't save it. Try again.".into(),
+                    });
                     cx.notify();
                 }
             });
@@ -303,9 +399,18 @@ impl ImportPage {
 
     fn render_choose(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        // The whole page takes a drop, so a file needn't land on the card.
         v_flex()
+            .id("drop-target")
             .size_full()
             .gap_3()
+            .rounded(theme.radius_lg)
+            .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                style.bg(cx.theme().primary.opacity(0.04))
+            })
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.import(paths.paths().to_vec(), window, cx)
+            }))
             .child(title("Import your CV".into()))
             .child(caption(
                 "It's read on this device. You'll see the text before anything is saved.",
@@ -313,37 +418,73 @@ impl ImportPage {
             ))
             .children(self.render_problem(cx))
             .child(
-                v_flex()
-                    .id("drop-target")
-                    .flex_1()
-                    .min_h(px(240.))
-                    .items_center()
-                    .justify_center()
+                h_flex()
+                    .id("drop-card")
                     .gap_3()
+                    .p_4()
                     .rounded(theme.radius_lg)
-                    .border_2()
+                    .border_1()
                     .border_dashed()
                     .border_color(theme.border)
                     .drag_over::<ExternalPaths>(|style, _, _, cx| {
-                        style
-                            .border_color(cx.theme().primary)
-                            .bg(cx.theme().primary.opacity(0.05))
+                        style.border_color(cx.theme().primary)
                     })
-                    .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                        this.import(paths.paths().to_vec(), window, cx)
-                    }))
                     .child(
                         Icon::new(IconName::Inbox)
-                            .size(px(32.))
+                            .size(px(20.))
                             .text_color(theme.muted_foreground),
                     )
-                    .child(div().child("Drop PDFs here"))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().child("Drop your CV here"))
+                            .child(caption("PDF, Markdown or plain text.", cx)),
+                    )
                     .child(
                         Button::new("browse")
                             .label("Choose files…")
                             .primary()
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .p_4()
+                    .rounded(theme.radius_lg)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(
+                        Icon::new(IconName::Copy)
+                            .size(px(20.))
+                            .text_color(theme.muted_foreground),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().child("Or paste it, or write it"))
+                            .child(caption(
+                                "Text from a website, a document or your LinkedIn page.",
+                                cx,
+                            )),
+                    )
+                    .child(
+                        Button::new("write")
+                            .label("Write")
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.start_writing(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("paste")
+                            .label("Paste")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.paste(window, cx))),
                     ),
             )
     }
@@ -412,13 +553,33 @@ impl ImportPage {
         let empty = self.text.read(cx).value().trim().is_empty();
         // Among several files, the next is already chosen.
         let other = if self.added > 1 {
-            Button::new("skip")
-                .label("Skip")
-                .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx)))
+            Some(
+                Button::new("skip")
+                    .label("Skip")
+                    .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx))),
+            )
         } else {
-            Button::new("choose-another")
-                .label("Choose another file")
-                .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx)))
+            read.file.as_ref().map(|_| {
+                Button::new("choose-another")
+                    .label("Choose another file")
+                    .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx)))
+            })
+        };
+        let (heading, description) = match &read.file {
+            Some(file) => (
+                "Check the text",
+                format!(
+                    "The text read from {}. Correct anything that's wrong: facts are taken from \
+                     this text. Nothing has been sent anywhere.",
+                    file.file_name
+                ),
+            ),
+            None => (
+                "Your text",
+                "Paste or write your CV, or anything else about your work: facts are taken \
+                 from this text. Nothing has been sent anywhere."
+                    .to_owned(),
+            ),
         };
         v_flex()
             .size_full()
@@ -428,7 +589,7 @@ impl ImportPage {
                 h_flex()
                     .justify_between()
                     .gap_2()
-                    .child(title("Check the text".into()))
+                    .child(title(heading.into()))
                     .child(
                         h_flex()
                             .gap_2()
@@ -442,7 +603,9 @@ impl ImportPage {
                                         this.skip_rest(window, cx)
                                     })),
                             )
-                            .child(other.ghost().small().disabled(read.saving))
+                            .children(
+                                other.map(|other| other.ghost().small().disabled(read.saving)),
+                            )
                             .child(
                                 Button::new("save")
                                     .label("Save")
@@ -455,14 +618,7 @@ impl ImportPage {
                             ),
                     ),
             )
-            .child(caption(
-                format!(
-                    "The text read from {}. Correct anything that's wrong: facts are taken from \
-                     this text. Nothing has been sent anywhere.",
-                    read.file.file_name
-                ),
-                cx,
-            ))
+            .child(caption(description, cx))
             .children(self.render_problem(cx))
             .children(
                 read.warnings
@@ -493,6 +649,7 @@ enum Step {
 /// A file loaded, not read yet.
 struct File {
     file_name: SharedString,
+    format: Format,
     bytes: Arc<Vec<u8>>,
     /// The last import of the same file, if it was imported before.
     imported: Option<Imported>,
@@ -503,9 +660,10 @@ struct Imported {
     added_at: DateTime<Utc>,
 }
 
-/// A file read, waiting for the user to check its text and save it.
+/// Text waiting for the user to check and save it.
 struct Read {
-    file: File,
+    /// The file it was read from; none when pasted or written.
+    file: Option<File>,
     warnings: Vec<Warning>,
     saving: bool,
 }
@@ -540,12 +698,17 @@ fn error_message(error: import::Error) -> &'static str {
         import::Error::Encrypted => {
             "this PDF is locked with a password. Save a copy without one and import that."
         }
-        import::Error::Invalid => {
-            "this isn't a PDF, or it's damaged. Only PDFs can be imported for now."
-        }
+        import::Error::Invalid => "it's damaged, or isn't the kind of file its name says.",
         import::Error::NoText => {
             "this PDF has no text in it, only pictures of text, like a scan. Export your CV \
              again from where you wrote it, as a PDF."
+        }
+        import::Error::Empty => "there's no text in it.",
+        import::Error::Encoding => {
+            "its text isn't in a known encoding. Save it as UTF-8 and import it again."
+        }
+        import::Error::Unsupported => {
+            "this kind of file can't be imported yet. Import a PDF, Markdown or text file."
         }
     }
 }
@@ -567,7 +730,7 @@ fn warning_message(warning: &Warning) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{TestAppContext, VisualTestContext};
+    use gpui_kit::{ClipboardItem, TestAppContext, VisualTestContext};
 
     use super::*;
     use crate::database::TemporaryDirectory;
@@ -575,7 +738,8 @@ mod tests {
 
     const LATEX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/import/pdf/latex.pdf");
     const SIDEBAR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/import/pdf/sidebar.pdf");
-    const NOT_A_PDF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+    const MARKDOWN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/import/markdown/cv.md");
+    const UNSUPPORTED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
     struct Open<'a> {
         page: Entity<ImportPage>,
@@ -592,6 +756,8 @@ mod tests {
         /// The file asked about, and whether it was imported before.
         Ask(String, bool),
         Confirm(String),
+        /// Text pasted or written, with no file.
+        Typed,
     }
 
     fn open(app: &mut TestAppContext) -> Open<'_> {
@@ -627,7 +793,10 @@ mod tests {
                 Step::Choose => Shown::Choose,
                 Step::Reading { .. } => Shown::Reading,
                 Step::Ask(file) => Shown::Ask(file.file_name.to_string(), file.imported.is_some()),
-                Step::Confirm(read) => Shown::Confirm(read.file.file_name.to_string()),
+                Step::Confirm(read) => match &read.file {
+                    Some(file) => Shown::Confirm(file.file_name.to_string()),
+                    None => Shown::Typed,
+                },
             })
         }
 
@@ -653,6 +822,31 @@ mod tests {
             self.page
                 .read_with(self.cx, |page, _| page.problem.clone().unwrap_or_default())
                 .to_string()
+        }
+
+        /// The saved texts of documents with no file, pasted or written, as
+        /// the sample's notes are, oldest first.
+        fn saved_without_file(&mut self) -> Vec<String> {
+            let saved = self.database.read_with(self.cx, |database, _| {
+                database
+                    .connection()
+                    .prepare(
+                        "SELECT document_texts.text
+                         FROM documents
+                         JOIN document_texts ON document_texts.document_id = documents.id
+                         WHERE documents.file_hash IS NULL
+                         ORDER BY documents.id",
+                    )
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map([], |row| row.get(0))?
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+            });
+            match saved {
+                Ok(saved) => saved,
+                Err(error) => panic!("couldn't read the documents: {error}"),
+            }
         }
 
         /// The saved texts of documents imported from `file_name`.
@@ -697,10 +891,94 @@ mod tests {
             open.saved("latex.pdf"),
             [(
                 "Alex Rahman\nBackend engineer".to_owned(),
-                PDF_MEDIA_TYPE.to_owned()
+                Format::Pdf.media_type().to_owned()
             )]
         );
         assert_eq!(open.shown(), Shown::Choose, "it's ready for the next file");
+    }
+
+    #[test]
+    fn markdown_is_saved_as_the_text_it_shows() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[MARKDOWN]);
+        assert_eq!(open.shown(), Shown::Confirm("cv.md".into()));
+        assert!(
+            open.text()
+                .starts_with("Alex Rahman\n\nalex.rahman@example.com · GitHub\n")
+        );
+        open.save();
+        let saved = open.saved("cv.md");
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].1, "text/markdown");
+    }
+
+    #[test]
+    fn pasted_text_is_checked_and_saved_with_no_file() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.cx
+            .write_to_clipboard(ClipboardItem::new_string("Alex Rahman\nRust".into()));
+        open.import(&[LATEX]);
+        open.act(|page, window, cx| page.paste(window, cx));
+        assert_eq!(
+            open.shown(),
+            Shown::Confirm("latex.pdf".into()),
+            "pasting into the text of a file isn't replacing it"
+        );
+        open.act(|page, window, cx| page.skip_rest(window, cx));
+        open.act(|page, window, cx| page.focus_handle.focus(window, cx));
+        open.cx.simulate_keystrokes("ctrl-v");
+        assert_eq!(open.shown(), Shown::Typed, "Ctrl+V on the page pastes");
+        assert_eq!(open.text(), "Alex Rahman\nRust");
+        let before = open.saved_without_file().len();
+        open.save();
+        assert_eq!(open.shown(), Shown::Choose);
+        let saved = open.saved_without_file();
+        assert_eq!(saved.len(), before + 1);
+        assert_eq!(saved.last().map(String::as_str), Some("Alex Rahman\nRust"));
+    }
+
+    #[test]
+    fn written_text_starts_empty() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[LATEX]);
+        open.act(|page, window, cx| page.focus_handle.focus(window, cx));
+        open.cx.simulate_keystrokes("ctrl-n");
+        assert_eq!(
+            open.shown(),
+            Shown::Confirm("latex.pdf".into()),
+            "a file's text isn't left for an empty page"
+        );
+        open.act(|page, window, cx| page.skip_rest(window, cx));
+        open.act(|page, window, cx| page.focus_handle.focus(window, cx));
+        open.cx.simulate_keystrokes("ctrl-n");
+        assert_eq!(open.shown(), Shown::Typed, "Ctrl+N on the page opens it");
+        open.cx.simulate_keystrokes("x escape");
+        assert_eq!(
+            open.shown(),
+            Shown::Choose,
+            "Esc in the text field leaves it"
+        );
+        open.cx.simulate_keystrokes("ctrl-n");
+        assert_eq!(open.text(), "");
+        open.set_text("Organized Code Fest 2019.");
+        let before = open.saved_without_file().len();
+        open.cx.simulate_keystrokes("ctrl-enter");
+        testing::settle(open.cx, &open.database);
+        let saved = open.saved_without_file();
+        assert_eq!(saved.len(), before + 1);
+        assert_eq!(
+            saved.last().map(String::as_str),
+            Some("Organized Code Fest 2019.")
+        );
+        open.cx.simulate_keystrokes("ctrl-n");
+        assert_eq!(
+            open.shown(),
+            Shown::Typed,
+            "keys still work once the text field is gone"
+        );
     }
 
     #[test]
@@ -740,11 +1018,11 @@ mod tests {
     fn a_file_that_cant_be_read_says_why() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
-        open.import(&[NOT_A_PDF]);
+        open.import(&[UNSUPPORTED]);
         assert_eq!(open.shown(), Shown::Choose);
         let problem = open.problem();
         assert!(
-            problem.starts_with("Cargo.toml: this isn't a PDF"),
+            problem.starts_with("Cargo.toml: this kind of file can't be imported"),
             "{problem}"
         );
         open.import(&[concat!(env!("CARGO_MANIFEST_DIR"), "/no such file.pdf")]);
@@ -782,15 +1060,17 @@ mod tests {
     fn files_added_together_are_asked_about_one_at_a_time() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
-        open.import(&[LATEX, NOT_A_PDF, SIDEBAR, LATEX]);
+        open.import(&[LATEX, UNSUPPORTED, SIDEBAR, LATEX]);
         assert_eq!(open.shown(), Shown::Ask("latex.pdf".into(), false));
         open.act(|page, window, cx| page.skip(window, cx));
-        assert_eq!(open.shown(), Shown::Ask("Cargo.toml".into(), false));
-        open.act(|page, window, cx| page.read_asked(window, cx));
-        assert_eq!(open.shown(), Shown::Ask("sidebar.pdf".into(), false));
+        assert_eq!(
+            open.shown(),
+            Shown::Ask("sidebar.pdf".into(), false),
+            "a kind of file that can't be read isn't asked about"
+        );
         let problem = open.problem();
         assert!(
-            problem.starts_with("Cargo.toml: this isn't a PDF"),
+            problem.starts_with("Cargo.toml: this kind of file can't be imported"),
             "{problem}"
         );
         open.act(|page, window, cx| page.read_asked(window, cx));

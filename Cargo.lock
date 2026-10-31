@@ -4256,6 +4256,7 @@ dependencies = [
  "hayro-syntax",
  "image",
  "kurbo 0.13.1",
+ "markdown",
  "rusqlite",
  "rust-stemmers",
  "stop-words",

@@ -80,24 +80,26 @@ pub fn add_note(write: &mut Write, text: &str) -> Result<Vec<FactId>, Error> {
     Ok(added)
 }
 
-/// Saves an imported file, and the text read from it as the user corrected
-/// it: what facts are found in.
+/// Saves the text facts are found in: read from an imported file, as the
+/// user corrected it, with the file; or pasted or written, with none.
 pub fn import_document(
     write: &mut Write,
-    file_name: &str,
-    bytes: &[u8],
-    media_type: &str,
+    file: Option<DocumentFile>,
     text: &str,
 ) -> Result<DocumentId, Error> {
-    let hash = write.add_file(bytes, media_type)?;
+    let hash = file
+        .as_ref()
+        .map(|file| write.add_file(file.bytes, file.media_type))
+        .transpose()?;
+    let file_name = file.as_ref().map(|file| file.name);
     let document = Uuid::now_v7();
     let now = write.now();
     write.insert(
         Documents,
         document,
         &[
-            documents::FILE_NAME.value(&Some(file_name)),
-            documents::FILE_HASH.value(&Some(hash)),
+            documents::FILE_NAME.value(&file_name),
+            documents::FILE_HASH.value(&hash),
             documents::ADDED_AT.value(&now),
         ],
     )?;
@@ -107,6 +109,13 @@ pub fn import_document(
         &[document_texts::TEXT.value(&text)],
     )?;
     Ok(DocumentId(document))
+}
+
+/// A file a document's text was read from.
+pub struct DocumentFile<'a> {
+    pub name: &'a str,
+    pub bytes: &'a [u8],
+    pub media_type: &'a str,
 }
 
 /// Makes the claim a fact, as a note, and points the claim at it. Nothing
@@ -308,8 +317,7 @@ mod tests {
     use super::*;
     use crate::database::Writer;
     use crate::model::{
-        Application, FactChange, InterviewKind, LineId, ResumeId, citations,
-        fact_changes, sample,
+        Application, FactChange, InterviewKind, LineId, ResumeId, citations, fact_changes, sample,
     };
 
     fn empty() -> Result<Writer, Error> {
@@ -384,18 +392,26 @@ mod tests {
     #[test]
     fn undoing_a_note_deletes_everything_it_added() -> Result<(), Error> {
         let mut writer = empty()?;
-        run(&mut writer, |write| add_note(write, "Organized Code Fest 2019.\nRan a team of 15."))?;
+        run(&mut writer, |write| {
+            add_note(write, "Organized Code Fest 2019.\nRan a team of 15.")
+        })?;
         let live = |writer: &Writer| -> Result<Vec<usize>, Error> {
-            ["documents", "entries", "facts", "fact_sources", "custom_sections"]
-                .iter()
-                .map(|table| {
-                    count(
-                        writer.kron(),
-                        &format!("SELECT count(*) FROM {table} WHERE deleted_at IS NULL"),
-                        [],
-                    )
-                })
-                .collect()
+            [
+                "documents",
+                "entries",
+                "facts",
+                "fact_sources",
+                "custom_sections",
+            ]
+            .iter()
+            .map(|table| {
+                count(
+                    writer.kron(),
+                    &format!("SELECT count(*) FROM {table} WHERE deleted_at IS NULL"),
+                    [],
+                )
+            })
+            .collect()
         };
         assert_eq!(live(&writer)?, [1, 1, 2, 2, 1]);
         assert!(writer.undo()?.is_some());
@@ -409,7 +425,12 @@ mod tests {
     fn an_imported_document_keeps_its_file_and_corrected_text_until_undone() -> Result<(), Error> {
         let mut writer = empty()?;
         let document = run(&mut writer, |write| {
-            import_document(write, "cv.pdf", b"%PDF-", "application/pdf", "Alex Rahman")
+            let file = DocumentFile {
+                name: "cv.pdf",
+                bytes: b"%PDF-",
+                media_type: "application/pdf",
+            };
+            import_document(write, Some(file), "Alex Rahman")
         })?;
         let stored: (String, i64, String) = writer.kron().query_row(
             "SELECT documents.file_name, files.size, document_texts.text
@@ -424,6 +445,25 @@ mod tests {
         writer.undo()?;
         let live = "SELECT count(*) FROM documents WHERE deleted_at IS NULL";
         assert_eq!(count(writer.kron(), live, [])?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn pasted_text_is_a_document_with_no_file() -> Result<(), Error> {
+        let mut writer = empty()?;
+        let document = run(&mut writer, |write| {
+            import_document(write, None, "Alex Rahman")
+        })?;
+        let stored: (Option<String>, Option<Vec<u8>>, String) = writer.kron().query_row(
+            "SELECT documents.file_name, documents.file_hash, document_texts.text
+             FROM documents
+             JOIN document_texts ON document_texts.document_id = documents.id
+             WHERE documents.id = ?1",
+            [document.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(stored, (None, None, "Alex Rahman".to_owned()));
+        assert_eq!(count(writer.kron(), "SELECT count(*) FROM files", [])?, 0);
         Ok(())
     }
 
@@ -502,15 +542,21 @@ mod tests {
         both.dedup();
 
         let review_of_kept = |writer: &Writer| -> Result<Option<String>, Error> {
-            Ok(writer
-                .kron()
-                .query_row("SELECT review FROM facts WHERE id = ?1", [keep.0], |row| row.get(0))?)
+            Ok(writer.kron().query_row(
+                "SELECT review FROM facts WHERE id = ?1",
+                [keep.0],
+                |row| row.get(0),
+            )?)
         };
         // Flagged, so the merge has a review to clear and undo to restore.
-        run(&mut writer, |write| write.set(facts::REVIEW, keep.0, &Some("duplicate")))?;
+        run(&mut writer, |write| {
+            write.set(facts::REVIEW, keep.0, &Some("duplicate"))
+        })?;
         let reviewed_before = review_of_kept(&writer)?;
 
-        run(&mut writer, |write| merge_facts(write, keep, &[keep, merged]))?;
+        run(&mut writer, |write| {
+            merge_facts(write, keep, &[keep, merged])
+        })?;
         let (merged_into, review): (Option<Uuid>, Option<String>) = writer.kron().query_row(
             "SELECT merged.merged_into, kept.review FROM facts AS merged, facts AS kept
              WHERE merged.id = ?1 AND kept.id = ?2",
@@ -538,7 +584,11 @@ mod tests {
 
         let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
         run(&mut writer, |write| confirm_fact(write, latency))?;
-        assert_eq!(changed(writer.kron(), "Ledgerly")?, Vec::new(), "confirming changes nothing");
+        assert_eq!(
+            changed(writer.kron(), "Ledgerly")?,
+            Vec::new(),
+            "confirming changes nothing"
+        );
 
         run(&mut writer, |write| {
             edit_fact(write, latency, "Cut p99 latency of the routing API by 80%.")
@@ -659,7 +709,10 @@ mod tests {
             .into_iter()
             .find(|each| each.id == event.id)
             .map(|each| each.kind);
-        assert!(matches!(undone, Some(JobEventKind::Interview { .. })), "{undone:?}");
+        assert!(
+            matches!(undone, Some(JobEventKind::Interview { .. })),
+            "{undone:?}"
+        );
         Ok(())
     }
 

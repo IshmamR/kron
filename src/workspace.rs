@@ -63,6 +63,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-y", Redo, None),
     ]);
     facts_page::init(cx);
+    import_page::init(cx);
     job_view::init(cx);
     resume_grid::init(cx);
 }

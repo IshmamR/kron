@@ -12,6 +12,7 @@ use super::facts_page::{
     AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden,
 };
 use super::application_view::{CancelEvent, SaveEvent};
+use super::import_page::{Cancel, Paste, Save, Write};
 use super::job_view::{
     Back, SelectNextLine, SelectPreviousLine, ShowApplicationTab, ShowResumeTab,
 };
@@ -60,19 +61,20 @@ pub fn open(window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Splits the groups, in order, into two columns of about the same height.
-fn columns(groups: Vec<Group>) -> [Vec<Group>; 2] {
+/// Splits the groups, in order, into two columns, the taller as short as it
+/// can be.
+fn columns(mut groups: Vec<Group>) -> [Vec<Group>; 2] {
     // A group's title takes about a row.
-    let rows = |group: &Group| group.shortcuts.len() + 1;
-    let half = groups.iter().map(rows).sum::<usize>() / 2;
-    let mut columns = [Vec::new(), Vec::new()];
-    let mut filled = 0;
-    for group in groups {
-        let column = usize::from(filled >= half);
-        filled += rows(&group);
-        columns[column].push(group);
-    }
-    columns
+    let rows: Vec<usize> = groups.iter().map(|group| group.shortcuts.len() + 1).collect();
+    let total: usize = rows.iter().sum();
+    let split = (0..=rows.len())
+        .min_by_key(|&split| {
+            let left: usize = rows[..split].iter().sum();
+            left.max(total - left)
+        })
+        .unwrap_or_default();
+    let right = groups.split_off(split);
+    [groups, right]
 }
 
 struct Group {
@@ -195,6 +197,18 @@ fn groups() -> Vec<Group> {
                 shortcut("Close the add form", vec![Action(Box::new(Dismiss))]),
             ],
         },
+        Group {
+            title: "Import",
+            shortcuts: vec![
+                shortcut("Paste text to import", vec![Action(Box::new(Paste))]),
+                shortcut("Write text to import", vec![Action(Box::new(Write))]),
+                shortcut("Save the text", vec![Action(Box::new(Save))]),
+                shortcut(
+                    "Leave the text without saving",
+                    vec![Action(Box::new(Cancel))],
+                ),
+            ],
+        },
     ]
 }
 
@@ -284,4 +298,26 @@ fn unbound(cx: &App) -> AnyElement {
         .text_color(cx.theme().danger)
         .child("Unbound")
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_taller_column_is_as_short_as_it_can_be() {
+        let group = |size: usize| Group {
+            title: "",
+            shortcuts: (0..size)
+                .map(|_| Shortcut {
+                    description: "",
+                    keys: Vec::new(),
+                })
+                .collect(),
+        };
+        // With titles, 5 4 5 3 rows, then a long group of 15 and one of 5:
+        // filling the first column to half its rows put the long one there.
+        let [left, right] = columns([4, 3, 4, 2, 14, 4].map(group).into());
+        assert_eq!((left.len(), right.len()), (4, 2));
+    }
 }
