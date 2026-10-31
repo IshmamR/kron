@@ -1,0 +1,58 @@
+summary	Frontend developer who cares about the last 10%: loading states, keyboard navigation, and the error message you see when the Wi-Fi drops. One year shipping a React Native app used by 30,000 riders; before that, a lot of late nights on hackathon projects.
+contact	tasnim.chowdhury@example.com
+contact	+880 1812 345 678
+contact	github.com/tasnimc
+contact	tasnimc.dev
+title	Junior Frontend Developer
+organization	Kotha Mobility
+location	Dhaka
+date	Jun 2024 – Present
+bullet	Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+bullet	Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+bullet	Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+bullet	Paired with the backend team to move the fare estimate API from polling to WebSockets.
+bullet	Review about ten pull requests a week and run the Friday demo for the mobile team.
+title	Software Engineering Intern
+organization	Brightcart
+location	Dhaka
+date	Jan 2024 – May 2024
+bullet	Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+bullet	Replaced a hand-written date picker with an accessible component library, removing 1,200 lines of code.
+bullet	Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+title	Bus Koi
+date	2023
+skill	React
+skill	Mapbox
+skill	Firebase
+bullet	A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+bullet	Reached 2,300 users in its first month after a post in a university Facebook group.
+title	Bangla Typing Tutor
+date	2022
+skill	TypeScript
+skill	Web Workers
+bullet	A browser game that teaches the Bijoy keyboard layout; open source, with 140 GitHub stars.
+title	B.Sc. in Computer Science and Engineering
+organization	Eastbridge University
+location	Dhaka
+date	2020 – 2024
+bullet	CGPA 3.71 / 4.00; thesis on predicting bus arrival times from crowd-sourced GPS traces.
+bullet	Teaching assistant for Data Structures (CSE 220) for two semesters.
+skill_group	Languages
+skill	TypeScript
+skill	JavaScript
+skill	Kotlin (basic)
+skill	SQL
+skill_group	Frontend
+skill	React
+skill	React Native
+skill	Next.js
+skill	Tailwind CSS
+skill	Redux Toolkit
+skill_group	Testing and tools
+skill	Jest
+skill	Playwright
+skill	Git
+skill	Figma
+skill	Firebase
+bullet	Organiser, Women in Tech Dhaka (2023 – present): run monthly beginner workshops on Git and React.
+bullet	Speak Bangla (native), English (fluent) and Hindi (conversational).

@@ -5,6 +5,7 @@ mod appearance;
 mod database;
 mod dev_overlay;
 mod import;
+mod llm;
 #[allow(dead_code)] // Parts of it aren't used by the UI yet.
 mod model;
 mod typeset;
@@ -113,6 +114,7 @@ fn main() {
             gpui_kit::init(cx);
             appearance::init(cx);
             dev_overlay::init(cx);
+            llm::init(cx);
             workspace::init(cx);
             let database = match database::open(cx) {
                 Ok(db) => db,

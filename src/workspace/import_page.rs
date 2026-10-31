@@ -2,7 +2,8 @@
 // the device, and its text shown to check and correct before it's saved; or
 // text is pasted or written straight in. What's saved is the text as
 // corrected, since facts are found in it. Once saved, it's shown as an AI
-// model would be sent it, with the user's details hidden. Files added
+// model would be sent it, with the user's details hidden; confirmed, it's
+// sent, and the facts found are saved while the page goes on. Files added
 // together are taken one at a time, each asked about first in case it was
 // added by mistake, as is a file imported before.
 
@@ -10,6 +11,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -29,8 +31,12 @@ use super::parts::{caption, notice};
 use super::redaction_check::{self, RedactionCheck, RedactionCheckEvent};
 use crate::database::{Database, Error};
 use crate::import::{self, Format, Warning, name};
+use crate::llm::{self, Purpose};
 use crate::model::DocumentId;
 use crate::model::commands::{self, DocumentFile};
+use crate::model::extraction::{self, Answer, Extraction};
+use crate::model::redaction::{Identifier, Redaction};
+use crate::model::settings;
 
 const KEY_CONTEXT: &str = "ImportPage";
 /// Past this, lines of text get too long to read comfortably.
@@ -412,7 +418,8 @@ impl ImportPage {
                             cx,
                         );
                     }
-                    this.check(saved_text.clone(), name, window, cx);
+                    let label = file_name.clone().unwrap_or_else(|| "your text".into());
+                    this.check(document, label, saved_text.clone(), name, window, cx);
                 }
                 Err(error) => {
                     eprintln!("import page: couldn't save the document: {error}");
@@ -439,6 +446,8 @@ impl ImportPage {
     /// user's names and the one it seemed to give.
     fn check(
         &mut self,
+        document: DocumentId,
+        label: SharedString,
         text: SharedString,
         name: Option<String>,
         window: &mut Window,
@@ -450,13 +459,22 @@ impl ImportPage {
                 Vec::new()
             });
         names.extend(name);
-        let check = cx.new(|cx| RedactionCheck::new(text, names, window, cx));
-        // Extraction will start on Confirmed; until then both go on.
+        let stand_in = settings::stand_in_name(self.database.read(cx).connection())
+            .unwrap_or_else(|error| {
+                eprintln!("import page: couldn't read the stand-in name: {error}");
+                Identifier::Name.placeholder().to_owned()
+            });
+        let check = cx.new(|cx| RedactionCheck::new(text, names, stand_in, window, cx));
         let subscription =
-            cx.subscribe_in(&check, window, |this, _, event, window, cx| match event {
-                RedactionCheckEvent::Confirmed | RedactionCheckEvent::Dismissed => {
-                    this.next(window, cx)
+            cx.subscribe_in(&check, window, move |this, check, event, window, cx| {
+                if let RedactionCheckEvent::Confirmed = event {
+                    let (text, redaction) = {
+                        let check = check.read(cx);
+                        (check.text(), check.redaction())
+                    };
+                    this.extract(document, label.clone(), text, redaction, window, cx);
                 }
+                this.next(window, cx);
             });
         check.focus_handle(cx).focus(window, cx);
         self.step = Step::Check {
@@ -464,6 +482,117 @@ impl ImportPage {
             _subscription: subscription,
         };
         cx.notify();
+    }
+
+    /// Sends a document saved, as `redaction` has it, for its facts, and saves
+    /// what's found. It runs on while the page goes on, and a notification
+    /// says how it went.
+    fn extract(
+        &mut self,
+        document: DocumentId,
+        label: SharedString,
+        text: SharedString,
+        redaction: Redaction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let provider = match llm::assigned(
+            self.database.read(cx).device_connection(),
+            Purpose::ExtractFacts,
+        ) {
+            Ok(Some(provider)) => provider,
+            Ok(None) => {
+                notify(
+                    Notification::warning(format!(
+                        "To find the facts in {label}, add an AI provider in Settings."
+                    )),
+                    window,
+                    cx,
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("import page: couldn't read the AI provider: {error}");
+                return;
+            }
+        };
+        notify(
+            Notification::info(format!("Finding the facts in {label}…")),
+            window,
+            cx,
+        );
+        let started_at = Utc::now().timestamp_millis();
+        let start = Instant::now();
+        let call = llm::complete(&provider, extraction::request(&redaction.text), cx);
+        let database = self.database.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let reply = call.await;
+            let duration = start.elapsed();
+            let found = match &reply {
+                Ok(reply) => Answer::parse(&reply.response.text())
+                    .map(|answer| Extraction::locate(answer, &text, &redaction))
+                    .map_err(|error| {
+                        eprintln!(
+                            "import page: the model's answer isn't the JSON asked for: {error}"
+                        );
+                        "the model's answer couldn't be read. Try again.".to_owned()
+                    }),
+                Err(error) => Err(error.to_string()),
+            };
+            let message = match &found {
+                Ok(extraction) => {
+                    let mut message = format!("Found {} facts in {label}.", extraction.count());
+                    match extraction.to_review() {
+                        0 => {}
+                        1 => message.push_str(" 1 needs a look."),
+                        count => message.push_str(&format!(" {count} need a look.")),
+                    }
+                    Notification::success(message)
+                }
+                Err(problem) => {
+                    Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
+                }
+            };
+            let saved = cx.update(|_, cx| {
+                database.read(cx).write(cx, move |write| {
+                    let reply = reply.ok();
+                    llm::record(
+                        write,
+                        &llm::Run {
+                            purpose: Purpose::ExtractFacts,
+                            provider: &provider,
+                            started_at,
+                            duration,
+                            reply: reply.as_ref(),
+                            done: found.is_ok(),
+                            document: Some(document.0),
+                        },
+                    )?;
+                    match &found {
+                        Ok(extraction) => extraction::save(write, document, extraction),
+                        Err(_) => Ok(()),
+                    }
+                })
+            });
+            let saved = match saved {
+                Ok(saved) => saved.await,
+                Err(error) => {
+                    eprintln!("import page: {error}");
+                    return;
+                }
+            };
+            let message = match saved {
+                Ok(()) => message,
+                Err(error) => {
+                    eprintln!("import page: couldn't save the facts found: {error}");
+                    Notification::error(format!("Couldn't save the facts found in {label}."))
+                }
+            };
+            if let Err(error) = cx.update(|window, cx| notify(message, window, cx)) {
+                eprintln!("import page: {error}");
+            }
+        })
+        .detach();
     }
 
     /// Which of the files added together is shown, when there are several.
@@ -780,6 +909,14 @@ fn imported_before(connection: &Connection, hash: [u8; 32]) -> Result<Option<Imp
         }))
 }
 
+/// Shows `notification`, where the window has the kit's Root for them: a
+/// test's may not.
+fn notify(notification: Notification, window: &mut Window, cx: &mut App) {
+    if window.root::<Root>().flatten().is_some() {
+        window.push_notification(notification, cx);
+    }
+}
+
 /// Why a file couldn't be read, in words for the user.
 fn error_message(error: import::Error) -> &'static str {
     match error {
@@ -994,7 +1131,7 @@ mod tests {
         );
         assert_eq!(
             open.shown(),
-            Shown::Check("[NAME]\nBackend engineer".into()),
+            Shown::Check("Jordan Ellis\nBackend engineer".into()),
             "then it's shown as it would be sent"
         );
         open.cx.simulate_keystrokes("ctrl-enter");
@@ -1039,7 +1176,7 @@ mod tests {
         open.save();
         assert_eq!(
             open.shown(),
-            Shown::Check("[NAME]\nRust".into()),
+            Shown::Check("Jordan Ellis\nRust".into()),
             "the name typed is hidden too"
         );
         open.cx.simulate_keystrokes("escape");
@@ -1058,7 +1195,7 @@ mod tests {
             page.write("Sami ul Haque\nsami@example.com\n".into(), window, cx)
         });
         open.save();
-        assert_eq!(open.shown(), Shown::Check("[NAME]\n[EMAIL]\n".into()));
+        assert_eq!(open.shown(), Shown::Check("Jordan Ellis\n[EMAIL_1]\n".into()));
     }
 
     #[test]

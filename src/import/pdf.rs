@@ -46,6 +46,9 @@ const TABLE_ROWS: f64 = 0.9;
 /// draw: poppler's `dupMaxPriDelta` and `dupMaxSecDelta`.
 const DUPLICATE_ALONG: f64 = 0.1;
 const DUPLICATE_ACROSS: f64 = 0.2;
+/// A Type 3 glyph with nothing after it on its line is taken to be this wide,
+/// relative to its size: ours, about a lowercase letter's advance.
+const DRAWN_WIDTH: f64 = 0.5;
 
 /// The text of the PDF in `bytes`, in reading order.
 pub fn read(bytes: Vec<u8>) -> Result<Reading, Error> {
@@ -67,6 +70,7 @@ pub fn read(bytes: Vec<u8>) -> Result<Reading, Error> {
         );
         let mut drawn = Drawn::default();
         interpret_page(page, &mut context, &mut drawn);
+        drawn.measure();
         if drawn.picture && drawn.glyphs.is_empty() {
             reading.warnings.push(Warning::NoText { page: number });
         }
@@ -122,6 +126,9 @@ struct Glyph {
     right: f64,
     baseline: f64,
     size: f64,
+    /// A Type 3 glyph, whose advance hayro doesn't give: its right is found
+    /// from what's drawn after it.
+    unmeasured: bool,
 }
 
 impl Glyph {
@@ -154,6 +161,8 @@ struct Drawn {
     picture: bool,
     /// Whether it draws a Type 3 glyph.
     drawn_font: bool,
+    /// Where a Type 3 font draws spaces.
+    spaces: Vec<Point>,
 }
 
 impl<'a> Device<'a> for Drawn {
@@ -184,11 +193,19 @@ impl<'a> Device<'a> for Drawn {
             Some(BfString::String(text)) => text,
             None => return,
         };
-        if text.chars().all(char::is_whitespace) || text.chars().any(icon) {
-            return;
-        }
+        let drawn_font = matches!(glyph, PdfGlyph::Type3(_));
         let transform = transform * glyph_transform;
         let origin = transform * Point::ZERO;
+        if text.chars().all(char::is_whitespace) {
+            // Where a Type 3 font's space is drawn, the glyph before it ends.
+            if drawn_font {
+                self.spaces.push(origin);
+            }
+            return;
+        }
+        if text.chars().any(icon) {
+            return;
+        }
         // Type 3 glyphs are drawings, with no advance to read.
         let advance = match glyph {
             PdfGlyph::Outline(outline) => outline.advance_width().unwrap_or(0.),
@@ -214,7 +231,38 @@ impl<'a> Device<'a> for Drawn {
             right: end.x.max(origin.x),
             baseline: origin.y,
             size,
+            unmeasured: drawn_font,
         });
+    }
+}
+
+impl Drawn {
+    /// Ends each Type 3 glyph where the next glyph or space on its line
+    /// starts, as text is set, so a word's letters touch and the gap a
+    /// space leaves stays; or else a letter's width on from its start.
+    fn measure(&mut self) {
+        for index in 0..self.glyphs.len() {
+            let glyph = &self.glyphs[index];
+            if !glyph.unmeasured {
+                continue;
+            }
+            let on_line = |point: Point| {
+                point.x > glyph.left
+                    && point.x - glyph.left < CHAR_MARGIN * glyph.size
+                    && (point.y - glyph.baseline).abs() < DUPLICATE_ACROSS * glyph.size
+            };
+            let next = self
+                .glyphs
+                .get(index + 1)
+                .map(|next| Point::new(next.left, next.baseline))
+                .into_iter()
+                .chain(self.spaces.iter().copied())
+                .filter(|point| on_line(*point))
+                .map(|point| point.x)
+                .reduce(f64::min);
+            let right = next.unwrap_or(glyph.left + DRAWN_WIDTH * glyph.size);
+            self.glyphs[index].right = right;
+        }
     }
 }
 
@@ -747,6 +795,18 @@ mod tests {
                 "a PDF with text on every page warns about nothing"
             );
         }
+    }
+
+    #[test]
+    fn a_font_drawn_as_pictures_is_read_as_words() {
+        // Chrome prints the variable font Inter as Type 3 fonts.
+        let junior = reading(include_bytes!("../model/extraction/junior.pdf"));
+        let lines = lines(&junior);
+        assert_eq!(lines.first(), Some(&"Tasnim Chowdhury"));
+        assert!(
+            lines.contains(&"Paired with the backend team to move the fare estimate API from polling to WebSockets."),
+            "{lines:#?}"
+        );
     }
 
     #[test]

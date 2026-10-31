@@ -1,6 +1,6 @@
 // Puts placeholders in place of the user's name and of contact details
-// before text is sent to a model. Every way the name is written becomes the
-// same placeholder: the full name, a first or last name alone, and the
+// before text is sent to a model. Every way the name is written becomes one
+// made-up name, which reads as prose where "[NAME]" doesn't: the full name, a first or last name alone, and the
 // initials of author lists ("A. Rahman", "Rahman, A.", "Rahman AR"), so a
 // publication list can't give it away. What's found is shown to the user,
 // who can keep any of it or hide more, before the text is built. The
@@ -90,6 +90,9 @@ pub struct Redaction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Replacement {
     pub identifier: Identifier,
+    /// As sent: the stand-in name, or numbered by value, "[EMAIL_1]", so the model can
+    /// tell two apart and say which is which.
+    pub placeholder: String,
     /// The identifier's bytes in the original text.
     pub original: Range<usize>,
     /// The placeholder's bytes in the redacted text.
@@ -160,17 +163,43 @@ pub fn find(text: &str, names: &[&str], hidden: &[&str]) -> Vec<Found> {
 
 impl Redaction {
     /// `text` with each of `hide`, in order and not overlapping, replaced by
-    /// its placeholder.
-    pub fn new(text: &str, hide: &[Found]) -> Self {
+    /// its placeholder. Every way of writing the name is one name, as
+    /// `name_sent_as` gives it; other identifiers are numbered in order, the
+    /// same value with the same number, in any case.
+    pub fn new(text: &str, hide: &[Found], stand_in: &str) -> Self {
+        let name = name_sent_as(text, stand_in);
         let mut redacted = String::with_capacity(text.len());
         let mut replacements = Vec::with_capacity(hide.len());
+        let mut numbered: Vec<(Identifier, String)> = Vec::new();
         let mut copied = 0;
         for found in hide {
             redacted.push_str(&text[copied..found.range.start]);
             let start = redacted.len();
-            redacted.push_str(found.identifier.placeholder());
+            let placeholder = match found.identifier {
+                Identifier::Name => name.to_owned(),
+                identifier => {
+                    let value = text[found.range.clone()].to_lowercase();
+                    let mut same_kind = numbered
+                        .iter()
+                        .filter(|(numbered, _)| *numbered == identifier);
+                    let number = match same_kind.position(|(_, numbered)| *numbered == value) {
+                        Some(position) => position + 1,
+                        None => {
+                            numbered.push((identifier, value));
+                            numbered
+                                .iter()
+                                .filter(|(numbered, _)| *numbered == identifier)
+                                .count()
+                        }
+                    };
+                    let generic = identifier.placeholder();
+                    format!("{}_{number}]", &generic[..generic.len() - 1])
+                }
+            };
+            redacted.push_str(&placeholder);
             replacements.push(Replacement {
                 identifier: found.identifier,
+                placeholder,
                 redacted: start..redacted.len(),
                 original: found.range.clone(),
             });
@@ -207,6 +236,18 @@ impl Redaction {
             (original_base, redacted_base) = (replacement.original.end, placeholder.end);
         }
         original_base + (redacted - redacted_base)
+    }
+}
+
+/// What the user's name is sent as in `text`: `stand_in`, or "[NAME]" where
+/// `text` already has it, since a quote of it couldn't be told from one of
+/// the user's name.
+pub fn name_sent_as<'a>(text: &str, stand_in: &'a str) -> &'a str {
+    let stand_in = stand_in.trim();
+    if stand_in.is_empty() || text.to_lowercase().contains(&stand_in.to_lowercase()) {
+        Identifier::Name.placeholder()
+    } else {
+        stand_in
     }
 }
 
@@ -455,28 +496,30 @@ fn normalize(word: &str) -> String {
 mod tests {
     use super::*;
 
+    const STAND_IN: &str = "Jordan Ellis";
+
     fn redacted(text: &str, names: &[&str]) -> String {
-        Redaction::new(text, &find(text, names, &[])).text
+        Redaction::new(text, &find(text, names, &[]), STAND_IN).text
     }
 
     #[test]
-    fn every_way_of_writing_the_name_is_one_placeholder() {
+    fn every_way_of_writing_the_name_is_sent_as_one_name() {
         let names = ["Alex Rahman"];
         for (text, expected) in [
-            ("Alex Rahman", "[NAME]"),
-            ("ALEX RAHMAN", "[NAME]"),
-            ("alex rahman", "[NAME]"),
-            ("Alex led it.", "[NAME] led it."),
-            ("Rahman's thesis", "[NAME]'s thesis"),
-            ("Rahman’s thesis", "[NAME]’s thesis"),
-            ("Smith J, Rahman A, Lee K.", "Smith J, [NAME], Lee K."),
+            ("Alex Rahman", "Jordan Ellis"),
+            ("ALEX RAHMAN", "Jordan Ellis"),
+            ("alex rahman", "Jordan Ellis"),
+            ("Alex led it.", "Jordan Ellis led it."),
+            ("Rahman's thesis", "Jordan Ellis's thesis"),
+            ("Rahman’s thesis", "Jordan Ellis’s thesis"),
+            ("Smith J, Rahman A, Lee K.", "Smith J, Jordan Ellis, Lee K."),
             (
                 "Smith, J., Rahman, A., Lee, K.",
-                "Smith, J., [NAME], Lee, K.",
+                "Smith, J., Jordan Ellis, Lee, K.",
             ),
-            ("J. Smith and A. Rahman.", "J. Smith and [NAME]."),
-            ("A.R. Rahman", "[NAME]"),
-            ("Rahman AR, Lee K.", "[NAME], Lee K."),
+            ("J. Smith and A. Rahman.", "J. Smith and Jordan Ellis."),
+            ("A.R. Rahman", "Jordan Ellis"),
+            ("Rahman AR, Lee K.", "Jordan Ellis, Lee K."),
         ] {
             assert_eq!(redacted(text, &names), expected, "{text}");
         }
@@ -485,17 +528,17 @@ mod tests {
     #[test]
     fn particles_and_hyphens_stay_inside_the_name() {
         for (names, text, expected) in [
-            (["Sami ul Haque"], "Sami ul Haque", "[NAME]"),
-            (["Sami ul Haque"], "Sami-ul Haque wrote", "[NAME] wrote"),
-            (["Sami ul Haque"], "Haque ul", "[NAME] ul"),
-            (["Daan van der Velde"], "Van der Velde, D.", "[NAME]"),
+            (["Sami ul Haque"], "Sami ul Haque", "Jordan Ellis"),
+            (["Sami ul Haque"], "Sami-ul Haque wrote", "Jordan Ellis wrote"),
+            (["Sami ul Haque"], "Haque ul", "Jordan Ellis ul"),
+            (["Daan van der Velde"], "Van der Velde, D.", "Jordan Ellis"),
             (
                 ["Omar al-Farsi"],
                 "Omar Al-Farsi and al Farsi",
-                "[NAME] and [NAME]",
+                "Jordan Ellis and Jordan Ellis",
             ),
-            (["Siobhán O'Neill"], "Siobhán O’Neill's", "[NAME]'s"),
-            (["Ronan McDonald"], "R. McDonald", "[NAME]"),
+            (["Siobhán O'Neill"], "Siobhán O’Neill's", "Jordan Ellis's"),
+            (["Ronan McDonald"], "R. McDonald", "Jordan Ellis"),
         ] {
             assert_eq!(redacted(text, &names), expected, "{text}");
         }
@@ -509,7 +552,7 @@ mod tests {
         }
         assert_eq!(
             redacted("Ian Rahman I led it. In 2020 I joined.", &["Ian Rahman"]),
-            "[NAME] I led it. In 2020 I joined.",
+            "Jordan Ellis I led it. In 2020 I joined.",
             "\"I\" is a word, not an initial, when no punctuation closes it"
         );
     }
@@ -521,7 +564,7 @@ mod tests {
                 "Alex R. Rahman, born Alexander",
                 &["Alex Rahman", "Alexander Rahman"]
             ),
-            "[NAME], born [NAME]"
+            "Jordan Ellis, born Jordan Ellis"
         );
     }
 
@@ -529,23 +572,23 @@ mod tests {
     fn contacts_are_replaced() {
         let names = ["Alex Rahman"];
         for (text, expected) in [
-            ("alex.rahman@example.com", "[EMAIL]"),
-            ("mailto:a.r@mail.example.org.", "[EMAIL]."),
-            ("+1 (555) 123-4567", "[PHONE]"),
-            ("Call +880 1712-345678 now", "Call [PHONE] now"),
-            ("555.123.4567", "[PHONE]"),
-            ("https://github.com/alexr.", "[LINK]."),
-            ("www.example.org/about", "[LINK]"),
-            ("linkedin.com/in/someone", "[LINK]"),
-            ("alexrahman.dev", "[LINK]"),
-            ("alex@alexrahman.dev", "[EMAIL]"),
+            ("alex.rahman@example.com", "[EMAIL_1]"),
+            ("mailto:a.r@mail.example.org.", "[EMAIL_1]."),
+            ("+1 (555) 123-4567", "[PHONE_1]"),
+            ("Call +880 1712-345678 now", "Call [PHONE_1] now"),
+            ("555.123.4567", "[PHONE_1]"),
+            ("https://github.com/alexr.", "[LINK_1]."),
+            ("www.example.org/about", "[LINK_1]"),
+            ("linkedin.com/in/someone", "[LINK_1]"),
+            ("alexrahman.dev", "[LINK_1]"),
+            ("alex@alexrahman.dev", "[EMAIL_1]"),
             (
                 "GitHub: alex-r, X: AlexR. Mail alex_99",
-                "GitHub: [HANDLE], X: [HANDLE]. Mail [HANDLE]",
+                "GitHub: [HANDLE_1], X: [HANDLE_2]. Mail [HANDLE_3]",
             ),
-            ("@alex", "[HANDLE]"),
-            ("alexrahman", "[HANDLE]"),
-            ("AlexRahman's", "[HANDLE]'s"),
+            ("@alex", "[HANDLE_1]"),
+            ("alexrahman", "[HANDLE_1]"),
+            ("AlexRahman's", "[HANDLE_1]'s"),
         ] {
             assert_eq!(redacted(text, &names), expected, "{text}");
         }
@@ -579,8 +622,8 @@ mod tests {
         let text = "Built Kafka at Northwind for northwind.example; used C++ and Northwinds.";
         let found = find(text, &["Alex Rahman"], &["northwind", "C++", " "]);
         assert_eq!(
-            Redaction::new(text, &found).text,
-            "Built Kafka at [HIDDEN] for [HIDDEN].example; used [HIDDEN] and Northwinds."
+            Redaction::new(text, &found, STAND_IN).text,
+            "Built Kafka at [HIDDEN_1] for [HIDDEN_1].example; used [HIDDEN_2] and Northwinds."
         );
     }
 
@@ -593,26 +636,44 @@ mod tests {
             .filter(|found| found.identifier != Identifier::Email)
             .collect();
         assert_eq!(
-            Redaction::new(text, &hidden).text,
-            "[NAME], alex@example.com"
+            Redaction::new(text, &hidden, STAND_IN).text,
+            "Jordan Ellis, alex@example.com"
+        );
+    }
+
+    #[test]
+    fn a_text_that_has_the_stand_in_gets_a_placeholder_instead() {
+        let text = "Alex Rahman\nMentored JORDAN ELLIS.";
+        assert_eq!(
+            redacted(text, &["Alex Rahman"]),
+            "[NAME]\nMentored JORDAN ELLIS."
+        );
+    }
+
+    #[test]
+    fn the_same_value_has_the_same_number() {
+        let text = "Mail Alex@Example.com or alex@example.com, not ops@example.com.";
+        assert_eq!(
+            redacted(text, &["Alex Rahman"]),
+            "Mail [EMAIL_1] or [EMAIL_1], not [EMAIL_2]."
         );
     }
 
     #[test]
     fn quotes_in_the_redacted_text_map_back_to_the_original() {
         let text = "Alex Rahman\nalex@example.com\nLed Rahman's team of 12.";
-        let redaction = Redaction::new(text, &find(text, &["Alex Rahman"], &[]));
-        assert_eq!(redaction.text, "[NAME]\n[EMAIL]\nLed [NAME]'s team of 12.");
+        let redaction = Redaction::new(text, &find(text, &["Alex Rahman"], &[]), STAND_IN);
+        assert_eq!(redaction.text, "Jordan Ellis\n[EMAIL_1]\nLed Jordan Ellis's team of 12.");
         let original = |quote: &str| {
             let start = redaction.text.find(quote).expect("a quote in the text");
             &text[redaction.original(start..start + quote.len())]
         };
         assert_eq!(
-            original("Led [NAME]'s team of 12."),
+            original("Led Jordan Ellis's team of 12."),
             "Led Rahman's team of 12."
         );
-        assert_eq!(original("[EMAIL]"), "alex@example.com");
-        assert_eq!(original("AME]\n[EM"), "Alex Rahman\nalex@example.com");
+        assert_eq!(original("[EMAIL_1]"), "alex@example.com");
+        assert_eq!(original("llis\n[EM"), "Alex Rahman\nalex@example.com");
         assert_eq!(original("team of 12."), "team of 12.");
         assert_eq!(original("\n"), "\n");
     }

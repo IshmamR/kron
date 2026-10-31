@@ -1,3 +1,4 @@
+mod ai_settings;
 mod application_view;
 mod fact_list;
 mod facts_page;
@@ -10,6 +11,7 @@ mod previews;
 mod redaction_check;
 mod resume_grid;
 mod shortcuts;
+mod stand_in_name;
 #[cfg(test)]
 mod testing;
 
@@ -35,11 +37,14 @@ use gpui_kit::{
 use crate::appearance::{Appearance, Motion};
 use crate::database::schema::{self, Facts};
 use crate::database::{Changed, Database};
+use crate::llm::{self, Purpose};
 use crate::model::settings::{self, DeviceSettings, LastPage};
 use crate::model::{Application, FactId, JobId, LineId};
 use crate::window;
+use ai_settings::AiSettings;
 use facts_page::FactsPage;
 use import_page::ImportPage;
+use stand_in_name::StandInName;
 use job_view::{JobView, JobViewEvent};
 use onboarding::{Onboarding, OnboardingEvent};
 use previews::Previews;
@@ -110,6 +115,8 @@ pub struct Workspace {
     job_view: Entity<JobView>,
     facts_page: Entity<FactsPage>,
     import_page: Entity<ImportPage>,
+    ai_settings: Entity<AiSettings>,
+    stand_in_name: Entity<StandInName>,
     /// Shown in place of everything else while the user has nothing yet.
     onboarding: Option<Entity<Onboarding>>,
     _subscriptions: Vec<Subscription>,
@@ -125,7 +132,12 @@ impl Render for Workspace {
             Page::Settings => div()
                 .track_focus(&self.focus_handle)
                 .size_full()
-                .child(settings_page(self.database.clone()))
+                .child(settings_page(
+                    self.database.clone(),
+                    self.ai_settings.clone(),
+                    self.stand_in_name.clone(),
+                    cx,
+                ))
                 .into_any_element(),
         };
 
@@ -191,6 +203,8 @@ impl Workspace {
         let facts_page =
             cx.new(|cx| FactsPage::new(database.clone(), window, cx));
         let import_page = cx.new(|cx| ImportPage::new(database.clone(), window, cx));
+        let ai_settings = cx.new(|cx| AiSettings::new(database.clone(), window, cx));
+        let stand_in_name = cx.new(|cx| StandInName::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
 
         let mut subscriptions = vec![
@@ -271,6 +285,8 @@ impl Workspace {
             job_view,
             facts_page,
             import_page,
+            ai_settings,
+            stand_in_name,
             onboarding,
             _subscriptions: subscriptions,
         };
@@ -564,8 +580,14 @@ fn apply_settings(stored: settings::Settings, cx: &mut App) {
 }
 
 /// Each choice is written to `settings`; the workspace applies it once the
-/// write commits.
-fn settings_page(database: Entity<Database>) -> AnyElement {
+/// write commits. The AI provider and model are this device's.
+fn settings_page(
+    database: Entity<Database>,
+    ai_settings: Entity<AiSettings>,
+    stand_in_name: Entity<StandInName>,
+    cx: &App,
+) -> AnyElement {
+    let ai = ai_page(database.clone(), ai_settings, stand_in_name, cx);
     let options = Appearance::ALL
         .into_iter()
         .map(|appearance| {
@@ -630,7 +652,122 @@ fn settings_page(database: Entity<Database>) -> AnyElement {
                 ),
             ),
         )
+        .page(ai)
         .into_any_element()
+}
+
+/// The provider and model facts are found with, the provider's key, and the
+/// name sent in place of the user's.
+fn ai_page(
+    database: Entity<Database>,
+    ai_settings: Entity<AiSettings>,
+    stand_in_name: Entity<StandInName>,
+    cx: &App,
+) -> SettingPage {
+    let assigned = {
+        let database = database.clone();
+        move |cx: &App| {
+            llm::assigned(database.read(cx).device_connection(), Purpose::ExtractFacts)
+                .unwrap_or_else(|error| {
+                    eprintln!("workspace: couldn't read the AI provider: {error}");
+                    None
+                })
+        }
+    };
+    let vendors = llm::VENDORS
+        .iter()
+        .map(|(id, name)| (SharedString::from(*id), SharedString::from(*name)))
+        .collect();
+    let vendor = assigned(cx).map_or(llm::VENDORS[0].0.to_owned(), |provider| provider.vendor);
+    let models = llm::models(&vendor)
+        .into_iter()
+        .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
+        .collect();
+    SettingPage::new("AI").group(
+        SettingGroup::new()
+            .title("Finding facts")
+            .item(
+                SettingItem::new(
+                    "Provider",
+                    SettingField::dropdown(
+                        vendors,
+                        {
+                            let assigned = assigned.clone();
+                            move |cx| {
+                                assigned(cx)
+                                    .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
+                                        provider.vendor
+                                    })
+                                    .into()
+                            }
+                        },
+                        {
+                            let assigned = assigned.clone();
+                            let database = database.clone();
+                            move |vendor, cx| {
+                                let model = assigned(cx)
+                                    .filter(|provider| provider.vendor == vendor.as_ref())
+                                    .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
+                                        provider.model
+                                    });
+                                database.read(cx).queue(move |write| {
+                                    llm::set_default(write, &vendor, &model).map(|_| ())
+                                });
+                            }
+                        },
+                    ),
+                )
+                .description(
+                    "Your CV is sent here to find its facts, with your name and contact details \
+                     hidden first.",
+                ),
+            )
+            .item(
+                SettingItem::new(
+                    "Model",
+                    SettingField::dropdown(
+                        models,
+                        {
+                            let assigned = assigned.clone();
+                            move |cx| {
+                                assigned(cx)
+                                    .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
+                                        provider.model
+                                    })
+                                    .into()
+                            }
+                        },
+                        move |model, cx| {
+                            let vendor = assigned(cx)
+                                .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
+                                    provider.vendor
+                                });
+                            database.read(cx).queue(move |write| {
+                                llm::set_default(write, &vendor, &model).map(|_| ())
+                            });
+                        },
+                    ),
+                )
+                .description("Flash is fast and costs well under a cent per CV."),
+            )
+            .item(
+                SettingItem::new(
+                    "API key",
+                    SettingField::render(move |_, _, _| ai_settings.clone()),
+                )
+                .description("Kept in your system keyring, never in Kron's data."),
+            )
+            .item(
+                SettingItem::new(
+                    "Your name is sent as",
+                    SettingField::render(move |_, _, _| stand_in_name.clone()),
+                )
+                .description(
+                    "A made-up name the AI sees in place of yours, so it reads your CV as \
+                     written. Yours is put back in what comes back.",
+                ),
+            ),
+    )
 }
 
 #[cfg(test)]

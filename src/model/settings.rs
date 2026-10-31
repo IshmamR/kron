@@ -124,6 +124,39 @@ pub fn set_motion(write: &mut Write, motion: Motion) -> Result<(), Error> {
     write.set(settings::MOTION, 1, &motion.stored())
 }
 
+/// The made-up name sent to models in place of the user's.
+pub fn stand_in_name(connection: &Connection) -> Result<String, Error> {
+    Ok(connection.query_row("SELECT stand_in_name FROM settings", [], |row| row.get(0))?)
+}
+
+/// Why a stand-in name wasn't saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    Empty,
+    /// Already in the user's facts, so putting their name back where a model
+    /// wrote it would also change that.
+    InFacts,
+}
+
+/// Saves `name` as the stand-in, or says why not.
+pub fn set_stand_in_name(write: &mut Write, name: &str) -> Result<Option<Refused>, Error> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(Some(Refused::Empty));
+    }
+    let in_facts: bool = write
+        .prepare(
+            "SELECT EXISTS (SELECT 1 FROM facts
+                            WHERE deleted_at IS NULL AND instr(lower(text), lower(?1)) > 0)",
+        )?
+        .query_row([name], |row| row.get(0))?;
+    if in_facts {
+        return Ok(Some(Refused::InFacts));
+    }
+    write.set(settings::STAND_IN_NAME, 1, &name)?;
+    Ok(None)
+}
+
 pub fn set_sidebar_collapsed(write: &mut Write, collapsed: bool) -> Result<(), Error> {
     write.set(device_settings::SIDEBAR_COLLAPSED, 1, &collapsed)
 }
@@ -163,6 +196,7 @@ pub fn save_window(write: &mut Write, window: SavedWindow) -> Result<(), Error> 
 mod tests {
     use super::*;
     use crate::database::Writer;
+    use crate::model::commands;
 
     #[test]
     fn settings_start_at_their_defaults() -> Result<(), Error> {
@@ -209,6 +243,23 @@ mod tests {
         // Leaving the job page forgets the job, as the schema's CHECK asks.
         writer.execute(|write| set_last_page(write, LastPage::Facts))?;
         assert_eq!(DeviceSettings::read(writer.device())?.last_page, LastPage::Facts);
+        Ok(())
+    }
+
+    #[test]
+    fn a_stand_in_name_in_the_facts_or_empty_is_refused() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        assert_eq!(stand_in_name(writer.kron())?, "Jordan Ellis");
+        writer.execute(|write| commands::add_note(write, "Mentored Sam Okafor, a new hire."))?;
+        for (name, refused) in [
+            ("  ", Some(Refused::Empty)),
+            ("sam okafor", Some(Refused::InFacts)),
+            (" Riley Novak ", None),
+        ] {
+            let (saved, _) = writer.execute(|write| set_stand_in_name(write, name))?;
+            assert_eq!(saved, refused, "{name:?}");
+        }
+        assert_eq!(stand_in_name(writer.kron())?, "Riley Novak");
         Ok(())
     }
 }

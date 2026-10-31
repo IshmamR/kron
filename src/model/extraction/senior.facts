@@ -1,0 +1,71 @@
+summary	Staff engineer who likes boring infrastructure and the people who keep it running. Eleven years building payment and data systems in Go, Java and Kotlin; I have spent the last four making a 300-engineer company's deploys safe enough that nobody talks about them.
+contact	daniel.ferreira@example.com
+contact	+49 151 2345 6789
+contact	linkedin.com/in/danielferreira-eng
+contact	github.com/dferreira
+title	Staff Software Engineer, Platform
+organization	Lumenpay GmbH
+location	Berlin, Germany
+date	Mar 2021 – Present
+bullet	Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+bullet	Set up the payments reliability programme: SLOs for 14 critical flows, an error-budget policy agreed with product, and a weekly review I still chair.
+bullet	Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+bullet	Cut the platform group's cloud spend by €1.1M a year by rightsizing Kubernetes node pools and moving batch jobs to spot instances.
+bullet	Mentor six engineers across three teams; two have since been promoted to senior.
+bullet	Wrote Lumenpay's incident review guide and trained 40 incident commanders.
+title	Senior Software Engineer
+organization	Lumenpay GmbH
+location	Berlin, Germany
+date	Jun 2018 – Feb 2021
+bullet	Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+bullet	Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+bullet	Led a team of five through PCI DSS Level 1 certification for the card platform.
+title	Software Engineer
+organization	Tabuleiro Analytics
+location	Lisbon, Portugal
+date	Sep 2015 – May 2018
+bullet	Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+bullet	Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+bullet	Gave the company's first internal talks on property-based testing; the practice is now part of onboarding.
+title	Junior Developer
+organization	Correio Digital
+location	Porto, Portugal
+date	Jan 2013 – Aug 2015
+bullet	Maintained the parcel tracking website (Java, Spring MVC) used by 1.2 million customers a month.
+bullet	Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+bullet	“Deploys nobody notices”, GopherCon EU 2024, Berlin.
+bullet	“What our ledger migration taught us about idempotency”, Lumenpay engineering blog, 2023.
+title	M.Sc. in Informatics Engineering
+organization	University of Porto
+location	Porto, Portugal
+date	2011 – 2013
+bullet	Thesis on consistency models in geo-replicated databases, graded 18/20.
+title	B.Sc. in Informatics Engineering
+organization	University of Porto
+location	Porto, Portugal
+date	2008 – 2011
+title	Certified Kubernetes Administrator (CKA)
+organization	The Linux Foundation
+date	2022
+skill_group	Languages
+skill	Go
+skill	Java
+skill	Kotlin
+skill	SQL
+skill	Python
+skill_group	Infrastructure
+skill	Kubernetes
+skill	Terraform
+skill	Argo Rollouts
+skill	CockroachDB
+skill	PostgreSQL
+skill	Kafka
+skill_group	Practices
+skill	SRE
+skill	incident management
+skill	capacity planning
+skill	technical writing
+skill_group	Spoken
+skill	Portuguese (native)
+skill	English (fluent)
+skill	German (B2)

@@ -1,0 +1,62 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=16mm,top=14mm,bottom=14mm]{geometry}
+\usepackage{fontspec}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{xcolor}
+\definecolor{ink}{HTML}{7A2E1F}
+\titleformat{\section}{\large\scshape\color{ink}}{}{0pt}{}[\vspace{-4pt}\rule{\textwidth}{0.6pt}]
+\titlespacing*{\section}{0pt}{9pt}{4pt}
+\setlist[itemize]{leftmargin=14pt,itemsep=1pt,topsep=2pt,parsep=0pt}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\begin{document}
+
+{\fontsize{24}{28}\selectfont\color{ink} Daniel Ferreira}\\[3pt]
+daniel.ferreira@example.com \textbar{} +49 151 2345 6789 \textbar{} linkedin.com/in/danielferreira-eng \textbar{} github.com/dferreira \textbar{} Berlin, Germany\\[6pt]
+Staff engineer who likes boring infrastructure and the people who keep it running. Eleven years building payment and data systems in Go, Java and Kotlin; I have spent the last four making a 300-engineer company's deploys safe enough that nobody talks about them.
+\section*{Experience}
+\textbf{Staff Software Engineer, Platform}, Lumenpay GmbH \textit{(Berlin, Germany)} \hfill Mar 2021 -- Present\\[-2pt]
+\begin{itemize}
+\item Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64\% in its first year.
+\item Set up the payments reliability programme: SLOs for 14 critical flows, an error-budget policy agreed with product, and a weekly review I still chair.
+\item Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+\item Cut the platform group's cloud spend by €1.1M a year by rightsizing Kubernetes node pools and moving batch jobs to spot instances.
+\item Mentor six engineers across three teams; two have since been promoted to senior.
+\item Wrote Lumenpay's incident review guide and trained 40 incident commanders.
+\end{itemize}
+\textbf{Senior Software Engineer}, Lumenpay GmbH \textit{(Berlin, Germany)} \hfill Jun 2018 -- Feb 2021\\[-2pt]
+\begin{itemize}
+\item Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+\item Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+\item Led a team of five through PCI DSS Level 1 certification for the card platform.
+\end{itemize}
+\textbf{Software Engineer}, Tabuleiro Analytics \textit{(Lisbon, Portugal)} \hfill Sep 2015 -- May 2018\\[-2pt]
+\begin{itemize}
+\item Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+\item Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+\item Gave the company's first internal talks on property-based testing; the practice is now part of onboarding.
+\end{itemize}
+\textbf{Junior Developer}, Correio Digital \textit{(Porto, Portugal)} \hfill Jan 2013 -- Aug 2015\\[-2pt]
+\begin{itemize}
+\item Maintained the parcel tracking website (Java, Spring MVC) used by 1.2 million customers a month.
+\item Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+\end{itemize}
+\section*{Talks and writing}
+\begin{itemize}\item “Deploys nobody notices”, GopherCon EU 2024, Berlin.\item “What our ledger migration taught us about idempotency”, Lumenpay engineering blog, 2023.\end{itemize}
+\section*{Education}
+\textbf{M.Sc. in Informatics Engineering}, University of Porto \textit{(Porto, Portugal)} \hfill 2011 -- 2013\\[-2pt]
+\begin{itemize}
+\item Thesis on consistency models in geo-replicated databases, graded 18/20.
+\end{itemize}
+\textbf{B.Sc. in Informatics Engineering}, University of Porto \textit{(Porto, Portugal)} \hfill 2008 -- 2011\\[-2pt]
+\vspace{3pt}
+\section*{Certifications}
+\textbf{Certified Kubernetes Administrator (CKA)}, The Linux Foundation \hfill 2022\\[-2pt]
+\vspace{3pt}
+\section*{Skills}
+\textbf{Languages:} Go, Java, Kotlin, SQL, Python\\
+\textbf{Infrastructure:} Kubernetes, Terraform, Argo Rollouts, CockroachDB, PostgreSQL, Kafka\\
+\textbf{Practices:} SRE, incident management, capacity planning, technical writing\\
+\textbf{Spoken:} Portuguese (native), English (fluent), German (B2)\\
+\end{document}

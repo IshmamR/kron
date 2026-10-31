@@ -395,6 +395,17 @@ impl Write<'_> {
         Ok(statement)
     }
 
+    /// Prepares a read of device.sqlite, as `prepare` does of kron.sqlite.
+    pub fn prepare_device(&self, sql: &str) -> Result<CachedStatement<'_>, Error> {
+        let statement = self.device.prepare_cached(sql)?;
+        if !statement.readonly() {
+            return Err(Error::Misuse(format!(
+                "writes go through insert, set, update, clear or delete: {sql}"
+            )));
+        }
+        Ok(statement)
+    }
+
     /// Leaves the command off the undo history, like installing the bundled
     /// templates on start: undoing that would take them away.
     pub fn not_undoable(&mut self) {

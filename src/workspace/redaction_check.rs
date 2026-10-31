@@ -2,8 +2,7 @@
 // name, usernames and contact details hidden. Each one hidden is
 // highlighted; a click sends it as written, another hides it again. A word
 // or phrase it missed, like a colleague's name, can be hidden too. Nothing
-// here is stored: the text is redacted again from what's shown when it's
-// sent.
+// here is stored: the text is redacted from what's shown when it's sent.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -38,6 +37,8 @@ pub fn init(cx: &mut App) {
 pub struct RedactionCheck {
     text: SharedString,
     names: Vec<String>,
+    /// The made-up name the user's is sent as.
+    stand_in: String,
     /// Words and phrases the user added to hide.
     hidden: Vec<String>,
     found: Vec<Found>,
@@ -88,20 +89,19 @@ impl Render for RedactionCheck {
             };
             (found.range.clone(), style)
         });
+        let name = redaction::name_sent_as(&self.text, &self.stand_in);
         let tips: Vec<(Range<usize>, SharedString)> = self
             .found
             .iter()
             .map(|found| {
+                let sent_as = match found.identifier {
+                    Identifier::Name => name,
+                    identifier => identifier.placeholder(),
+                };
                 let tip = if self.kept.contains(&found.range) {
-                    format!(
-                        "Sent as written. Click to hide it as {}.",
-                        found.identifier.placeholder()
-                    )
+                    format!("Sent as written. Click to send it as {sent_as}.")
                 } else {
-                    format!(
-                        "Sent as {}. Click to send it as written.",
-                        found.identifier.placeholder()
-                    )
+                    format!("Sent as {sent_as}. Click to send it as written.")
                 };
                 (found.range.clone(), tip.into())
             })
@@ -195,10 +195,11 @@ impl Render for RedactionCheck {
 
 impl RedactionCheck {
     /// Checks `text`, hiding the names in `names`, as the user's Name facts
-    /// and the document give them.
+    /// and the document give them, behind `stand_in`.
     pub fn new(
         text: SharedString,
         names: Vec<String>,
+        stand_in: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -213,6 +214,7 @@ impl RedactionCheck {
         let mut check = Self {
             text,
             names,
+            stand_in,
             hidden: Vec::new(),
             found: Vec::new(),
             kept: HashSet::new(),
@@ -224,8 +226,12 @@ impl RedactionCheck {
         check
     }
 
+    /// The text checked, as written.
+    pub fn text(&self) -> SharedString {
+        self.text.clone()
+    }
+
     /// The text as it would be sent.
-    #[allow(dead_code)] // Extraction sends it; for now only tests read it.
     pub fn redaction(&self) -> Redaction {
         let hide: Vec<Found> = self
             .found
@@ -233,7 +239,7 @@ impl RedactionCheck {
             .filter(|found| !self.kept.contains(&found.range))
             .cloned()
             .collect();
-        Redaction::new(&self.text, &hide)
+        Redaction::new(&self.text, &hide, &self.stand_in)
     }
 
     fn find(&mut self) {
@@ -333,7 +339,13 @@ mod tests {
             init(cx);
         });
         app.add_window_view(|window, cx| {
-            RedactionCheck::new(TEXT.into(), vec!["Alex Rahman".to_owned()], window, cx)
+            RedactionCheck::new(
+                TEXT.into(),
+                vec!["Alex Rahman".to_owned()],
+                "Jordan Ellis".to_owned(),
+                window,
+                cx,
+            )
         })
     }
 
@@ -347,12 +359,12 @@ mod tests {
         let (check, cx) = open(&mut app);
         assert_eq!(
             sent(&check, cx),
-            "[NAME]\n[EMAIL] · [LINK]\nLed Kafka at Northwind."
+            "Jordan Ellis\n[EMAIL_1] · [LINK_1]\nLed Kafka at Northwind."
         );
         check.update(cx, |check, cx| check.toggle(1, cx));
         assert_eq!(
             sent(&check, cx),
-            "[NAME]\nalex@example.com · [LINK]\nLed Kafka at Northwind."
+            "Jordan Ellis\nalex@example.com · [LINK_1]\nLed Kafka at Northwind."
         );
         assert_eq!(
             check.read_with(cx, |check, _| check.summary()),
@@ -361,7 +373,7 @@ mod tests {
         check.update(cx, |check, cx| check.toggle(1, cx));
         assert_eq!(
             sent(&check, cx),
-            "[NAME]\n[EMAIL] · [LINK]\nLed Kafka at Northwind.",
+            "Jordan Ellis\n[EMAIL_1] · [LINK_1]\nLed Kafka at Northwind.",
             "a second click hides it again"
         );
     }
@@ -377,7 +389,7 @@ mod tests {
         check.update_in(cx, |check, window, cx| check.hide(window, cx));
         assert_eq!(
             sent(&check, cx),
-            "[NAME]\n[EMAIL] · [LINK]\nLed Kafka at [HIDDEN]."
+            "Jordan Ellis\n[EMAIL_1] · [LINK_1]\nLed Kafka at [HIDDEN_1]."
         );
         assert_eq!(also.read_with(cx, |also, _| also.value().to_string()), "");
 
@@ -388,7 +400,7 @@ mod tests {
         check.update_in(cx, |check, window, cx| check.hide(window, cx));
         assert_eq!(
             sent(&check, cx),
-            "[NAME]\n[HIDDEN] · [LINK]\nLed Kafka at [HIDDEN].",
+            "Jordan Ellis\n[HIDDEN_1] · [LINK_1]\nLed Kafka at [HIDDEN_2].",
             "what's kept is hidden once the user asks to hide it"
         );
     }

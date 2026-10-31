@@ -16,6 +16,8 @@ hayro-interpret = "0.7.0"
 hayro-syntax = "0.7.2"
 # GPUI's own, for building its images from rendered pages.
 image = { version = "0.25.10", default-features = false }
+# API keys, in the OS keyring.
+keyring = "4.2.0"
 # hayro's geometry types.
 kurbo = "0.13.1"
 # CommonMark and GFM, already built for gpui-component; reads imported
@@ -23,12 +25,19 @@ kurbo = "0.13.1"
 markdown = "1.0.0"
 # Already built for gpui and Typst; finds contact details to redact.
 regex = "1.13.1"
+# Calls to AI models, with usage and the catalog's prices (docs/storage.md).
+rig-core = { version = "0.44.0", features = ["reqwest"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
 rust-stemmers = "1.2.0"
+# Extraction's answers, read from the model's JSON.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 # NLTK's English list: the Snowball project's, matching rust-stemmers.
 stop-words = { version = "0.10.1", default-features = false, features = ["nltk"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 text2num = { version = "2.8.0", default-features = false, features = ["std", "en"] }
+# rig's HTTP client needs its runtime; GPUI doesn't run one.
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "time"] }
 typst = "0.15.1"
 typst-kit = { version = "0.15.1", features = ["scan-fonts", "embedded-fonts"] }
 typst-layout = "0.15.1"

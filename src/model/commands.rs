@@ -311,12 +311,18 @@ pub fn delete_event(write: &mut Write, event: EventId) -> Result<(), Error> {
 /// The custom section for entries without one of their own, made the first
 /// time it's needed.
 pub fn other_section(write: &mut Write) -> Result<Uuid, Error> {
+    custom_section(write, OTHER_SECTION)
+}
+
+/// The custom section named `name`, in any case, made the first time it's
+/// needed.
+pub fn custom_section(write: &mut Write, name: &str) -> Result<Uuid, Error> {
     let existing: Option<Uuid> = write
         .prepare(
-            "SELECT id FROM custom_sections WHERE name = ?1 AND deleted_at IS NULL
+            "SELECT id FROM custom_sections WHERE name = ?1 COLLATE NOCASE AND deleted_at IS NULL
              ORDER BY id LIMIT 1",
         )?
-        .query_row([OTHER_SECTION], |row| row.get(0))
+        .query_row([name], |row| row.get(0))
         .optional()?;
     if let Some(section) = existing {
         return Ok(section);
@@ -327,7 +333,7 @@ pub fn other_section(write: &mut Write) -> Result<Uuid, Error> {
         CustomSections,
         section,
         &[
-            custom_sections::NAME.value(&OTHER_SECTION),
+            custom_sections::NAME.value(&name),
             custom_sections::ADDED_AT.value(&now),
         ],
     )?;
