@@ -1,5 +1,6 @@
 mod application;
 pub mod commands;
+pub mod redaction;
 #[cfg(any(debug_assertions, test))]
 pub mod sample;
 mod section;

@@ -16,6 +16,7 @@ use super::import_page::{Cancel, Paste, Save, Write};
 use super::job_view::{
     Back, SelectNextLine, SelectPreviousLine, ShowApplicationTab, ShowResumeTab,
 };
+use super::redaction_check::Confirm as ConfirmHidden;
 use super::resume_grid::{OpenSelected, SelectLeft, SelectRight, ShowFilter};
 use super::{Redo, ShowShortcuts, Undo, resume_grid};
 
@@ -206,6 +207,10 @@ fn groups() -> Vec<Group> {
                 shortcut(
                     "Leave the text without saving",
                     vec![Action(Box::new(Cancel))],
+                ),
+                shortcut(
+                    "Confirm what's hidden from the AI",
+                    vec![Action(Box::new(ConfirmHidden))],
                 ),
             ],
         },

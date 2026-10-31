@@ -7,6 +7,7 @@ mod job_view;
 mod onboarding;
 mod parts;
 mod previews;
+mod redaction_check;
 mod resume_grid;
 mod shortcuts;
 #[cfg(test)]
@@ -66,6 +67,7 @@ pub fn init(cx: &mut App) {
     ]);
     facts_page::init(cx);
     import_page::init(cx);
+    redaction_check::init(cx);
     job_view::init(cx);
     resume_grid::init(cx);
 }

@@ -21,6 +21,8 @@ kurbo = "0.13.1"
 # CommonMark and GFM, already built for gpui-component; reads imported
 # Markdown.
 markdown = "1.0.0"
+# Already built for gpui and Typst; finds contact details to redact.
+regex = "1.13.1"
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
 rust-stemmers = "1.2.0"
 # NLTK's English list: the Snowball project's, matching rust-stemmers.

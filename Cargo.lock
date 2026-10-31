@@ -4257,6 +4257,7 @@ dependencies = [
  "image",
  "kurbo 0.13.1",
  "markdown",
+ "regex",
  "rusqlite",
  "rust-stemmers",
  "stop-words",

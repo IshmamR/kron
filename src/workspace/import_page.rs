@@ -1,9 +1,10 @@
 // Adding a CV: a PDF, Markdown or text file is dropped or chosen, read on
 // the device, and its text shown to check and correct before it's saved; or
 // text is pasted or written straight in. What's saved is the text as
-// corrected, since facts are found in it. Files added together are taken one
-// at a time, each asked about first in case it was added by mistake, as is a
-// file imported before.
+// corrected, since facts are found in it. Once saved, it's shown as an AI
+// model would be sent it, with the user's details hidden. Files added
+// together are taken one at a time, each asked about first in case it was
+// added by mistake, as is a file imported before.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -19,12 +20,13 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight,
-    IntoElement, KeyBinding, PathPromptOptions, SharedString, Task, Window, actions, div,
-    prelude::*, px,
+    IntoElement, KeyBinding, PathPromptOptions, SharedString, Subscription, Task, Window, actions,
+    div, prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice};
+use super::redaction_check::{self, RedactionCheck, RedactionCheckEvent};
 use crate::database::{Database, Error};
 use crate::import::{self, Format, Warning, name};
 use crate::model::DocumentId;
@@ -80,6 +82,7 @@ impl Render for ImportPage {
                 .into_any_element(),
             Step::Ask(file) => self.render_ask(file, cx).into_any_element(),
             Step::Confirm(read) => self.render_confirm(read, cx).into_any_element(),
+            Step::Check { check, .. } => check.clone().into_any_element(),
         };
         div()
             .track_focus(&self.focus_handle)
@@ -87,10 +90,11 @@ impl Render for ImportPage {
             .on_action(cx.listener(|this, _: &Paste, window, cx| this.paste(window, cx)))
             .on_action(cx.listener(|this, _: &Write, window, cx| this.start_writing(window, cx)))
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
-            .on_action(cx.listener(|this, _: &Cancel, window, cx| {
-                if !matches!(this.step, Step::Choose) {
-                    this.skip_rest(window, cx)
-                }
+            .on_action(cx.listener(|this, _: &Cancel, window, cx| match this.step {
+                Step::Choose => {}
+                // Saved already; the files waiting are still to come.
+                Step::Check { .. } => this.next(window, cx),
+                _ => this.skip_rest(window, cx),
             }))
             .size_full()
             .flex()
@@ -187,9 +191,9 @@ impl ImportPage {
     /// none. A file is loaded and checked against earlier imports before
     /// its text is read.
     fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // The text field is about to go, and with nothing focused the
-        // page's keys, and the app's, stop working.
-        if self.text.focus_handle(cx).is_focused(window) {
+        // What's focused in the step is about to go, and with nothing
+        // focused the page's keys, and the app's, stop working.
+        if self.focus_handle.contains_focused(window, cx) {
             self.focus_handle.focus(window, cx);
         }
         self.text
@@ -372,6 +376,7 @@ impl ImportPage {
             )
         });
         let file_name = file.as_ref().map(|(name, _, _)| name.clone());
+        let saved_text: SharedString = text.clone().into();
         // Typed text has no sizes to read before edits; it's read as saved.
         let name = match &read.file {
             Some(_) => read.name.clone(),
@@ -394,7 +399,7 @@ impl ImportPage {
                     cx.emit(ImportPageEvent::Saved {
                         document,
                         file_name: file_name.clone(),
-                        name,
+                        name: name.clone(),
                     });
                     // The kit's notifications live in its Root, which a
                     // test's window may not have.
@@ -407,7 +412,7 @@ impl ImportPage {
                             cx,
                         );
                     }
-                    this.next(window, cx);
+                    this.check(saved_text.clone(), name, window, cx);
                 }
                 Err(error) => {
                     eprintln!("import page: couldn't save the document: {error}");
@@ -427,6 +432,37 @@ impl ImportPage {
                 eprintln!("import page: {error}");
             }
         });
+        cx.notify();
+    }
+
+    /// Shows the text saved as an AI model would be sent it, hiding the
+    /// user's names and the one it seemed to give.
+    fn check(
+        &mut self,
+        text: SharedString,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut names =
+            redaction_check::names(self.database.read(cx).connection()).unwrap_or_else(|error| {
+                eprintln!("import page: couldn't read the user's names: {error}");
+                Vec::new()
+            });
+        names.extend(name);
+        let check = cx.new(|cx| RedactionCheck::new(text, names, window, cx));
+        // Extraction will start on Confirmed; until then both go on.
+        let subscription =
+            cx.subscribe_in(&check, window, |this, _, event, window, cx| match event {
+                RedactionCheckEvent::Confirmed | RedactionCheckEvent::Dismissed => {
+                    this.next(window, cx)
+                }
+            });
+        check.focus_handle(cx).focus(window, cx);
+        self.step = Step::Check {
+            check,
+            _subscription: subscription,
+        };
         cx.notify();
     }
 
@@ -689,6 +725,11 @@ enum Step {
     /// imported before.
     Ask(File),
     Confirm(Read),
+    /// Showing the text saved as an AI model would be sent it.
+    Check {
+        check: Entity<RedactionCheck>,
+        _subscription: Subscription,
+    },
 }
 
 /// A file loaded, not read yet.
@@ -805,10 +846,19 @@ mod tests {
         Confirm(String),
         /// Text pasted or written, with no file.
         Typed,
+        /// The text saved, as an AI model would be sent it.
+        Check(String),
     }
 
     fn open(app: &mut TestAppContext) -> Open<'_> {
-        let (database, directory) = testing::open_sample(app);
+        open_on(app, testing::open_sample)
+    }
+
+    fn open_on(
+        app: &mut TestAppContext,
+        data: fn(&mut TestAppContext) -> (Entity<Database>, TemporaryDirectory),
+    ) -> Open<'_> {
+        let (database, directory) = data(app);
         let (page, cx) =
             app.add_window_view(|window, cx| ImportPage::new(database.clone(), window, cx));
         Open {
@@ -836,7 +886,7 @@ mod tests {
         }
 
         fn shown(&mut self) -> Shown {
-            self.page.read_with(self.cx, |page, _| match &page.step {
+            self.page.read_with(self.cx, |page, cx| match &page.step {
                 Step::Choose => Shown::Choose,
                 Step::Reading { .. } => Shown::Reading,
                 Step::Ask(file) => Shown::Ask(file.file_name.to_string(), file.imported.is_some()),
@@ -844,6 +894,7 @@ mod tests {
                     Some(file) => Shown::Confirm(file.file_name.to_string()),
                     None => Shown::Typed,
                 },
+                Step::Check { check, .. } => Shown::Check(check.read(cx).redaction().text),
             })
         }
 
@@ -941,6 +992,12 @@ mod tests {
                 Format::Pdf.media_type().to_owned()
             )]
         );
+        assert_eq!(
+            open.shown(),
+            Shown::Check("[NAME]\nBackend engineer".into()),
+            "then it's shown as it would be sent"
+        );
+        open.cx.simulate_keystrokes("ctrl-enter");
         assert_eq!(open.shown(), Shown::Choose, "it's ready for the next file");
     }
 
@@ -980,10 +1037,28 @@ mod tests {
         assert_eq!(open.text(), "Alex Rahman\nRust");
         let before = open.saved_without_file().len();
         open.save();
+        assert_eq!(
+            open.shown(),
+            Shown::Check("[NAME]\nRust".into()),
+            "the name typed is hidden too"
+        );
+        open.cx.simulate_keystrokes("escape");
         assert_eq!(open.shown(), Shown::Choose);
         let saved = open.saved_without_file();
         assert_eq!(saved.len(), before + 1);
         assert_eq!(saved.last().map(String::as_str), Some("Alex Rahman\nRust"));
+    }
+
+    #[test]
+    fn the_name_read_is_hidden_before_the_user_confirms_it() {
+        let mut app = TestAppContext::single();
+        // On first launch, with no Name fact yet.
+        let mut open = open_on(&mut app, testing::open_empty);
+        open.act(|page, window, cx| {
+            page.write("Sami ul Haque\nsami@example.com\n".into(), window, cx)
+        });
+        open.save();
+        assert_eq!(open.shown(), Shown::Check("[NAME]\n[EMAIL]\n".into()));
     }
 
     #[test]
@@ -1020,11 +1095,13 @@ mod tests {
             saved.last().map(String::as_str),
             Some("Organized Code Fest 2019.")
         );
+        open.cx.simulate_keystrokes("ctrl-enter");
+        assert_eq!(open.shown(), Shown::Choose);
         open.cx.simulate_keystrokes("ctrl-n");
         assert_eq!(
             open.shown(),
             Shown::Typed,
-            "keys still work once the text field is gone"
+            "keys still work once the text field and the check are gone"
         );
     }
 
@@ -1133,7 +1210,13 @@ mod tests {
         open.act(|page, window, cx| page.read_asked(window, cx));
         assert_eq!(open.shown(), Shown::Confirm("sidebar.pdf".into()));
         open.save();
-        assert_eq!(open.shown(), Shown::Ask("latex.pdf".into(), false));
+        assert!(matches!(open.shown(), Shown::Check(_)));
+        open.cx.simulate_keystrokes("escape");
+        assert_eq!(
+            open.shown(),
+            Shown::Ask("latex.pdf".into(), false),
+            "Esc leaves the check, not the files waiting: the text is saved"
+        );
         open.act(|page, window, cx| page.skip_rest(window, cx));
         assert_eq!(open.shown(), Shown::Choose);
         assert_eq!(open.saved("sidebar.pdf").len(), 1);

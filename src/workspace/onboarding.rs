@@ -337,6 +337,12 @@ mod tests {
                 .read_with(self.cx, |onboarding, _| onboarding.import_page.clone())
         }
 
+        /// Confirms what's hidden of the text saved.
+        fn confirm_check(&mut self) {
+            self.cx.simulate_keystrokes("ctrl-enter");
+            self.cx.run_until_parked();
+        }
+
         /// Imports a file and saves its text, as the user would.
         fn import(&mut self, path: &str) {
             let import_page = self.import_page();
@@ -346,6 +352,7 @@ mod tests {
             self.cx.run_until_parked();
             import_page.update_in(self.cx, |page, window, cx| page.save(window, cx));
             testing::settle(self.cx, &self.database);
+            self.confirm_check();
         }
 
         /// Writes text and saves it, as the user would.
@@ -356,6 +363,7 @@ mod tests {
                 page.save(window, cx);
             });
             testing::settle(self.cx, &self.database);
+            self.confirm_check();
         }
 
         fn asking_name(&mut self) -> Option<String> {
