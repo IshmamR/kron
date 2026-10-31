@@ -1,11 +1,15 @@
 // Adding a CV: a PDF is dropped or chosen, read on the device, and its text
 // shown to check and correct before it's saved. What's saved is the text as
-// corrected, since facts are found in it.
+// corrected, since facts are found in it. Files added together are taken one
+// at a time, each asked about first in case it was added by mistake, as is a
+// file imported before.
 
+use std::collections::VecDeque;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::notification::Notification;
@@ -16,10 +20,11 @@ use gpui_kit::{
     App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
     PathPromptOptions, SharedString, Task, Window, div, prelude::*, px,
 };
+use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice};
-use crate::database::Database;
-use crate::import::{self, Reading, Warning, pdf};
+use crate::database::{Database, Error};
+use crate::import::{self, Warning, pdf};
 use crate::model::commands;
 
 const PDF_MEDIA_TYPE: &str = "application/pdf";
@@ -29,17 +34,23 @@ const PAGE_MAX_WIDTH: gpui_kit::Pixels = px(760.);
 pub struct ImportPage {
     database: Entity<Database>,
     step: Step,
+    /// The files added with the one shown, waiting their turn.
+    queue: VecDeque<PathBuf>,
+    /// How many files were added together, to say which one this is.
+    added: usize,
+    /// Why the last file couldn't be read or saved.
+    problem: Option<SharedString>,
     /// The text read, for the user to correct.
     text: Entity<TextareaState>,
     focus_handle: FocusHandle,
-    /// Reading the file or saving it; replaced, the one before stops.
+    /// Reading a file or saving it; replaced, the one before stops.
     task: Task<()>,
 }
 
 impl Render for ImportPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let content = match &self.step {
-            Step::Choose { error } => self.render_choose(error.clone(), cx).into_any_element(),
+            Step::Choose => self.render_choose(cx).into_any_element(),
             Step::Reading { file_name } => div()
                 .size_full()
                 .flex()
@@ -47,6 +58,7 @@ impl Render for ImportPage {
                 .justify_center()
                 .child(caption(format!("Reading {file_name}…"), cx))
                 .into_any_element(),
+            Step::Ask(file) => self.render_ask(file, cx).into_any_element(),
             Step::Confirm(read) => self.render_confirm(read, cx).into_any_element(),
         };
         div()
@@ -68,43 +80,65 @@ impl ImportPage {
     pub fn new(database: Entity<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self {
             database,
-            step: Step::Choose { error: None },
+            step: Step::Choose,
+            queue: VecDeque::new(),
+            added: 0,
+            problem: None,
             text: cx.new(|cx| TextareaState::new(window, cx)),
             focus_handle: cx.focus_handle(),
             task: Task::ready(()),
         }
     }
 
-    /// Asks for a file with the system's file picker, and reads it.
+    /// Asks for files with the system's file picker, and imports them.
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
-            multiple: false,
+            multiple: true,
             prompt: Some("Import".into()),
         });
         self.task = cx.spawn_in(window, async move |this, cx| {
-            let path = match chosen.await {
-                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
                 // Cancelled, or the picker closed without an answer.
-                Ok(Ok(None)) | Err(_) => None,
+                Ok(Ok(None)) | Err(_) => return,
                 Ok(Err(error)) => {
                     eprintln!("import page: the file picker failed: {error}");
-                    None
+                    return;
                 }
             };
-            if let Some(path) = path
-                && let Err(error) =
-                    this.update_in(cx, |this, window, cx| this.open(path, window, cx))
+            if let Err(error) =
+                this.update_in(cx, |this, window, cx| this.import(paths, window, cx))
             {
                 eprintln!("import page: {error}");
             }
         });
     }
 
-    /// Reads the file at `path` off the main thread, then shows its text, or
-    /// why it couldn't be read.
-    fn open(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// Takes the files one at a time, from the first.
+    fn import(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        self.added = paths.len();
+        self.queue = paths.into();
+        self.problem = None;
+        self.next(window, cx);
+    }
+
+    /// Loads the next file waiting, or goes back to choosing once there's
+    /// none. A file is loaded and checked against earlier imports before
+    /// its text is read.
+    fn next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.text
+            .update(cx, |text, cx| text.set_value("", window, cx));
+        let Some(path) = self.queue.pop_front() else {
+            self.added = 0;
+            self.step = Step::Choose;
+            cx.notify();
+            return;
+        };
         let file_name: SharedString = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -113,40 +147,100 @@ impl ImportPage {
         self.step = Step::Reading {
             file_name: file_name.clone(),
         };
-        let read = cx.background_spawn(async move { read_file(&path) });
+        let loaded = cx.background_spawn(async move {
+            fs::read(&path).map(|bytes| {
+                let hash = *blake3::hash(&bytes).as_bytes();
+                (bytes, hash)
+            })
+        });
         self.task = cx.spawn_in(window, async move |this, cx| {
-            let read = read.await;
-            if let Err(error) = this.update_in(cx, |this, window, cx| {
-                this.show(file_name, read, window, cx)
-            }) {
+            let loaded = loaded.await;
+            let updated = this.update_in(cx, |this, window, cx| match loaded {
+                Ok((bytes, hash)) => {
+                    let imported = imported_before(this.database.read(cx).connection(), hash)
+                        .unwrap_or_else(|error| {
+                            eprintln!("import page: couldn't look for earlier imports: {error}");
+                            None
+                        });
+                    let file = File {
+                        file_name,
+                        bytes: Arc::new(bytes),
+                        imported,
+                    };
+                    if this.added > 1 || file.imported.is_some() {
+                        this.step = Step::Ask(file);
+                        cx.notify();
+                    } else {
+                        this.read(file, window, cx);
+                    }
+                }
+                Err(error) => {
+                    this.problem = Some(format!("{file_name}: couldn't open it: {error}.").into());
+                    this.next(window, cx);
+                }
+            });
+            if let Err(error) = updated {
                 eprintln!("import page: {error}");
             }
         });
         cx.notify();
     }
 
-    fn show(
-        &mut self,
-        file_name: SharedString,
-        read: Result<(Vec<u8>, Reading), SharedString>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.step = match read {
-            Ok((bytes, reading)) => {
-                self.text
-                    .update(cx, |text, cx| text.set_value(reading.text, window, cx));
-                Step::Confirm(Read {
-                    file_name,
-                    bytes: Arc::new(bytes),
-                    warnings: reading.warnings,
-                    saving: false,
-                    error: None,
-                })
-            }
-            Err(error) => Step::Choose { error: Some(error) },
+    /// Reads the file's text off the main thread, then shows it to check,
+    /// or why it couldn't be read.
+    fn read(&mut self, file: File, window: &mut Window, cx: &mut Context<Self>) {
+        self.step = Step::Reading {
+            file_name: file.file_name.clone(),
         };
+        let bytes = file.bytes.to_vec();
+        let reading = cx.background_spawn(async move { pdf::read(bytes) });
+        self.task = cx.spawn_in(window, async move |this, cx| {
+            let reading = reading.await;
+            let updated = this.update_in(cx, |this, window, cx| match reading {
+                Ok(reading) => {
+                    this.text
+                        .update(cx, |text, cx| text.set_value(reading.text, window, cx));
+                    this.step = Step::Confirm(Read {
+                        file,
+                        warnings: reading.warnings,
+                        saving: false,
+                    });
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.problem =
+                        Some(format!("{}: {}", file.file_name, error_message(error)).into());
+                    this.next(window, cx);
+                }
+            });
+            if let Err(error) = updated {
+                eprintln!("import page: {error}");
+            }
+        });
         cx.notify();
+    }
+
+    /// Reads the file being asked about.
+    fn read_asked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let step = std::mem::replace(&mut self.step, Step::Choose);
+        if let Step::Ask(file) = step {
+            self.problem = None;
+            self.read(file, window, cx);
+        } else {
+            self.step = step;
+        }
+    }
+
+    /// Leaves the file shown, unsaved, for the next.
+    fn skip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.problem = None;
+        self.next(window, cx);
+    }
+
+    /// Leaves the file shown and every one waiting, unsaved.
+    fn skip_rest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.queue.clear();
+        self.skip(window, cx);
     }
 
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -158,38 +252,35 @@ impl ImportPage {
             return;
         }
         read.saving = true;
-        read.error = None;
-        let (file_name, bytes) = (read.file_name.clone(), read.bytes.clone());
+        self.problem = None;
+        let (file_name, bytes) = (read.file.file_name.clone(), read.file.bytes.clone());
         let saved = self.database.read(cx).write(cx, {
             let file_name = file_name.clone();
             move |write| commands::import_document(write, &file_name, &bytes, PDF_MEDIA_TYPE, &text)
         });
         self.task = cx.spawn_in(window, async move |this, cx| {
             let saved = saved.await;
-            let updated = this.update_in(cx, |this, window, cx| {
-                match saved {
-                    Ok(_) => {
-                        this.step = Step::Choose { error: None };
-                        this.text
-                            .update(cx, |text, cx| text.set_value("", window, cx));
-                        // The kit's notifications live in its Root, which a
-                        // test's window may not have.
-                        if window.root::<Root>().flatten().is_some() {
-                            window.push_notification(
-                                Notification::new().message(format!("Saved {file_name}")),
-                                cx,
-                            );
-                        }
+            let updated = this.update_in(cx, |this, window, cx| match saved {
+                Ok(_) => {
+                    // The kit's notifications live in its Root, which a
+                    // test's window may not have.
+                    if window.root::<Root>().flatten().is_some() {
+                        window.push_notification(
+                            Notification::new().message(format!("Saved {file_name}")),
+                            cx,
+                        );
                     }
-                    Err(error) => {
-                        eprintln!("import page: couldn't save the document: {error}");
-                        if let Step::Confirm(read) = &mut this.step {
-                            read.saving = false;
-                            read.error = Some("Couldn't save it. Try again.".into());
-                        }
-                    }
+                    this.next(window, cx);
                 }
-                cx.notify();
+                Err(error) => {
+                    eprintln!("import page: couldn't save the document: {error}");
+                    if let Step::Confirm(read) = &mut this.step {
+                        read.saving = false;
+                    }
+                    this.problem =
+                        Some(format!("{file_name}: couldn't save it. Try again.").into());
+                    cx.notify();
+                }
             });
             if let Err(error) = updated {
                 eprintln!("import page: {error}");
@@ -198,17 +289,29 @@ impl ImportPage {
         cx.notify();
     }
 
-    fn render_choose(&self, error: Option<SharedString>, cx: &Context<Self>) -> impl IntoElement {
+    /// Which of the files added together is shown, when there are several.
+    fn position(&self) -> Option<String> {
+        (self.added > 1)
+            .then(|| format!("File {} of {}", self.added - self.queue.len(), self.added))
+    }
+
+    fn render_problem(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        self.problem
+            .clone()
+            .map(|problem| notice(problem, cx.theme().danger))
+    }
+
+    fn render_choose(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
             .size_full()
             .gap_3()
-            .child(title("Import your CV"))
+            .child(title("Import your CV".into()))
             .child(caption(
                 "It's read on this device. You'll see the text before anything is saved.",
                 cx,
             ))
-            .when_some(error, |this, error| this.child(notice(error, theme.danger)))
+            .children(self.render_problem(cx))
             .child(
                 v_flex()
                     .id("drop-target")
@@ -227,19 +330,17 @@ impl ImportPage {
                             .bg(cx.theme().primary.opacity(0.05))
                     })
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
-                        if let Some(path) = paths.paths().first() {
-                            this.open(path.clone(), window, cx);
-                        }
+                        this.import(paths.paths().to_vec(), window, cx)
                     }))
                     .child(
                         Icon::new(IconName::Inbox)
                             .size(px(32.))
                             .text_color(theme.muted_foreground),
                     )
-                    .child(div().child("Drop a PDF here"))
+                    .child(div().child("Drop PDFs here"))
                     .child(
                         Button::new("browse")
-                            .label("Choose a file…")
+                            .label("Choose files…")
                             .primary()
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
@@ -247,30 +348,101 @@ impl ImportPage {
             )
     }
 
+    fn render_ask(&self, file: &File, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let earlier = file.imported.as_ref().map(|imported| {
+            let date = imported.added_at.with_timezone(&Local).format("%b %-d, %Y");
+            if imported.file_name == file.file_name.as_ref() {
+                format!("You already imported this file on {date}.")
+            } else {
+                format!(
+                    "You already imported this file on {date}, as {}.",
+                    imported.file_name
+                )
+            }
+        });
+        v_flex()
+            .gap_3()
+            .children(self.position().map(|position| caption(position, cx)))
+            .child(title(format!("Import {}?", file.file_name).into()))
+            .children(self.render_problem(cx))
+            .when(self.added > 1, |this| {
+                this.child(caption(
+                    "Several files were added at once, so each is checked before it's read, in \
+                     case one was added by mistake.",
+                    cx,
+                ))
+            })
+            .children(earlier.map(|earlier| notice(earlier, theme.warning)))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("read")
+                            .label("Read it")
+                            .primary()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.read_asked(window, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new("skip")
+                            .label("Skip")
+                            .ghost()
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx))),
+                    )
+                    .when(!self.queue.is_empty(), |this| {
+                        this.child(
+                            Button::new("skip-rest")
+                                .label("Skip the rest")
+                                .ghost()
+                                .small()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.skip_rest(window, cx)),
+                                ),
+                        )
+                    }),
+            )
+    }
+
     fn render_confirm(&self, read: &Read, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let empty = self.text.read(cx).value().trim().is_empty();
+        // Among several files, the next is already chosen.
+        let other = if self.added > 1 {
+            Button::new("skip")
+                .label("Skip")
+                .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx)))
+        } else {
+            Button::new("choose-another")
+                .label("Choose another file")
+                .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx)))
+        };
         v_flex()
             .size_full()
             .gap_3()
+            .children(self.position().map(|position| caption(position, cx)))
             .child(
                 h_flex()
                     .justify_between()
                     .gap_2()
-                    .child(title("Check the text"))
+                    .child(title("Check the text".into()))
                     .child(
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new("choose-another")
-                                    .label("Choose another file")
+                                Button::new("cancel")
+                                    .label("Cancel")
                                     .ghost()
                                     .small()
                                     .disabled(read.saving)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.browse(window, cx)),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.skip_rest(window, cx)
+                                    })),
                             )
+                            .child(other.ghost().small().disabled(read.saving))
                             .child(
                                 Button::new("save")
                                     .label("Save")
@@ -287,13 +459,11 @@ impl ImportPage {
                 format!(
                     "The text read from {}. Correct anything that's wrong: facts are taken from \
                      this text. Nothing has been sent anywhere.",
-                    read.file_name
+                    read.file.file_name
                 ),
                 cx,
             ))
-            .when_some(read.error.clone(), |this, error| {
-                this.child(notice(error, theme.danger))
-            })
+            .children(self.render_problem(cx))
             .children(
                 read.warnings
                     .iter()
@@ -309,50 +479,75 @@ impl ImportPage {
 }
 
 enum Step {
-    /// Waiting for a file, with why the last one couldn't be read.
-    Choose {
-        error: Option<SharedString>,
-    },
+    Choose,
+    /// Loading a file, or reading its text.
     Reading {
         file_name: SharedString,
     },
+    /// Asking whether to read a file: one of several added together, or one
+    /// imported before.
+    Ask(File),
     Confirm(Read),
+}
+
+/// A file loaded, not read yet.
+struct File {
+    file_name: SharedString,
+    bytes: Arc<Vec<u8>>,
+    /// The last import of the same file, if it was imported before.
+    imported: Option<Imported>,
+}
+
+struct Imported {
+    file_name: String,
+    added_at: DateTime<Utc>,
 }
 
 /// A file read, waiting for the user to check its text and save it.
 struct Read {
-    file_name: SharedString,
-    bytes: Arc<Vec<u8>>,
+    file: File,
     warnings: Vec<Warning>,
     saving: bool,
-    /// Why saving failed.
-    error: Option<SharedString>,
 }
 
-fn title(text: &'static str) -> impl IntoElement {
+fn title(text: SharedString) -> impl IntoElement {
     div()
         .text_lg()
         .font_weight(FontWeight::SEMIBOLD)
         .child(text)
 }
 
-/// The file's bytes and what was read from them, or why they couldn't be,
-/// in words for the user.
-fn read_file(path: &Path) -> Result<(Vec<u8>, Reading), SharedString> {
-    let bytes = fs::read(path).map_err(|error| format!("Couldn't open the file: {error}."))?;
-    let reading = pdf::read(bytes.clone()).map_err(|error| match error {
+/// The latest import of the file with this hash that's still there.
+fn imported_before(connection: &Connection, hash: [u8; 32]) -> Result<Option<Imported>, Error> {
+    Ok(connection
+        .query_row(
+            "SELECT file_name, added_at FROM documents
+             WHERE file_hash = ?1 AND deleted_at IS NULL
+             ORDER BY added_at DESC LIMIT 1",
+            [hash],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .map(|(file_name, added_at)| Imported {
+            file_name,
+            added_at: DateTime::from_timestamp_millis(added_at).unwrap_or_default(),
+        }))
+}
+
+/// Why a file couldn't be read, in words for the user.
+fn error_message(error: import::Error) -> &'static str {
+    match error {
         import::Error::Encrypted => {
-            "This PDF is locked with a password. Save a copy without one and import that."
+            "this PDF is locked with a password. Save a copy without one and import that."
         }
         import::Error::Invalid => {
-            "This isn't a PDF, or it's damaged. Only PDFs can be imported for now."
+            "this isn't a PDF, or it's damaged. Only PDFs can be imported for now."
         }
         import::Error::NoText => {
-            "This PDF has no text in it, only pictures of text, like a scan. Export your CV \
+            "this PDF has no text in it, only pictures of text, like a scan. Export your CV \
              again from where you wrote it, as a PDF."
         }
-    })?;
-    Ok((bytes, reading))
+    }
 }
 
 fn warning_message(warning: &Warning) -> String {
@@ -379,12 +574,24 @@ mod tests {
     use crate::workspace::testing;
 
     const LATEX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/import/pdf/latex.pdf");
+    const SIDEBAR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/import/pdf/sidebar.pdf");
+    const NOT_A_PDF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
     struct Open<'a> {
         page: Entity<ImportPage>,
         database: Entity<Database>,
         cx: &'a mut VisualTestContext,
         _directory: TemporaryDirectory,
+    }
+
+    /// Where the page is, as a test checks it.
+    #[derive(Debug, PartialEq)]
+    enum Shown {
+        Choose,
+        Reading,
+        /// The file asked about, and whether it was imported before.
+        Ask(String, bool),
+        Confirm(String),
     }
 
     fn open(app: &mut TestAppContext) -> Open<'_> {
@@ -400,11 +607,33 @@ mod tests {
     }
 
     impl Open<'_> {
-        fn import(&mut self, path: &str) {
-            let path = PathBuf::from(path);
+        fn import(&mut self, paths: &[&str]) {
+            let paths = paths.iter().map(PathBuf::from).collect();
             self.page
-                .update_in(self.cx, |page, window, cx| page.open(path, window, cx));
+                .update_in(self.cx, |page, window, cx| page.import(paths, window, cx));
             self.cx.run_until_parked();
+        }
+
+        fn act(
+            &mut self,
+            action: impl FnOnce(&mut ImportPage, &mut Window, &mut Context<ImportPage>),
+        ) {
+            self.page.update_in(self.cx, action);
+            self.cx.run_until_parked();
+        }
+
+        fn shown(&mut self) -> Shown {
+            self.page.read_with(self.cx, |page, _| match &page.step {
+                Step::Choose => Shown::Choose,
+                Step::Reading { .. } => Shown::Reading,
+                Step::Ask(file) => Shown::Ask(file.file_name.to_string(), file.imported.is_some()),
+                Step::Confirm(read) => Shown::Confirm(read.file.file_name.to_string()),
+            })
+        }
+
+        fn text(&mut self) -> String {
+            self.page
+                .read_with(self.cx, |page, cx| page.text.read(cx).value().to_string())
         }
 
         fn set_text(&mut self, value: &str) {
@@ -420,11 +649,10 @@ mod tests {
             testing::settle(self.cx, &self.database);
         }
 
-        fn error(&mut self) -> Option<SharedString> {
-            self.page.read_with(self.cx, |page, _| match &page.step {
-                Step::Choose { error } => error.clone(),
-                Step::Reading { .. } | Step::Confirm(_) => None,
-            })
+        fn problem(&mut self) -> String {
+            self.page
+                .read_with(self.cx, |page, _| page.problem.clone().unwrap_or_default())
+                .to_string()
         }
 
         /// The saved texts of documents imported from `file_name`.
@@ -456,15 +684,13 @@ mod tests {
     fn a_pdf_is_read_and_saved_with_the_text_as_corrected() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
-        open.import(LATEX);
-        let read = open.page.read_with(open.cx, |page, cx| {
-            (
-                matches!(page.step, Step::Confirm(_)),
-                page.text.read(cx).value().to_string(),
-            )
-        });
-        assert!(read.0, "the text is shown to check");
-        assert!(read.1.starts_with("Alex Rahman\n"));
+        open.import(&[LATEX]);
+        assert_eq!(
+            open.shown(),
+            Shown::Confirm("latex.pdf".into()),
+            "one new file isn't asked about"
+        );
+        assert!(open.text().starts_with("Alex Rahman\n"));
         open.set_text("Alex Rahman\nBackend engineer");
         open.save();
         assert_eq!(
@@ -474,32 +700,106 @@ mod tests {
                 PDF_MEDIA_TYPE.to_owned()
             )]
         );
-        assert_eq!(open.error(), None, "it's ready for the next file");
-        assert!(
-            open.page
-                .read_with(open.cx, |page, _| matches!(page.step, Step::Choose { .. }))
-        );
+        assert_eq!(open.shown(), Shown::Choose, "it's ready for the next file");
     }
 
     #[test]
     fn empty_text_is_not_saved() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
-        open.import(LATEX);
+        open.import(&[LATEX]);
         open.set_text("  \n");
         open.save();
         assert_eq!(open.saved("latex.pdf"), []);
     }
 
     #[test]
+    fn a_file_read_can_be_left_without_saving() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[LATEX]);
+        open.act(|page, window, cx| page.skip_rest(window, cx));
+        assert_eq!(open.shown(), Shown::Choose);
+        assert_eq!(open.text(), "", "its text doesn't linger");
+
+        open.import(&[LATEX, SIDEBAR]);
+        open.act(|page, window, cx| page.read_asked(window, cx));
+        assert_eq!(open.shown(), Shown::Confirm("latex.pdf".into()));
+        open.act(|page, window, cx| page.skip_rest(window, cx));
+        assert_eq!(
+            open.shown(),
+            Shown::Choose,
+            "the files waiting are left too"
+        );
+        assert_eq!(open.text(), "");
+        assert_eq!(open.saved("latex.pdf"), []);
+        assert_eq!(open.saved("sidebar.pdf"), []);
+    }
+
+    #[test]
     fn a_file_that_cant_be_read_says_why() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
-        open.import(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
-        let error = open.error().unwrap_or_default();
-        assert!(error.starts_with("This isn't a PDF"), "{error}");
-        open.import(concat!(env!("CARGO_MANIFEST_DIR"), "/no such file.pdf"));
-        let error = open.error().unwrap_or_default();
-        assert!(error.starts_with("Couldn't open the file"), "{error}");
+        open.import(&[NOT_A_PDF]);
+        assert_eq!(open.shown(), Shown::Choose);
+        let problem = open.problem();
+        assert!(
+            problem.starts_with("Cargo.toml: this isn't a PDF"),
+            "{problem}"
+        );
+        open.import(&[concat!(env!("CARGO_MANIFEST_DIR"), "/no such file.pdf")]);
+        let problem = open.problem();
+        assert!(
+            problem.starts_with("no such file.pdf: couldn't open it"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn a_file_imported_before_is_asked_about_first() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[LATEX]);
+        open.save();
+        open.import(&[LATEX]);
+        assert_eq!(open.shown(), Shown::Ask("latex.pdf".into(), true));
+        open.act(|page, window, cx| page.skip(window, cx));
+        assert_eq!(open.shown(), Shown::Choose);
+        assert_eq!(open.saved("latex.pdf").len(), 1);
+
+        open.import(&[LATEX]);
+        open.act(|page, window, cx| page.read_asked(window, cx));
+        assert_eq!(open.shown(), Shown::Confirm("latex.pdf".into()));
+        open.save();
+        assert_eq!(
+            open.saved("latex.pdf").len(),
+            2,
+            "importing it again is the user's call"
+        );
+    }
+
+    #[test]
+    fn files_added_together_are_asked_about_one_at_a_time() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[LATEX, NOT_A_PDF, SIDEBAR, LATEX]);
+        assert_eq!(open.shown(), Shown::Ask("latex.pdf".into(), false));
+        open.act(|page, window, cx| page.skip(window, cx));
+        assert_eq!(open.shown(), Shown::Ask("Cargo.toml".into(), false));
+        open.act(|page, window, cx| page.read_asked(window, cx));
+        assert_eq!(open.shown(), Shown::Ask("sidebar.pdf".into(), false));
+        let problem = open.problem();
+        assert!(
+            problem.starts_with("Cargo.toml: this isn't a PDF"),
+            "{problem}"
+        );
+        open.act(|page, window, cx| page.read_asked(window, cx));
+        assert_eq!(open.shown(), Shown::Confirm("sidebar.pdf".into()));
+        open.save();
+        assert_eq!(open.shown(), Shown::Ask("latex.pdf".into(), false));
+        open.act(|page, window, cx| page.skip_rest(window, cx));
+        assert_eq!(open.shown(), Shown::Choose);
+        assert_eq!(open.saved("sidebar.pdf").len(), 1);
+        assert_eq!(open.saved("latex.pdf"), [], "skipped files aren't saved");
     }
 }
