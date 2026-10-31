@@ -124,8 +124,11 @@ fn main() {
             };
             let setup = database.read(cx).write(cx, |write| {
                 typeset::install_templates(write)?;
+                // KRON_NO_SAMPLE starts empty, to see what a new user does.
                 #[cfg(debug_assertions)]
-                model::sample::write_if_empty(write)?;
+                if std::env::var_os("KRON_NO_SAMPLE").is_none() {
+                    model::sample::write_if_empty(write)?;
+                }
                 Ok(())
             });
             cx.background_spawn(async move {

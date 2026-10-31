@@ -111,6 +111,47 @@ pub fn import_document(
     Ok(DocumentId(document))
 }
 
+/// Saves the user's name as they confirmed it. It cites the document it was
+/// found in where the document has it word for word; it needn't, as the
+/// user may have corrected it.
+pub fn add_name(
+    write: &mut Write,
+    name: &str,
+    document: Option<DocumentId>,
+) -> Result<FactId, Error> {
+    let fact = Uuid::now_v7();
+    write.insert(
+        Facts,
+        fact,
+        &[
+            facts::KIND.value(&"name"),
+            facts::TEXT.value(&name),
+            facts::EXTRACTED.value(&name),
+        ],
+    )?;
+    let Some(document) = document else {
+        return Ok(FactId(fact));
+    };
+    let text: Option<String> = write
+        .prepare("SELECT text FROM document_texts WHERE document_id = ?1")?
+        .query_row([document.0], |row| row.get(0))
+        .optional()?;
+    if let Some(start) = text.as_deref().and_then(|text| text.find(name)) {
+        write.insert(
+            FactSources,
+            Uuid::now_v7(),
+            &[
+                fact_sources::FACT_ID.value(&fact),
+                fact_sources::DOCUMENT_ID.value(&document.0),
+                fact_sources::SPAN_START.value(&(start as i64)),
+                fact_sources::SPAN_END.value(&((start + name.len()) as i64)),
+                fact_sources::ORIGINAL_TEXT.value(&name),
+            ],
+        )?;
+    }
+    Ok(FactId(fact))
+}
+
 /// A file a document's text was read from.
 pub struct DocumentFile<'a> {
     pub name: &'a str,
@@ -445,6 +486,34 @@ mod tests {
         writer.undo()?;
         let live = "SELECT count(*) FROM documents WHERE deleted_at IS NULL";
         assert_eq!(count(writer.kron(), live, [])?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_name_cites_the_document_that_has_it_word_for_word() -> Result<(), Error> {
+        let mut writer = empty()?;
+        let document = run(&mut writer, |write| {
+            import_document(write, None, "Curriculum Vitae\nAlex Rahman\n")
+        })?;
+        let found = run(&mut writer, move |write| {
+            add_name(write, "Alex Rahman", Some(document))
+        })?;
+        let corrected = run(&mut writer, move |write| {
+            add_name(write, "Alexander Rahman", Some(document))
+        })?;
+        let sources = |fact: FactId| -> Result<Vec<(i64, i64)>, Error> {
+            Ok(writer
+                .kron()
+                .prepare("SELECT span_start, span_end FROM fact_sources WHERE fact_id = ?1")?
+                .query_map([fact.0], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()?)
+        };
+        assert_eq!(sources(found)?, [(17, 28)]);
+        assert_eq!(
+            sources(corrected)?,
+            [],
+            "a corrected name isn't in the text"
+        );
         Ok(())
     }
 

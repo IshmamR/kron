@@ -4,6 +4,7 @@
 // addresses often appear nowhere in the text.
 
 pub mod markdown;
+pub mod name;
 pub mod pdf;
 
 use std::ops::Range;

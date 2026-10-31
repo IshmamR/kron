@@ -4,6 +4,7 @@ mod facts_page;
 mod import_page;
 mod inspector;
 mod job_view;
+mod onboarding;
 mod parts;
 mod previews;
 mod resume_grid;
@@ -39,6 +40,7 @@ use crate::window;
 use facts_page::FactsPage;
 use import_page::ImportPage;
 use job_view::{JobView, JobViewEvent};
+use onboarding::{Onboarding, OnboardingEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
 
@@ -106,6 +108,8 @@ pub struct Workspace {
     job_view: Entity<JobView>,
     facts_page: Entity<FactsPage>,
     import_page: Entity<ImportPage>,
+    /// Shown in place of everything else while the user has nothing yet.
+    onboarding: Option<Entity<Onboarding>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -142,12 +146,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo_or_redo(false, window, cx)))
             .on_action(cx.listener(|this, _: &Redo, window, cx| this.undo_or_redo(true, window, cx)))
             .size_full()
-            .child(
-                h_flex()
+            .child(match &self.onboarding {
+                Some(onboarding) => onboarding.clone().into_any_element(),
+                None => h_flex()
                     .size_full()
                     .child(self.render_sidebar(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(page)),
-            )
+                    .child(div().flex_1().min_w_0().h_full().child(page))
+                    .into_any_element(),
+            })
     }
 }
 
@@ -185,7 +191,7 @@ impl Workspace {
         let import_page = cx.new(|cx| ImportPage::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
 
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe(&database, |this, database, changed: &Changed, cx| {
                 if changed.touches(Facts) {
                     this.count_needs_review(cx);
@@ -225,6 +231,30 @@ impl Workspace {
             }),
         ];
 
+        let onboarding = match onboarding::is_new(database.read(cx).connection()) {
+            Ok(true) => {
+                let onboarding = cx.new(|cx| {
+                    Onboarding::new(database.clone(), import_page.clone(), window, cx)
+                });
+                subscriptions.push(cx.subscribe_in(
+                    &onboarding,
+                    window,
+                    |this, _, event, window, cx| match event {
+                        OnboardingEvent::Done => {
+                            this.onboarding = None;
+                            this.open_resumes(window, cx);
+                        }
+                    },
+                ));
+                Some(onboarding)
+            }
+            Ok(false) => None,
+            Err(error) => {
+                eprintln!("workspace: couldn't check for a new user: {error}");
+                None
+            }
+        };
+
         let mut workspace = Self {
             needs_review: 0,
             database,
@@ -239,10 +269,14 @@ impl Workspace {
             job_view,
             facts_page,
             import_page,
+            onboarding,
             _subscriptions: subscriptions,
         };
         workspace.count_needs_review(cx);
         workspace.restore_page(device.last_page, window, cx);
+        if workspace.onboarding.is_some() {
+            workspace.import_page.focus_handle(cx).focus(window, cx);
+        }
         workspace
     }
 

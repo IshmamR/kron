@@ -18,19 +18,21 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    App, Context, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyBinding, PathPromptOptions, SharedString, Task, Window, actions, div, prelude::*, px,
+    App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight,
+    IntoElement, KeyBinding, PathPromptOptions, SharedString, Task, Window, actions, div,
+    prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice};
 use crate::database::{Database, Error};
-use crate::import::{self, Format, Warning};
+use crate::import::{self, Format, Warning, name};
+use crate::model::DocumentId;
 use crate::model::commands::{self, DocumentFile};
 
 const KEY_CONTEXT: &str = "ImportPage";
 /// Past this, lines of text get too long to read comfortably.
-const PAGE_MAX_WIDTH: gpui_kit::Pixels = px(760.);
+pub const PAGE_MAX_WIDTH: gpui_kit::Pixels = px(760.);
 
 actions!(import_page, [Paste, Write, Cancel, Save]);
 
@@ -97,6 +99,20 @@ impl Render for ImportPage {
     }
 }
 
+pub enum ImportPageEvent {
+    /// A document was saved, with the name its text seemed to give, read
+    /// before the user's edits.
+    Saved {
+        document: DocumentId,
+        file_name: Option<SharedString>,
+        name: Option<String>,
+    },
+    /// Back to choosing, with nothing left waiting.
+    Finished,
+}
+
+impl EventEmitter<ImportPageEvent> for ImportPage {}
+
 impl Focusable for ImportPage {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -118,6 +134,11 @@ impl ImportPage {
             focus_handle: cx.focus_handle(),
             task: Task::ready(()),
         }
+    }
+
+    /// Whether nothing is being read, checked or saved.
+    pub fn is_choosing(&self) -> bool {
+        matches!(self.step, Step::Choose)
     }
 
     /// Asks for files with the system's file picker, and imports them.
@@ -147,7 +168,12 @@ impl ImportPage {
     }
 
     /// Takes the files one at a time, from the first.
-    fn import(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn import(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -171,6 +197,7 @@ impl ImportPage {
         let Some(path) = self.queue.pop_front() else {
             self.added = 0;
             self.step = Step::Choose;
+            cx.emit(ImportPageEvent::Finished);
             cx.notify();
             return;
         };
@@ -239,10 +266,15 @@ impl ImportPage {
             let reading = reading.await;
             let updated = this.update_in(cx, |this, window, cx| match reading {
                 Ok(reading) => {
-                    this.text
-                        .update(cx, |text, cx| text.set_value(reading.text, window, cx));
+                    let name = name::guess(&reading);
+                    // In the text, its keys work: Ctrl+Enter, Esc.
+                    this.text.update(cx, |text, cx| {
+                        text.set_value(reading.text, window, cx);
+                        text.focus(window, cx);
+                    });
                     this.step = Step::Confirm(Read {
                         file: Some(file),
+                        name,
                         warnings: reading.warnings,
                         saving: false,
                     });
@@ -282,7 +314,7 @@ impl ImportPage {
     }
 
     /// Opens text with no file to check and save, or to write when empty.
-    fn write(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn write(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.queue.clear();
         self.added = 0;
         self.problem = None;
@@ -292,6 +324,7 @@ impl ImportPage {
         });
         self.step = Step::Confirm(Read {
             file: None,
+            name: None,
             warnings: Vec::new(),
             saving: false,
         });
@@ -321,7 +354,7 @@ impl ImportPage {
         self.skip(window, cx);
     }
 
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Step::Confirm(read) = &mut self.step else {
             return;
         };
@@ -339,6 +372,13 @@ impl ImportPage {
             )
         });
         let file_name = file.as_ref().map(|(name, _, _)| name.clone());
+        // Typed text has no sizes to read before edits; it's read as saved.
+        let name = match &read.file {
+            Some(_) => read.name.clone(),
+            None => import::read(Format::Text, text.clone().into_bytes())
+                .ok()
+                .and_then(|reading| name::guess(&reading)),
+        };
         let saved = self.database.read(cx).write(cx, move |write| {
             let file = file.as_ref().map(|(name, bytes, media_type)| DocumentFile {
                 name,
@@ -350,7 +390,12 @@ impl ImportPage {
         self.task = cx.spawn_in(window, async move |this, cx| {
             let saved = saved.await;
             let updated = this.update_in(cx, |this, window, cx| match saved {
-                Ok(_) => {
+                Ok(document) => {
+                    cx.emit(ImportPageEvent::Saved {
+                        document,
+                        file_name: file_name.clone(),
+                        name,
+                    });
                     // The kit's notifications live in its Root, which a
                     // test's window may not have.
                     if window.root::<Root>().flatten().is_some() {
@@ -664,6 +709,8 @@ struct Imported {
 struct Read {
     /// The file it was read from; none when pasted or written.
     file: Option<File>,
+    /// The name the file seemed to give, read before the user's edits.
+    name: Option<String>,
     warnings: Vec<Warning>,
     saving: bool,
 }
@@ -979,6 +1026,16 @@ mod tests {
             Shown::Typed,
             "keys still work once the text field is gone"
         );
+    }
+
+    #[test]
+    fn a_files_text_takes_the_keys() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(&[LATEX]);
+        open.cx.simulate_keystrokes("ctrl-enter");
+        testing::settle(open.cx, &open.database);
+        assert_eq!(open.saved("latex.pdf").len(), 1);
     }
 
     #[test]
