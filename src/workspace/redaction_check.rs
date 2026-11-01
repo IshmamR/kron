@@ -16,10 +16,8 @@ use gpui_kit::{
     InteractiveText, IntoElement, KeyBinding, SharedString, StyledText, Subscription,
     UnderlineStyle, Window, actions, div, prelude::*, px,
 };
-use rusqlite::Connection;
 
 use super::parts::caption;
-use crate::database::Error;
 use crate::model::redaction::{self, Found, Identifier, Redaction};
 
 const KEY_CONTEXT: &str = "RedactionCheck";
@@ -313,16 +311,6 @@ impl RedactionCheck {
             format!("Hidden: {}.", counts.join(", "))
         }
     }
-}
-
-/// The names in the user's Name facts.
-pub fn names(connection: &Connection) -> Result<Vec<String>, Error> {
-    let mut statement = connection
-        .prepare_cached("SELECT text FROM facts WHERE kind = 'name' AND deleted_at IS NULL")?;
-    let names = statement
-        .query_map([], |row| row.get(0))?
-        .collect::<Result<_, _>>()?;
-    Ok(names)
 }
 
 #[cfg(test)]

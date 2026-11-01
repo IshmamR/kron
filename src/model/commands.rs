@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use super::{ClaimId, DocumentId, EventId, FactId, JobEvent, JobEventKind, JobId};
 use crate::database::schema::{
-    CustomSections, DocumentTexts, Documents, Entries, Events, FactSources, Facts, custom_sections,
-    document_texts, documents, entries, events, fact_sources, facts, generations,
-    unsupported_claims,
+    CustomSections, DocumentTexts, Documents, Entries, Events, FactSources, Facts, JobDescriptions,
+    Jobs, custom_sections, document_texts, documents, entries, events, fact_sources, facts,
+    generations, job_descriptions, jobs, unsupported_claims,
 };
 use crate::database::{Error, Write};
 use crate::typeset;
@@ -268,6 +268,50 @@ pub fn set_template(write: &mut Write, job: JobId, key: &str) -> Result<(), Erro
         generation,
         &Some(template.version_id),
     )
+}
+
+/// A job as the user adds it.
+pub struct NewJob<'a> {
+    pub title: &'a str,
+    pub company: &'a str,
+    pub url: Option<&'a str>,
+    /// The job's description, as pasted.
+    pub description: &'a str,
+}
+
+/// Adds the job after the others, wishlisted.
+pub fn add_job(write: &mut Write, job: &NewJob) -> Result<JobId, Error> {
+    let id = Uuid::now_v7();
+    let now = write.now();
+    // After every key there: the sample's are "a0" to "a9", and the time
+    // keeps later jobs after earlier ones until jobs can be reordered.
+    let board_sort_key = format!("b{now:015}");
+    write.insert(
+        Jobs,
+        id,
+        &[
+            jobs::TITLE.value(&job.title),
+            jobs::COMPANY.value(&job.company),
+            jobs::URL.value(&job.url),
+            jobs::CREATED_AT.value(&now),
+            jobs::BOARD_SORT_KEY.value(&board_sort_key),
+        ],
+    )?;
+    write.insert(
+        JobDescriptions,
+        id,
+        &[job_descriptions::TEXT.value(&job.description)],
+    )?;
+    write.insert(
+        Events,
+        Uuid::now_v7(),
+        &[
+            events::JOB_ID.value(&id),
+            events::AT.value(&now),
+            events::KIND.value(&"wishlisted"),
+        ],
+    )?;
+    Ok(JobId(id))
 }
 
 /// Adds the event, or replaces the one with its id.

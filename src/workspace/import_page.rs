@@ -27,15 +27,15 @@ use gpui_kit::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
-use super::parts::{caption, notice};
-use super::redaction_check::{self, RedactionCheck, RedactionCheckEvent};
+use super::parts::{caption, notice, notify};
+use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
 use crate::database::{Database, Error};
 use crate::import::{self, Format, Warning, name};
 use crate::llm::{self, Purpose};
 use crate::model::DocumentId;
 use crate::model::commands::{self, DocumentFile};
 use crate::model::extraction::{self, Answer, Extraction};
-use crate::model::redaction::{Identifier, Redaction};
+use crate::model::redaction::{self, Identifier, Redaction};
 use crate::model::settings;
 
 const KEY_CONTEXT: &str = "ImportPage";
@@ -454,7 +454,7 @@ impl ImportPage {
         cx: &mut Context<Self>,
     ) {
         let mut names =
-            redaction_check::names(self.database.read(cx).connection()).unwrap_or_else(|error| {
+            redaction::names(self.database.read(cx).connection()).unwrap_or_else(|error| {
                 eprintln!("import page: couldn't read the user's names: {error}");
                 Vec::new()
             });
@@ -552,6 +552,8 @@ impl ImportPage {
                             reply: reply.as_ref(),
                             done: found.is_ok(),
                             document: Some(document.0),
+                            job: None,
+                            generation: None,
                         },
                     )?;
                     match &found {
@@ -910,14 +912,6 @@ fn imported_before(connection: &Connection, hash: [u8; 32]) -> Result<Option<Imp
             file_name,
             added_at: DateTime::from_timestamp_millis(added_at).unwrap_or_default(),
         }))
-}
-
-/// Shows `notification`, where the window has the kit's Root for them: a
-/// test's may not.
-fn notify(notification: Notification, window: &mut Window, cx: &mut App) {
-    if window.root::<Root>().flatten().is_some() {
-        window.push_notification(notification, cx);
-    }
 }
 
 /// Why a file couldn't be read, in words for the user.

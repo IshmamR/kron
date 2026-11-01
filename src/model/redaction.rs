@@ -11,6 +11,9 @@ use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
+use rusqlite::Connection;
+
+use crate::database::Error;
 
 /// Top-level domains read as a web address without "http" or "www". Ours:
 /// common ones that aren't also file extensions, as ".js", ".py" and ".md"
@@ -212,6 +215,22 @@ impl Redaction {
         }
     }
 
+    /// `text`, written from the redacted text, with each placeholder in it
+    /// as what it replaced in `original`, the text redacted: the first thing
+    /// where one stands for several.
+    pub fn restore(&self, text: &str, original: &str) -> String {
+        let mut restored = text.to_owned();
+        for replacement in &self.replacements {
+            if restored.contains(&replacement.placeholder) {
+                restored = restored.replace(
+                    &replacement.placeholder,
+                    &original[replacement.original.clone()],
+                );
+            }
+        }
+        restored
+    }
+
     /// The bytes of the original text that `redacted`, bytes of the redacted
     /// text, came from. Part of a placeholder stands for all of what it
     /// replaced.
@@ -266,6 +285,16 @@ fn wrapped(rest: &str) -> usize {
     } else {
         0
     }
+}
+
+/// The names in the user's Name facts.
+pub fn names(connection: &Connection) -> Result<Vec<String>, Error> {
+    let mut statement = connection
+        .prepare_cached("SELECT text FROM facts WHERE kind = 'name' AND deleted_at IS NULL")?;
+    let names = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(names)
 }
 
 /// What the user's name is sent as in `text`: `stand_in`, or "[NAME]" where

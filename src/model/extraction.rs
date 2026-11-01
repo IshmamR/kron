@@ -197,7 +197,7 @@ impl Extraction {
             let Some((redacted, joined)) = found else {
                 return Some(FoundFact {
                     kind,
-                    text: restore(&quote, original, redaction),
+                    text: redaction.restore(&quote, original),
                     source: None,
                     review: Some(Review {
                         reason: ReviewReason::Unsure,
@@ -219,7 +219,7 @@ impl Extraction {
                 .into_iter()
                 .chain(joined.is_none().then(|| quote.clone()))
                 .find(|fixed| fixes::acceptable(sent, fixed))
-                .map(|fixed| restore(&fixed, original, redaction))
+                .map(|fixed| redaction.restore(&fixed, original))
                 .filter(|fixed| *fixed != cleaned);
             let source = Some((span, written.to_owned()));
             if let Some(fixed) = fixed {
@@ -844,21 +844,6 @@ fn clean(written: &str, joined: bool) -> String {
         rest = &rest[character.len_utf8()..];
     }
     text.trim().to_owned()
-}
-
-/// `quote` with the placeholders in it put back, for a fact that couldn't
-/// be found: each as the first thing it replaced.
-fn restore(quote: &str, original: &str, redaction: &Redaction) -> String {
-    let mut restored = quote.to_owned();
-    for replacement in &redaction.replacements {
-        if restored.contains(&replacement.placeholder) {
-            restored = restored.replace(
-                &replacement.placeholder,
-                &original[replacement.original.clone()],
-            );
-        }
-    }
-    restored
 }
 
 #[cfg(test)]

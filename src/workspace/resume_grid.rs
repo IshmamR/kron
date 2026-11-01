@@ -4,6 +4,7 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -73,6 +74,7 @@ pub fn init(cx: &mut App) {
 
 pub enum ResumeGridEvent {
     Open(JobId),
+    NewJob,
 }
 
 /// Home screen: one card per job, showing its résumé's first page.
@@ -178,6 +180,13 @@ impl Render for ResumeGrid {
                             )),
                     )
                     .child(div().flex_1())
+                    .child(
+                        Button::new("new-job")
+                            .label("New job")
+                            .icon(IconName::Plus)
+                            .small()
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob))),
+                    )
                     .child(
                         TabBar::new("job-filter")
                             .segmented()
@@ -783,8 +792,10 @@ mod tests {
         cx.update(|window, cx| {
             grid.focus_handle(cx).focus(window, cx);
             let opened = opened.clone();
-            cx.subscribe(&grid, move |_, event: &ResumeGridEvent, _| match event {
-                ResumeGridEvent::Open(job) => opened.set(Some(*job)),
+            cx.subscribe(&grid, move |_, event: &ResumeGridEvent, _| {
+                if let ResumeGridEvent::Open(job) = event {
+                    opened.set(Some(*job));
+                }
             })
             .detach();
         });

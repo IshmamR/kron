@@ -1,11 +1,12 @@
-// Small pieces shared by the inspector and the facts page.
+// Small pieces shared by the pages.
 
 use std::ops::Range;
 
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{ActiveTheme, Root, WindowExt, h_flex, v_flex};
 use gpui_kit::{
-    App, Div, FontWeight, HighlightStyle, Hsla, IntoElement, SharedString, StyledText, div,
+    App, Div, FontWeight, HighlightStyle, Hsla, IntoElement, SharedString, StyledText, Window, div,
     prelude::*, px,
 };
 
@@ -246,6 +247,14 @@ fn source_context(text: &str, span: &Range<usize>) -> Option<(String, Range<usiz
 /// Spans are kept non-negative by the schema.
 fn offset(value: i64) -> usize {
     usize::try_from(value).unwrap_or_default()
+}
+
+/// Shows `notification`, where the window has the kit's Root for them: a
+/// test's may not.
+pub fn notify(notification: Notification, window: &mut Window, cx: &mut App) {
+    if window.root::<Root>().flatten().is_some() {
+        window.push_notification(notification, cx);
+    }
 }
 
 #[cfg(test)]

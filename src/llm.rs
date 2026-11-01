@@ -53,12 +53,14 @@ impl Global for Runtime {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     ExtractFacts,
+    GenerateResume,
 }
 
 impl Purpose {
     pub fn stored(self) -> &'static str {
         match self {
             Self::ExtractFacts => "extract_facts",
+            Self::GenerateResume => "generate_resume",
         }
     }
 }
@@ -92,7 +94,11 @@ pub struct Run<'a> {
     pub reply: Option<&'a Reply>,
     /// Whether the answer was used: one that couldn't be read wasn't.
     pub done: bool,
+    /// What it ran for: a document's facts, or a job's résumé, and the
+    /// résumé made.
     pub document: Option<Uuid>,
+    pub job: Option<Uuid>,
+    pub generation: Option<Uuid>,
 }
 
 #[derive(Debug)]
@@ -358,6 +364,8 @@ pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
             llm_runs::COST.value(&Some(cost.unwrap_or(0.))),
             llm_runs::UNPRICED_CALLS.value(&Some(i64::from(cost.is_none()))),
             llm_runs::DOCUMENT_ID.value(&run.document),
+            llm_runs::JOB_ID.value(&run.job),
+            llm_runs::GENERATION_ID.value(&run.generation),
         ],
     )
 }
@@ -411,6 +419,8 @@ mod tests {
                     reply: None,
                     done: false,
                     document: Some(document.0),
+                    job: None,
+                    generation: None,
                 },
             )
         })?;

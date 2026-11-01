@@ -1,10 +1,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
@@ -14,18 +16,23 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_f
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, RenderImage, ScrollHandle, Stateful, Subscription, Window, actions, canvas, div, img, point,
+    Point, RenderImage, ScrollHandle, Stateful, Subscription, Task, Window, actions, canvas, div, img, point,
     prelude::*, px, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector};
+use super::parts::notify;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
     Generations, Jobs, LineCitations, Lines, Sections, UnsupportedClaims,
 };
 use crate::database::{Changed, Database, Error};
+use crate::llm::{self, Purpose};
+use crate::model::generation::{self, Draft, Material};
+use crate::model::redaction::{self, Redaction};
+use crate::model::settings;
 use crate::model::{self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands};
 use crate::typeset::{self, LineBox, PageSize, Template};
 
@@ -103,6 +110,10 @@ pub struct JobView {
     /// The selection was made from elsewhere; scroll to it once the pages
     /// are ready.
     scroll_pending: bool,
+    /// Writing a résumé with the model, which runs on while the user looks
+    /// elsewhere.
+    generating: bool,
+    generation: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -221,6 +232,8 @@ impl JobView {
             pages: None,
             page_bounds: Rc::default(),
             scroll_pending: false,
+            generating: false,
+            generation: Task::ready(()),
         }
     }
 
@@ -463,24 +476,198 @@ impl JobView {
                 cx,
             ))
             .child(
-                TabBar::new("job-tabs")
-                    .segmented()
-                    .small()
-                    .selected_index(match self.tab {
-                        Tab::Resume => 0,
-                        Tab::Application => 1,
+                h_flex()
+                    .gap_2()
+                    .when(self.shown_id().is_some(), |this| {
+                        this.child(self.generate_button(cx))
                     })
-                    .child(KitTab::new().label("Résumé"))
-                    .child(KitTab::new().label("Application"))
-                    .on_click(cx.listener(|this, index: &usize, window, cx| {
-                        let tab = if *index == 0 {
-                            Tab::Resume
-                        } else {
-                            Tab::Application
-                        };
-                        this.set_tab(tab, window, cx)
-                    })),
+                    .child(
+                        TabBar::new("job-tabs")
+                            .segmented()
+                            .small()
+                            .selected_index(match self.tab {
+                                Tab::Resume => 0,
+                                Tab::Application => 1,
+                            })
+                            .child(KitTab::new().label("Résumé"))
+                            .child(KitTab::new().label("Application"))
+                            .on_click(cx.listener(|this, index: &usize, window, cx| {
+                                let tab = if *index == 0 {
+                                    Tab::Resume
+                                } else {
+                                    Tab::Application
+                                };
+                                this.set_tab(tab, window, cx)
+                            })),
+                    ),
             )
+    }
+
+    /// "Generate", or "Regenerate" over a résumé there already.
+    fn generate_button(&self, cx: &Context<Self>) -> impl IntoElement {
+        let label = match (self.generating, self.shown_id().is_some()) {
+            (true, _) => "Writing…",
+            (false, true) => "Regenerate",
+            (false, false) => "Generate a résumé",
+        };
+        Button::new("generate")
+            .label(label)
+            .small()
+            .when(self.shown_id().is_none(), |this| this.primary())
+            .disabled(self.generating)
+            .on_click(cx.listener(|this, _, window, cx| this.generate(window, cx)))
+    }
+
+    /// Writes a résumé for the job from the user's facts with the model set
+    /// up for it, checks each line, and saves it as the job's current one. It
+    /// runs on while the user looks elsewhere, and a notification says how it
+    /// went.
+    fn generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(job) = self.job else {
+            return;
+        };
+        if self.generating {
+            return;
+        }
+        let database = self.database.read(cx);
+        let provider = match llm::assigned(database.device_connection(), Purpose::GenerateResume) {
+            Ok(Some(provider)) => provider,
+            Ok(None) => {
+                notify(
+                    Notification::warning("To write a résumé, add an AI provider in Settings."),
+                    window,
+                    cx,
+                );
+                return;
+            }
+            Err(error) => {
+                eprintln!("job view: couldn't read the AI provider: {error}");
+                return;
+            }
+        };
+        let connection = database.connection();
+        let read = || -> Result<_, Error> {
+            let posting: (String, String, Option<String>) = connection.query_row(
+                "SELECT jobs.title, jobs.company, job_descriptions.text FROM jobs
+                 LEFT JOIN job_descriptions ON job_descriptions.job_id = jobs.id
+                 WHERE jobs.id = ?1",
+                [job.0],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let names = redaction::names(connection)?;
+            let stand_in = settings::stand_in_name(connection)?;
+            Ok((posting, Material::read(connection)?, names, stand_in))
+        };
+        let ((title, company, description), material, names, stand_in) = match read() {
+            Ok(read) => read,
+            Err(error) => {
+                eprintln!("job view: couldn't read what a résumé is written from: {error}");
+                notify(
+                    Notification::error("Couldn't read your facts to write from."),
+                    window,
+                    cx,
+                );
+                return;
+            }
+        };
+        if material.is_empty() {
+            notify(
+                Notification::warning("Import your CV first: there are no facts to write from."),
+                window,
+                cx,
+            );
+            return;
+        }
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let redaction = Redaction::new(
+            &material.listing,
+            &redaction::find(&material.listing, &names, &[]),
+            &stand_in,
+        );
+        let request = generation::request(
+            &redaction.text,
+            &generation::Job {
+                title: &title,
+                company: &company,
+                description: description.as_deref().unwrap_or_default(),
+            },
+        );
+        let started_at = Utc::now().timestamp_millis();
+        let start = Instant::now();
+        let call = llm::complete(&provider, request, cx);
+        let database = self.database.clone();
+        self.generating = true;
+        cx.notify();
+        self.generation = cx.spawn_in(window, async move |this, cx| {
+            let reply = call.await;
+            let duration = start.elapsed();
+            let draft = match &reply {
+                Ok(reply) => generation::Answer::parse(&reply.response.text())
+                    .map(|answer| Draft::new(&answer, &material, &redaction))
+                    .map_err(|error| {
+                        eprintln!("job view: the model's answer isn't the JSON asked for: {error}");
+                        "the model's answer couldn't be read. Try again.".to_owned()
+                    }),
+                Err(error) => Err(error.to_string()),
+            };
+            let claims = draft.as_ref().map_or(0, |draft| draft.claims.len());
+            let saved = cx.update(|_, cx| {
+                database.read(cx).write(cx, move |write| {
+                    let reply = reply.ok();
+                    let resume = match &draft {
+                        Ok(draft) => {
+                            Some(generation::save(write, job, draft, generation::paper())?)
+                        }
+                        Err(_) => None,
+                    };
+                    llm::record(
+                        write,
+                        &llm::Run {
+                            purpose: Purpose::GenerateResume,
+                            provider: &provider,
+                            started_at,
+                            duration,
+                            reply: reply.as_ref(),
+                            done: resume.is_some(),
+                            document: None,
+                            job: Some(job.0),
+                            generation: resume.map(|resume| resume.0),
+                        },
+                    )?;
+                    Ok(draft.map(|_| ()))
+                })
+            });
+            let saved = match saved {
+                Ok(saved) => saved.await,
+                Err(error) => {
+                    eprintln!("job view: {error}");
+                    return;
+                }
+            };
+            let message = match saved {
+                Ok(Ok(())) => Notification::success(match claims {
+                    0 => "Wrote the résumé.".to_owned(),
+                    1 => "Wrote the résumé. 1 claim your facts don't back was left out.".to_owned(),
+                    claims => format!(
+                        "Wrote the résumé. {claims} claims your facts don't back were left out."
+                    ),
+                }),
+                Ok(Err(problem)) => {
+                    Notification::error(format!("Couldn't write the résumé: {problem}"))
+                }
+                Err(error) => {
+                    eprintln!("job view: couldn't save the résumé: {error}");
+                    Notification::error("Couldn't save the résumé.")
+                }
+            };
+            if let Err(error) = this.update_in(cx, |this, window, cx| {
+                this.generating = false;
+                notify(message, window, cx);
+                cx.notify();
+            }) {
+                eprintln!("job view: {error}");
+            }
+        });
     }
 
     fn render_resume_tab(&self, render: Option<PageRender>, cx: &Context<Self>) -> AnyElement {
@@ -531,7 +718,16 @@ impl JobView {
         cx: &Context<Self>,
     ) -> AnyElement {
         let Some(resume) = resume else {
-            return centered_message("No résumé for this job yet.", cx).into_any_element();
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No résumé for this job yet.")
+                .child(self.generate_button(cx))
+                .into_any_element();
         };
         let pages = match render {
             Some(PageRender::Ready(pages)) => pages,
@@ -842,8 +1038,6 @@ fn job_header(
         .gap_2()
         .px_2()
         .py_2()
-        .border_b_1()
-        .border_color(cx.theme().border)
         .child(
             Button::new("back")
                 .ghost()

@@ -4,6 +4,7 @@ mod fact_list;
 mod facts_page;
 mod import_page;
 mod inspector;
+mod job_form;
 mod job_view;
 mod onboarding;
 mod parts;
@@ -44,6 +45,7 @@ use crate::window;
 use ai_settings::AiSettings;
 use facts_page::FactsPage;
 use import_page::ImportPage;
+use job_form::{JobForm, JobFormEvent};
 use stand_in_name::StandInName;
 use job_view::{JobView, JobViewEvent};
 use onboarding::{Onboarding, OnboardingEvent};
@@ -59,6 +61,8 @@ const TOGGLE_WIDTH: Pixels = px(32.);
 /// How long the window has to stay put before where it is gets saved, so a
 /// drag saves once, not on every step.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
+/// Wide enough for a description's lines to read as they were written.
+const JOB_FORM_WIDTH: f32 = 640.;
 
 actions!(workspace, [ToggleSidebar, ShowShortcuts, Undo, Redo]);
 
@@ -119,6 +123,8 @@ pub struct Workspace {
     stand_in_name: Entity<StandInName>,
     /// Shown in place of everything else while the user has nothing yet.
     onboarding: Option<Entity<Onboarding>>,
+    /// The "New job" form's, while it's open.
+    _job_form: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -227,6 +233,7 @@ impl Workspace {
                 window,
                 |this, _, event, window, cx| match event {
                     ResumeGridEvent::Open(job) => this.open_job(*job, window, cx),
+                    ResumeGridEvent::NewJob => this.open_job_form(window, cx),
                 },
             ),
             cx.subscribe_in(
@@ -288,6 +295,7 @@ impl Workspace {
             ai_settings,
             stand_in_name,
             onboarding,
+            _job_form: None,
             _subscriptions: subscriptions,
         };
         workspace.count_needs_review(cx);
@@ -422,6 +430,29 @@ impl Workspace {
         self.job_view.focus_handle(cx).focus(window, cx);
         self.save_page(cx);
         cx.notify();
+    }
+
+    /// Opens the form a job is added with; the job opens once it's added.
+    fn open_job_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let form = cx.new(|cx| JobForm::new(self.database.clone(), window, cx));
+        self._job_form = Some(cx.subscribe_in(
+            &form,
+            window,
+            |this, _, event, window, cx| {
+                window.close_dialog(cx);
+                this._job_form = None;
+                if let JobFormEvent::Added(job) = event {
+                    this.open_job(*job, window, cx);
+                }
+            },
+        ));
+        window.open_dialog(cx, move |dialog, _, _| {
+            let form = form.clone();
+            dialog
+                .title("New job")
+                .w(px(JOB_FORM_WIDTH))
+                .content(move |content, _, _| content.child(form.clone()))
+        });
     }
 
     /// Back to the grid, with the job that was open still selected.
