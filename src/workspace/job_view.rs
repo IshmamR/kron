@@ -12,7 +12,9 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tab::{Tab as KitTab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt, h_flex, v_flex,
+};
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
     Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
@@ -22,6 +24,7 @@ use gpui_kit::{
 use rusqlite::{Connection, OptionalExtension};
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector};
+use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
 use super::parts::notify;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
@@ -44,6 +47,7 @@ const PAGE_GAP: f32 = 24.;
 const INSPECTOR_WIDTH: Pixels = px(340.);
 const INSPECTOR_MIN_WIDTH: Pixels = px(280.);
 const INSPECTOR_MAX_WIDTH: Pixels = px(560.);
+const INSTRUCTIONS_FORM_WIDTH: f32 = 520.;
 /// Keep this much room around a line scrolled into view.
 const SCROLL_MARGIN: f32 = 48.;
 
@@ -116,6 +120,8 @@ pub struct JobView {
     generation: Task<()>,
     /// Saving the résumé shown as a PDF, from asking where to writing it.
     export: Task<()>,
+    /// The form asking for instructions before generating's, while it's open.
+    _instructions_form: Option<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -237,6 +243,7 @@ impl JobView {
             generating: false,
             generation: Task::ready(()),
             export: Task::ready(()),
+            _instructions_form: None,
         }
     }
 
@@ -609,14 +616,59 @@ impl JobView {
             .small()
             .when(self.shown_id().is_none(), |this| this.primary())
             .disabled(self.generating)
-            .on_click(cx.listener(|this, _, window, cx| this.generate(window, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.ask_to_generate(window, cx)))
     }
 
-    /// Writes a résumé for the job from the user's facts with the model set
-    /// up for it, checks each line, and saves it as the job's current one. It
-    /// runs on while the user looks elsewhere, and a notification says how it
-    /// went.
-    fn generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Asks for anything to steer the résumé, starting from what the last was
+    /// asked, then writes it.
+    fn ask_to_generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(job) = self.job else {
+            return;
+        };
+        let last = generation::last_instructions(self.database.read(cx).connection(), job)
+            .unwrap_or_else(|error| {
+                eprintln!("job view: couldn't read the last instructions: {error}");
+                None
+            });
+        let form = cx.new(|cx| InstructionsForm::new(last, window, cx));
+        self._instructions_form = Some(cx.subscribe_in(
+            &form,
+            window,
+            |this, _, event, window, cx| {
+                window.close_dialog(cx);
+                this._instructions_form = None;
+                if let InstructionsFormEvent::Generate(instructions) = event {
+                    this.generate(instructions.clone(), window, cx);
+                }
+            },
+        ));
+        let title = match self.shown_id() {
+            Some(_) => "Regenerate the résumé",
+            None => "Generate a résumé",
+        };
+        window.open_dialog(cx, {
+            let form = form.clone();
+            move |dialog, _, _| {
+                let form = form.clone();
+                dialog
+                    .title(title)
+                    .w(px(INSTRUCTIONS_FORM_WIDTH))
+                    .content(move |content, _, _| content.child(form.clone()))
+            }
+        });
+        window.defer(cx, move |window, cx| form.update(cx, |form, cx| form.focus(window, cx)));
+    }
+
+    /// Writes a résumé for the job from the user's facts and `instructions`
+    /// with the model set up for it, checks each line, and saves it as the
+    /// job's current one. It runs on while the user looks elsewhere, and a
+    /// notification says how it went.
+    fn generate(
+        &mut self,
+        instructions: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(job) = self.job else {
             return;
         };
@@ -673,11 +725,8 @@ impl JobView {
             return;
         }
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        let redaction = Redaction::new(
-            &material.listing,
-            &redaction::find(&material.listing, &names, &[]),
-            &stand_in,
-        );
+        let sent = material.sent(instructions.as_deref());
+        let redaction = Redaction::new(&sent, &redaction::find(&sent, &names, &[]), &stand_in);
         let request = generation::request(
             &redaction.text,
             &generation::Job {
@@ -697,7 +746,7 @@ impl JobView {
             let duration = start.elapsed();
             let draft = match &reply {
                 Ok(reply) => generation::Answer::parse(&reply.response.text())
-                    .map(|answer| Draft::new(&answer, &material, &redaction))
+                    .map(|answer| Draft::new(&answer, &material, &sent, &redaction))
                     .map_err(|error| {
                         eprintln!("job view: the model's answer isn't the JSON asked for: {error}");
                         "the model's answer couldn't be read. Try again.".to_owned()
@@ -710,7 +759,13 @@ impl JobView {
                     let reply = reply.ok();
                     let resume = match &draft {
                         Ok(draft) => {
-                            Some(generation::save(write, job, draft, generation::paper())?)
+                            Some(generation::save(
+                                write,
+                                job,
+                                draft,
+                                generation::paper(),
+                                instructions.as_deref(),
+                            )?)
                         }
                         Err(_) => None,
                     };

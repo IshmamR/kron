@@ -4,6 +4,7 @@ mod fact_list;
 mod facts_page;
 mod import_page;
 mod inspector;
+mod instructions_form;
 mod job_form;
 mod job_view;
 mod onboarding;
@@ -446,13 +447,17 @@ impl Workspace {
                 }
             },
         ));
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, {
             let form = form.clone();
-            dialog
-                .title("New job")
-                .w(px(JOB_FORM_WIDTH))
-                .content(move |content, _, _| content.child(form.clone()))
+            move |dialog, _, _| {
+                let form = form.clone();
+                dialog
+                    .title("New job")
+                    .w(px(JOB_FORM_WIDTH))
+                    .content(move |content, _, _| content.child(form.clone()))
+            }
         });
+        window.defer(cx, move |window, cx| form.update(cx, |form, cx| form.focus(window, cx)));
     }
 
     /// Back to the grid, with the job that was open still selected.

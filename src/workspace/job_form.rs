@@ -6,7 +6,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AppContext, Context, Entity, EventEmitter, IntoElement, SharedString, Subscription, Task,
+    App, AppContext, Context, Entity, EventEmitter, IntoElement, SharedString, Subscription, Task,
     Window, div, prelude::*,
 };
 
@@ -134,7 +134,6 @@ impl JobForm {
             .map(|field| cx.observe(field, |_, _, cx| cx.notify()))
             .collect();
         subscriptions.push(cx.observe(&description, |_, _, cx| cx.notify()));
-        title.update(cx, |title, cx| title.focus(window, cx));
         Self {
             database,
             title,
@@ -145,6 +144,12 @@ impl JobForm {
             task: Task::ready(()),
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Puts the cursor in the title. Once the dialog it's in has opened: the
+    /// dialog takes focus as it opens.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.title.update(cx, |title, cx| title.focus(window, cx));
     }
 
     fn add(&mut self, cx: &mut Context<Self>) {

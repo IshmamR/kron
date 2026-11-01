@@ -10,7 +10,7 @@
 
 use rig_core::completion::CompletionRequest;
 use rig_core::completion::options::{GenerationOptions, Reasoning};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -56,13 +56,16 @@ Rules:
 - Fit one page: at most four bullets for the latest job, three for the one before, one or two for older ones, and one or two for each project. Two pages only for more than ten years of work.
 - Write as résumés do, without "I", "he", "she" or "they", and never the person's name or contact details: they're added.
 - Say what the person did, never how well they fit the job or what the employer needs.
-- Placeholders in square brackets, like [LINK_1], stand for hidden details. Copy them as they are."#;
+- Placeholders in square brackets, like [LINK_1], stand for hidden details. Copy them as they are.
+- The person may give instructions for this résumé, like what to lead with. Follow them where these rules allow: they can change what's shown and in what order, never let a line say more than its facts."#;
 /// Room for a two-page résumé as JSON. Ours, from extraction's: a two-page
 /// CV's facts are about 4,000 tokens of answer.
 const MAX_TOKENS: u64 = 16_000;
 /// The section certifications are shown in: résumés have one, but it has no
 /// kind of its own.
 const CERTIFICATIONS: &str = "Certifications";
+/// Marks the person's own instructions off from the facts in what's sent.
+const INSTRUCTIONS_HEADING: &str = "\nTheir instructions for this résumé:\n";
 /// What a list of skills is joined with on the page.
 const SKILL_SEPARATOR: &str = ", ";
 
@@ -214,6 +217,19 @@ impl Material {
         Ok(material)
     }
 
+    /// What's sent of the person: the listing, then their `instructions` for
+    /// this résumé, if any. Redacted as one, so their name is hidden in both.
+    pub fn sent(&self, instructions: Option<&str>) -> String {
+        match instructions {
+            Some(instructions) => format!(
+                "{}{INSTRUCTIONS_HEADING}{}\n",
+                self.listing,
+                instructions.trim()
+            ),
+            None => self.listing.clone(),
+        }
+    }
+
     /// Whether there's nothing to make a résumé from but a name and contacts.
     pub fn is_empty(&self) -> bool {
         self.facts.is_empty()
@@ -271,8 +287,8 @@ impl Material {
     }
 }
 
-/// The request asking the model for a résumé for `job` from `redacted`, the
-/// material's listing as redacted. It's asked not to reason: it's slower and
+/// The request asking the model for a résumé for `job` from `redacted`, what
+/// the material sends (`Material::sent`) as redacted. It's asked not to reason: it's slower and
 /// costs more, and nothing it reasons is checked.
 pub fn request(redacted: &str, job: &Job) -> CompletionRequest {
     let prompt = format!(
@@ -299,10 +315,10 @@ impl Answer {
 }
 
 impl Draft {
-    /// The résumé `answer` describes, from `material`, whose listing was
-    /// redacted as `redaction`: each line the model wrote checked against
-    /// the facts it cites.
-    pub fn new(answer: &Answer, material: &Material, redaction: &Redaction) -> Self {
+    /// The résumé `answer` describes, from `material`, what it sent
+    /// (`sent`) redacted as `redaction`: each line the model wrote checked
+    /// against the facts it cites.
+    pub fn new(answer: &Answer, material: &Material, sent: &str, redaction: &Redaction) -> Self {
         let given: Vec<GivenFact> = material
             .facts
             .iter()
@@ -316,7 +332,7 @@ impl Draft {
         // A line the model wrote, citing those of `facts` that `allowed`
         // lets it, if the verifier passes it.
         let mut written = |written: &Written, allowed: &dyn Fn(usize) -> bool| -> Option<Line> {
-            let text = redaction.restore(written.text.trim(), &material.listing);
+            let text = redaction.restore(written.text.trim(), sent);
             if text.is_empty() {
                 return None;
             }
@@ -478,7 +494,10 @@ impl Draft {
                 .iter_mut()
                 .find(|section| section.kind == SectionKind::Other && section.title == other)
             {
-                Some(section) => section.blocks.extend(blocks),
+                // Before its entries: after one, an item reads as its bullet.
+                Some(section) => {
+                    section.blocks.splice(0..0, blocks);
+                }
                 None => sections.push(Section {
                     kind: SectionKind::Other,
                     title: other.to_owned(),
@@ -508,7 +527,13 @@ impl Draft {
 
 /// Saves `draft` as the job's current résumé, laid out with the default
 /// template on `paper`.
-pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: Paper) -> Result<ResumeId, Error> {
+pub fn save(
+    write: &mut Write,
+    job: JobId,
+    draft: &Draft,
+    paper: Paper,
+    instructions: Option<&str>,
+) -> Result<ResumeId, Error> {
     let generation = Uuid::now_v7();
     let template = typeset::template(typeset::DEFAULT_TEMPLATE);
     write.insert(
@@ -520,6 +545,7 @@ pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: Paper) -> Resul
             generations::GENERATED_AT.value(&write.now()),
             generations::TEMPLATE_VERSION_ID.value(&Some(template.version_id)),
             generations::PAPER.value(&Some(paper.stored())),
+            generations::INSTRUCTIONS.value(&instructions),
         ],
     )?;
     for (position, section) in draft.sections.iter().enumerate() {
@@ -576,6 +602,20 @@ pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: Paper) -> Resul
         )?;
     }
     Ok(ResumeId(generation))
+}
+
+/// The instructions the job's last résumé was written with, which the next
+/// starts from.
+pub fn last_instructions(connection: &Connection, job: JobId) -> Result<Option<String>, Error> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT instructions FROM generations
+             WHERE job_id = ?1 AND kind = 'resume' AND deleted_at IS NULL
+             ORDER BY generated_at DESC, id DESC LIMIT 1",
+        )?
+        .query_row([job.0], |row| row.get(0))
+        .optional()?
+        .flatten())
 }
 
 /// The paper a résumé is laid out on here: letter where it's the custom, by
@@ -761,7 +801,7 @@ mod tests {
             Ok(answer) => answer,
             Err(error) => panic!("a test answer that parses: {error}"),
         };
-        let draft = Draft::new(&answer, &material, &redaction);
+        let draft = Draft::new(&answer, &material, &material.listing, &redaction);
         (material, draft)
     }
 
@@ -854,11 +894,11 @@ mod tests {
                 "Languages [F57]",
                 "Rust, Go [F58 F59]",
                 "# Other Other",
+                "Tracing async Rust in production, RustConf 2024. [F2]",
                 "Organizer [F72]",
                 "2019 [F74]",
                 "University of Dhaka Programming Club [F73]",
                 "Ran a volunteer team of 15 students over three days. [F75]",
-                "Tracing async Rust in production, RustConf 2024. [F2]",
             ],
             "the model's entries in the documents' order, each line citing only facts of its own \
              entry; Kron's lines as the facts have them"
@@ -893,11 +933,57 @@ mod tests {
     }
 
     #[test]
+    fn instructions_are_sent_after_the_facts_with_the_name_hidden() {
+        let writer = match sample::written() {
+            Ok(writer) => writer,
+            Err(error) => panic!("the sample: {error}"),
+        };
+        let (material, _) = draft(writer.kron(), "{}");
+        assert_eq!(material.sent(None), material.listing);
+        let sent = material.sent(Some("  Lead with Alex Rahman's talks.\n"));
+        assert!(sent.starts_with(&material.listing));
+        assert!(
+            sent.ends_with("Their instructions for this résumé:\nLead with Alex Rahman's talks.\n")
+        );
+        let redaction = Redaction::new(
+            &sent,
+            &redaction::find(&sent, &["Alex Rahman"], &[]),
+            STAND_IN,
+        );
+        assert!(
+            !redaction.text.contains("Alex"),
+            "the name in them is hidden too"
+        );
+        assert!(redaction.text.contains("Lead with Jordan Ellis's talks."));
+    }
+
+    #[test]
+    fn a_resume_keeps_its_instructions_and_the_next_starts_from_them() -> Result<(), Error> {
+        let mut writer = sample::written()?;
+        let (_, first) = draft(writer.kron(), "{}");
+        let job = sample::job(writer.kron(), "Cinder Labs")?;
+        writer
+            .execute(|write| save(write, job, &first, Paper::A4, Some("Lead with the talks.")))?;
+        assert_eq!(
+            last_instructions(writer.kron(), job)?.as_deref(),
+            Some("Lead with the talks.")
+        );
+        let (_, again) = draft(writer.kron(), "{}");
+        writer.execute(|write| save(write, job, &again, Paper::A4, None))?;
+        assert_eq!(
+            last_instructions(writer.kron(), job)?,
+            None,
+            "the latest's, even none"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_draft_saved_reads_back_as_it_was() -> Result<(), Error> {
         let mut writer = sample::written()?;
         let (material, draft) = draft(writer.kron(), ANSWER);
         let job = sample::job(writer.kron(), "Cinder Labs")?;
-        let (resume, _) = writer.execute(|write| save(write, job, &draft, Paper::A4))?;
+        let (resume, _) = writer.execute(|write| save(write, job, &draft, Paper::A4, None))?;
         let read = Section::read_all(writer.kron(), resume)?;
         assert_eq!(shown(&read, &material), shown(&draft.sections, &material));
         let ids = |sections: &[Section]| -> Vec<LineId> {
@@ -982,6 +1068,7 @@ mod tests {
         let draft = Draft::new(
             &Answer::parse(&reply.response.text())?,
             &material,
+            &material.listing,
             &redaction,
         );
         for line in shown(&draft.sections, &material) {
