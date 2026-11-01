@@ -231,15 +231,31 @@ pub enum UnsupportedReason {
 }
 
 /// Tells whether another fact probably says the same thing as `text`: most
-/// of the shorter one's words appear in the other.
+/// of the shorter one's words appear in the other, and where both give
+/// numbers, they're the same: "from 480 ms to 95 ms" and "from 480 ms to
+/// 120 ms" are different results.
 pub fn possible_duplicate(text: &str) -> impl Fn(&str) -> bool {
     let words = significant_words(text);
+    let numbers = with_digits(&words);
     move |other| {
         let other_words = significant_words(other);
+        let other_numbers = with_digits(&other_words);
+        if !numbers.is_empty() && !other_numbers.is_empty() && numbers != other_numbers {
+            return false;
+        }
         let shared = words.intersection(&other_words).count();
         let shorter = words.len().min(other_words.len());
         shorter > 0 && shared as f32 / shorter as f32 >= DUPLICATE_OVERLAP
     }
+}
+
+/// The words with a digit in them, like "480" or "p99".
+fn with_digits(words: &HashSet<String>) -> HashSet<String> {
+    words
+        .iter()
+        .filter(|word| word.chars().any(|character| character.is_ascii_digit()))
+        .cloned()
+        .collect()
 }
 
 fn significant_words(text: &str) -> HashSet<String> {
@@ -274,6 +290,11 @@ mod tests {
         assert!(possible_duplicate(&linkedin)(&migration));
         assert!(!possible_duplicate(&latency)(&linkedin));
         assert!(!possible_duplicate(&latency)(&migration));
+        assert!(
+            !possible_duplicate(&latency)(&latency.replace("95", "120")),
+            "a different result"
+        );
+        assert!(possible_duplicate(&latency)(&format!("{latency} with caching")));
         Ok(())
     }
 }

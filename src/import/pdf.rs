@@ -14,7 +14,8 @@ use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
     InterpreterSettings, Paint, PathDrawMode, RectExt, SoftMask, TransformExt, interpret_page,
 };
-use hayro_syntax::object::{Array, Dict, Rect as PdfRect, String as PdfString};
+use hayro_syntax::content::ops::TypedInstruction;
+use hayro_syntax::object::{Array, Dict, Rect as PdfRect, String as PdfString, dict_or_stream};
 use hayro_syntax::page::Page;
 use hayro_syntax::{LoadPdfError, Pdf};
 use kurbo::{Affine, BezPath, Point, Rect};
@@ -68,7 +69,10 @@ pub fn read(bytes: Vec<u8>) -> Result<Reading, Error> {
             page.xref(),
             InterpreterSettings::default(),
         );
-        let mut drawn = Drawn::default();
+        let mut drawn = Drawn {
+            actual_texts: actual_texts(page).into_iter(),
+            ..Drawn::default()
+        };
         interpret_page(page, &mut context, &mut drawn);
         drawn.measure();
         if drawn.picture && drawn.glyphs.is_empty() {
@@ -163,6 +167,11 @@ struct Drawn {
     drawn_font: bool,
     /// Where a Type 3 font draws spaces.
     spaces: Vec<Point>,
+    /// The `actual_texts` of the page's marked content not yet begun.
+    actual_texts: std::vec::IntoIter<Option<String>>,
+    /// Those of the marked content begun and not ended, innermost last;
+    /// taken by the first glyph that needs it.
+    spans: Vec<Option<String>>,
 }
 
 impl<'a> Device<'a> for Drawn {
@@ -176,6 +185,12 @@ impl<'a> Device<'a> for Drawn {
     }
     fn pop_clip_path(&mut self) {}
     fn pop_transparency_group(&mut self) {}
+    fn begin_marked_content(&mut self, _: &[u8], _: Option<i32>) {
+        self.spans.push(self.actual_texts.next().flatten());
+    }
+    fn end_marked_content(&mut self) {
+        self.spans.pop();
+    }
 
     fn draw_glyph(
         &mut self,
@@ -189,9 +204,17 @@ impl<'a> Device<'a> for Drawn {
             self.drawn_font = true;
         }
         let text = match glyph.as_unicode() {
-            Some(BfString::Char(character)) => character.to_string(),
-            Some(BfString::String(text)) => text,
-            None => return,
+            Some(BfString::Char(character)) => Some(character.to_string()),
+            Some(BfString::String(text)) => Some(text),
+            None => None,
+        };
+        // A glyph without text of its own, as Chrome draws the en dash it
+        // sets between digits, may have it in the span it's drawn in.
+        let Some(text) = text
+            .filter(|text| !text.chars().any(icon))
+            .or_else(|| self.spans.last_mut().and_then(Option::take))
+        else {
+            return;
         };
         let text = unligated(text);
         let drawn_font = matches!(glyph, PdfGlyph::Type3(_));
@@ -531,6 +554,43 @@ fn links(page: &Page<'_>, transform: Affine) -> Vec<(String, Rect)> {
         .collect()
 }
 
+/// The ActualText of each marked-content sequence the page's content
+/// begins, in order, for `Drawn` to match with those hayro begins. Those in
+/// a form a page draws aren't listed, so the ones after it pair wrongly, but
+/// only glyphs without text of their own take them.
+fn actual_texts(page: &Page<'_>) -> Vec<Option<String>> {
+    let mut operations = page.typed_operations();
+    let mut texts = Vec::new();
+    // A lending iterator, not an `Iterator`.
+    while let Some(operation) = operations.next() {
+        match operation {
+            TypedInstruction::BeginMarkedContent(_) => texts.push(None),
+            TypedInstruction::BeginMarkedContentWithProperties(begin) => texts.push(
+                dict_or_stream(begin.1)
+                    .and_then(|(properties, _)| properties.get::<PdfString<'_>>(b"ActualText"))
+                    .map(|text| text_string(text.as_bytes())),
+            ),
+            _ => {}
+        }
+    }
+    texts
+}
+
+/// A PDF text string: UTF-16 after a byte order mark, or else one byte a
+/// character, read as Latin-1, which PDFDocEncoding matches but for a few
+/// symbols.
+fn text_string(bytes: &[u8]) -> String {
+    match bytes.strip_prefix(&[0xFE, 0xFF]) {
+        Some(utf16) => String::from_utf16_lossy(
+            &utf16
+                .chunks_exact(2)
+                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>(),
+        ),
+        None => bytes.iter().map(|&byte| char::from(byte)).collect(),
+    }
+}
+
 /// Whether `character` is an icon: icon fonts put their glyphs in the
 /// Private Use Areas, and an unknown glyph reads as the replacement mark.
 fn icon(character: char) -> bool {
@@ -846,6 +906,14 @@ mod tests {
         assert_eq!(lines.first(), Some(&"Tasnim Chowdhury"));
         assert!(
             lines.contains(&"Paired with the backend team to move the fare estimate API from polling to WebSockets."),
+            "{lines:#?}"
+        );
+        // Inter's dash between digits has no code of its own: Chrome gives
+        // it one from the Private Use Area and its text as ActualText.
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with("Jun 2024 – Present")),
             "{lines:#?}"
         );
     }

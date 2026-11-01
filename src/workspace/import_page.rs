@@ -459,8 +459,8 @@ impl ImportPage {
                 Vec::new()
             });
         names.extend(name);
-        let stand_in = settings::stand_in_name(self.database.read(cx).connection())
-            .unwrap_or_else(|error| {
+        let stand_in =
+            settings::stand_in_name(self.database.read(cx).connection()).unwrap_or_else(|error| {
                 eprintln!("import page: couldn't read the stand-in name: {error}");
                 Identifier::Name.placeholder().to_owned()
             });
@@ -539,20 +539,6 @@ impl ImportPage {
                     }),
                 Err(error) => Err(error.to_string()),
             };
-            let message = match &found {
-                Ok(extraction) => {
-                    let mut message = format!("Found {} facts in {label}.", extraction.count());
-                    match extraction.to_review() {
-                        0 => {}
-                        1 => message.push_str(" 1 needs a look."),
-                        count => message.push_str(&format!(" {count} need a look.")),
-                    }
-                    Notification::success(message)
-                }
-                Err(problem) => {
-                    Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
-                }
-            };
             let saved = cx.update(|_, cx| {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
@@ -569,8 +555,8 @@ impl ImportPage {
                         },
                     )?;
                     match &found {
-                        Ok(extraction) => extraction::save(write, document, extraction),
-                        Err(_) => Ok(()),
+                        Ok(extraction) => extraction::save(write, document, extraction).map(Ok),
+                        Err(problem) => Ok(Err(problem.clone())),
                     }
                 })
             });
@@ -582,7 +568,24 @@ impl ImportPage {
                 }
             };
             let message = match saved {
-                Ok(()) => message,
+                Ok(Ok(saved)) => {
+                    let mut message =
+                        format!("Found {} facts in {label}.", saved.added + saved.there);
+                    match saved.there {
+                        0 => {}
+                        1 => message.push_str(" 1 was there already."),
+                        count => message.push_str(&format!(" {count} were there already.")),
+                    }
+                    match saved.to_review {
+                        0 => {}
+                        1 => message.push_str(" 1 needs a look."),
+                        count => message.push_str(&format!(" {count} need a look.")),
+                    }
+                    Notification::success(message)
+                }
+                Ok(Err(problem)) => {
+                    Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
+                }
                 Err(error) => {
                     eprintln!("import page: couldn't save the facts found: {error}");
                     Notification::error(format!("Couldn't save the facts found in {label}."))
@@ -1195,7 +1198,10 @@ mod tests {
             page.write("Sami ul Haque\nsami@example.com\n".into(), window, cx)
         });
         open.save();
-        assert_eq!(open.shown(), Shown::Check("Jordan Ellis\n[EMAIL_1]\n".into()));
+        assert_eq!(
+            open.shown(),
+            Shown::Check("Jordan Ellis\n[EMAIL_1]\n".into())
+        );
     }
 
     #[test]

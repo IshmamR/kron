@@ -4,7 +4,11 @@
 // where it is, so a fact says what the document says and cites where. A
 // quote that isn't there word for word is kept and marked unsure: the model
 // may have read it right and copied it wrong. Where the document breaks a
-// word across lines, the fact is the word joined, marked for a look.
+// word across lines, the fact is the word joined, marked for a look. The
+// model may also fix a slip in how the text reads, like a word split in two,
+// next to the quote; a fix that changes what the text says is ignored.
+
+mod fixes;
 
 use std::ops::Range;
 
@@ -15,7 +19,7 @@ use uuid::Uuid;
 
 use super::commands::custom_section;
 use super::redaction::{Identifier, Redaction};
-use super::{DocumentId, EntryKind, FactKind, Review, ReviewReason};
+use super::{DocumentId, EntryKind, FactKind, Review, ReviewReason, possible_duplicate};
 use crate::database::schema::{Entries, FactSources, Facts, entries, fact_sources, facts};
 use crate::database::{Error, Write};
 
@@ -23,26 +27,27 @@ use crate::database::{Error, Write};
 /// takes "a JSON object" rather than a schema.
 const PREAMBLE: &str = r#"You read a CV, or other text about a person's work, and list what it says as exact quotes.
 
-Answer with one JSON object:
+Answer with one JSON object. Each Quote in it is {"quote": string, "fixed": string or null}, as the rules say.
 {
-  "summary": the profile or summary paragraph, or null,
+  "summary": a Quote of the profile or summary paragraph, or null,
   "contacts": the placeholders, like "[EMAIL_1]", that are this person's own email, phone, links and profiles,
   "entries": [
     {
       "kind": "experience", "education", "project", "certification", "skills" or "other",
       "section": for "other", the heading it is under, as written; otherwise null,
-      "title": the job title, degree, project or certificate name, or a skills line's label (like "Languages"), or null,
-      "organization": the employer, school or issuer, or null,
-      "location": or null,
-      "dates": as written, like "Mar 2021 – Present", without a duration the text adds, like "(2 years 3 months)", or null,
-      "bullets": [each bullet point about it, or each sentence of a paragraph about it],
-      "skills": [each skill or technology listed for it]
+      "title": a Quote of the job title, degree, project or certificate name, or a skills line's label (like "Languages"), or null,
+      "organization": a Quote of the employer, school or issuer, or null,
+      "location": a Quote, or null,
+      "dates": a Quote of them as written, like "Mar 2021 – Present", without a duration the text adds, like "(2 years 3 months)", or null,
+      "bullets": [a Quote of each bullet point about it, or each sentence of a paragraph about it],
+      "skills": [a Quote of each skill or technology listed for it]
     }
   ]
 }
 
 Rules:
-- Copy every string exactly as the text has it: the same words, spelling, case and punctuation. Never rephrase, correct, shorten, or join text from different places.
+- A Quote's "quote" is copied exactly as the text has it: the same words, spelling, case and punctuation, slips and all. Never rephrase, shorten, or join text from different places.
+- A Quote's "fixed" is null, unless the text has a slip in how it was read or typed, like a word split in two ("Work ing"), a missing dash between dates ("2021 2023") or a misspelt word: then it's the quote as it should read. Fix only such slips: never change a number, or which words are there.
 - Leave out bullet markers (•, -, *) at the start of a point.
 - A bullet point is one quote, even when it wraps onto the next line: quote all of it, with the line break as a space.
 - Placeholders in square brackets, like [EMAIL_1], stand for hidden details. Copy them as they are. Never guess what they hide.
@@ -75,7 +80,7 @@ pub fn request(redacted: &str) -> CompletionRequest {
 #[derive(Debug, Default, Deserialize)]
 pub struct Answer {
     #[serde(default)]
-    summary: Option<String>,
+    summary: Option<Quoted>,
     #[serde(default)]
     contacts: Vec<String>,
     #[serde(default)]
@@ -89,17 +94,44 @@ struct AnswerEntry {
     #[serde(default)]
     section: Option<String>,
     #[serde(default)]
-    title: Option<String>,
+    title: Option<Quoted>,
     #[serde(default)]
-    organization: Option<String>,
+    organization: Option<Quoted>,
     #[serde(default)]
-    location: Option<String>,
+    location: Option<Quoted>,
     #[serde(default)]
-    dates: Option<String>,
+    dates: Option<Quoted>,
     #[serde(default)]
-    bullets: Vec<String>,
+    bullets: Vec<Quoted>,
     #[serde(default)]
-    skills: Vec<String>,
+    skills: Vec<Quoted>,
+}
+
+/// A quote, and how it should read if the model fixed a slip in it.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Quoted {
+    Exact(String),
+    Fixed {
+        quote: String,
+        #[serde(default)]
+        fixed: Option<String>,
+    },
+}
+
+impl Quoted {
+    fn quote(&self) -> &str {
+        match self {
+            Quoted::Exact(quote) | Quoted::Fixed { quote, .. } => quote,
+        }
+    }
+
+    fn fixed(&self) -> Option<&str> {
+        match self {
+            Quoted::Exact(_) => None,
+            Quoted::Fixed { fixed, .. } => fixed.as_deref(),
+        }
+    }
 }
 
 impl Answer {
@@ -144,35 +176,28 @@ impl Extraction {
     /// the facts from `original`, the text it was made from.
     pub fn locate(answer: Answer, original: &str, redaction: &Redaction) -> Self {
         let mut quotes = Quotes::new(&redaction.text);
-        let mut fact = |kind: FactKind, quote: &str| -> Option<FoundFact> {
-            let quote = quote.trim().trim_start_matches(BULLETS).trim();
+        let mut fact = |kind: FactKind, quoted: &Quoted| -> Option<FoundFact> {
+            let trim = |quote: &'_ str| quote.trim().trim_start_matches(BULLETS).trim().to_owned();
+            let quote = trim(quoted.quote());
             if quote.is_empty() {
                 return None;
             }
-            Some(match quotes.find(quote) {
-                Some((redacted, joined)) => {
-                    let span = redaction.original(redacted);
-                    let written = &original[span.clone()];
-                    let broken = written
-                        .match_indices('-')
-                        .any(|(index, _)| broken_word(&written[index..]).is_some());
-                    FoundFact {
-                        kind,
-                        text: clean(written, joined),
-                        source: Some((span, written.to_owned())),
-                        review: broken.then(|| Review {
-                            reason: ReviewReason::Cleaned,
-                            note: Some(
-                                "A word was split across two lines in the document. Check it's \
-                                 joined right."
-                                    .to_owned(),
-                            ),
-                        }),
-                    }
-                }
-                None => FoundFact {
+            // Found as quoted, or else as the model fixed it without saying,
+            // when the fix is one it may make.
+            let found = quotes
+                .find(&quote)
+                .map(|(redacted, joined)| (redacted, Some(joined)))
+                .or_else(|| {
+                    let redacted = fixes::nearest(&redaction.text, &quote, quotes.cursor)?;
+                    fixes::acceptable(&redaction.text[redacted.clone()], &quote).then(|| {
+                        quotes.cursor = redacted.end;
+                        (redacted, None)
+                    })
+                });
+            let Some((redacted, joined)) = found else {
+                return Some(FoundFact {
                     kind,
-                    text: restore(quote, original, redaction),
+                    text: restore(&quote, original, redaction),
                     source: None,
                     review: Some(Review {
                         reason: ReviewReason::Unsure,
@@ -182,7 +207,50 @@ impl Extraction {
                                 .to_owned(),
                         ),
                     }),
-                },
+                });
+            };
+            let sent = &redaction.text[redacted.clone()];
+            let span = redaction.original(redacted);
+            let written = &original[span.clone()];
+            let cleaned = clean(written, joined.unwrap_or(false));
+            let fixed = quoted
+                .fixed()
+                .map(trim)
+                .into_iter()
+                .chain(joined.is_none().then(|| quote.clone()))
+                .find(|fixed| fixes::acceptable(sent, fixed))
+                .map(|fixed| restore(&fixed, original, redaction))
+                .filter(|fixed| *fixed != cleaned);
+            let source = Some((span, written.to_owned()));
+            if let Some(fixed) = fixed {
+                return Some(FoundFact {
+                    kind,
+                    text: fixed,
+                    source,
+                    review: Some(Review {
+                        reason: ReviewReason::Cleaned,
+                        note: Some(format!(
+                            "Fixed from the document's \u{201c}{}\u{201d}. Check it reads right.",
+                            clean(written, false)
+                        )),
+                    }),
+                });
+            }
+            let broken = written
+                .match_indices('-')
+                .any(|(index, _)| broken_word(&written[index..]).is_some());
+            Some(FoundFact {
+                kind,
+                text: cleaned,
+                source,
+                review: broken.then(|| Review {
+                    reason: ReviewReason::Cleaned,
+                    note: Some(
+                        "A word was split across two lines in the document. Check it's \
+                         joined right."
+                            .to_owned(),
+                    ),
+                }),
             })
         };
 
@@ -190,7 +258,7 @@ impl Extraction {
         extraction.profile.extend(
             answer
                 .summary
-                .as_deref()
+                .as_ref()
                 .and_then(|summary| fact(FactKind::Summary, summary)),
         );
         for entry in answer.entries {
@@ -215,7 +283,7 @@ impl Extraction {
             ];
             let mut facts: Vec<FoundFact> = fields
                 .into_iter()
-                .filter_map(|(kind, quote)| fact(kind, quote.as_deref()?))
+                .filter_map(|(kind, quote)| fact(kind, quote.as_ref()?))
                 .collect();
             facts.extend(
                 entry
@@ -249,10 +317,15 @@ impl Extraction {
             });
             if let Some(replacement) = replacement {
                 let written = &original[replacement.original.clone()];
-                if !extraction.profile.iter().any(|fact| fact.text == written) {
+                // A link wrapped onto the next line has no space in it.
+                let text = match replacement.identifier {
+                    Identifier::Link => written.lines().map(str::trim).collect(),
+                    _ => clean(written, false),
+                };
+                if !extraction.profile.iter().any(|fact| fact.text == text) {
                     extraction.profile.push(FoundFact {
                         kind: FactKind::Contact,
-                        text: written.to_owned(),
+                        text,
                         source: Some((replacement.original.clone(), written.to_owned())),
                         review: None,
                     });
@@ -261,34 +334,23 @@ impl Extraction {
         }
         extraction
     }
-
-    pub fn count(&self) -> usize {
-        self.profile.len()
-            + self
-                .entries
-                .iter()
-                .map(|entry| entry.facts.len())
-                .sum::<usize>()
-    }
-
-    /// How many facts are marked for a look.
-    pub fn to_review(&self) -> usize {
-        self.profile
-            .iter()
-            .chain(self.entries.iter().flat_map(|entry| &entry.facts))
-            .filter(|fact| fact.review.is_some())
-            .count()
-    }
 }
 
 /// Saves what was found in `document`: its entries, their facts and where
-/// each was found.
-pub fn save(write: &mut Write, document: DocumentId, extraction: &Extraction) -> Result<(), Error> {
+/// each was found. A fact already there, worded the same in the same entry,
+/// gains this source instead of a copy, and an entry already there (the
+/// same title, organization and start) gains the facts it lacks.
+pub fn save(
+    write: &mut Write,
+    document: DocumentId,
+    extraction: &Extraction,
+) -> Result<Saved, Error> {
+    let mut saved = Saved::default();
+    let mut profile = known(write, None)?;
     for fact in &extraction.profile {
-        save_fact(write, document, None, fact)?;
+        save_fact(write, document, None, &mut profile, fact, &mut saved)?;
     }
     for entry in &extraction.entries {
-        let id = Uuid::now_v7();
         let section = match entry.kind {
             EntryKind::Other => Some(custom_section(
                 write,
@@ -299,59 +361,290 @@ pub fn save(write: &mut Write, document: DocumentId, extraction: &Extraction) ->
             )?),
             _ => None,
         };
-        write.insert(
-            Entries,
-            id,
-            &[
-                entries::KIND.value(&entry.kind.stored()),
-                entries::CUSTOM_SECTION_ID.value(&section),
-            ],
-        )?;
+        let (id, mut facts) = match same_entry(write, entry, section)? {
+            Some(id) => (id, known(write, Some(id))?),
+            None => {
+                let id = Uuid::now_v7();
+                write.insert(
+                    Entries,
+                    id,
+                    &[
+                        entries::KIND.value(&entry.kind.stored()),
+                        entries::CUSTOM_SECTION_ID.value(&section),
+                    ],
+                )?;
+                (id, Vec::new())
+            }
+        };
         for fact in &entry.facts {
-            save_fact(write, document, Some(id), fact)?;
+            save_fact(write, document, Some(id), &mut facts, fact, &mut saved)?;
         }
     }
-    Ok(())
+    Ok(saved)
 }
 
+/// What an extraction's `save` did.
+#[derive(Debug, Default, PartialEq)]
+pub struct Saved {
+    pub added: usize,
+    /// Facts found that were there already.
+    pub there: usize,
+    /// Of those added, how many are marked for a look.
+    pub to_review: usize,
+}
+
+/// A fact already saved, to tell a fact found again from a new one.
+struct Known {
+    /// The fact a source of it goes to: itself, or the one it was merged into.
+    root: Uuid,
+    kind: String,
+    text: String,
+    /// Its text and as extracted, `normalized`.
+    words: [String; 2],
+    /// Neither merged nor saved by this import, so a new fact that differs
+    /// from it is worth a look.
+    settled: bool,
+}
+
+/// The facts of `entry`, or with none the facts in no entry.
+fn known(write: &Write, entry: Option<Uuid>) -> Result<Vec<Known>, Error> {
+    let rows: Vec<(Uuid, String, String, String, Option<Uuid>)> = write
+        .prepare(
+            "SELECT id, kind, text, extracted, merged_into FROM facts
+             WHERE entry_id IS ?1 AND deleted_at IS NULL ORDER BY id",
+        )?
+        .query_map([entry], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut facts = Vec::with_capacity(rows.len());
+    for (id, kind, text, extracted, merged_into) in rows {
+        let mut root = id;
+        let mut next = merged_into;
+        // Merges chain when a fact kept is merged later; a cycle can't be
+        // written, but the bound keeps a corrupt one from hanging the import.
+        for _ in 0..64 {
+            let Some(into) = next else { break };
+            root = into;
+            next = write
+                .prepare("SELECT merged_into FROM facts WHERE id = ?1")?
+                .query_row([into], |row| row.get(0))?;
+        }
+        facts.push(Known {
+            root,
+            words: [normalized(&text), normalized(&extracted)],
+            kind,
+            text,
+            settled: merged_into.is_none(),
+        });
+    }
+    Ok(facts)
+}
+
+/// An entry already saved that `entry` is about: the same kind and section,
+/// title and organization, and start date when both have dates.
+fn same_entry(
+    write: &Write,
+    entry: &FoundEntry,
+    section: Option<Uuid>,
+) -> Result<Option<Uuid>, Error> {
+    let field = |kinds: &[FactKind]| {
+        entry
+            .facts
+            .iter()
+            .find(|fact| kinds.contains(&fact.kind))
+            .map(|fact| fact.text.as_str())
+    };
+    let title = field(&[FactKind::Title, FactKind::SkillGroup]).map(normalized);
+    let organization = field(&[FactKind::Organization]).map(normalized);
+    let began = field(&[FactKind::Date]).map(start);
+    let grouped = matches!(entry.kind, EntryKind::Skills | EntryKind::Other);
+    if title.is_none() && organization.is_none() && !grouped {
+        return Ok(None);
+    }
+
+    let mut statement = write.prepare(
+        "SELECT entries.id, facts.kind, facts.text, facts.extracted FROM entries
+         LEFT JOIN facts ON facts.entry_id = entries.id AND facts.deleted_at IS NULL
+             AND facts.kind IN ('title', 'skill_group', 'organization', 'date')
+         WHERE entries.kind = ?1 AND entries.custom_section_id IS ?2
+             AND entries.deleted_at IS NULL
+         ORDER BY entries.id",
+    )?;
+    let mut rows = statement.query((entry.kind.stored(), section))?;
+    // Each entry and its fields' values, as written and as extracted: dates
+    // by their start.
+    let mut candidates: Vec<(Uuid, Vec<(String, String)>)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let id: Uuid = row.get(0)?;
+        if candidates.last().is_none_or(|(last, _)| *last != id) {
+            candidates.push((id, Vec::new()));
+        }
+        let kind: Option<String> = row.get(1)?;
+        if let (Some(kind), Some((_, fields))) = (kind, candidates.last_mut()) {
+            let value = if kind == "date" { start } else { normalized };
+            fields.push((kind.clone(), value(&row.get::<_, String>(2)?)));
+            fields.push((kind, value(&row.get::<_, String>(3)?)));
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .find(|(_, fields)| {
+            let values = |kinds: &[&str]| {
+                fields
+                    .iter()
+                    .filter(|(kind, _)| kinds.contains(&kind.as_str()))
+                    .map(|(_, value)| value.as_str())
+                    .collect::<Vec<_>>()
+            };
+            let agrees = |found: &Option<String>, kinds: &[&str]| {
+                let values = values(kinds);
+                match found {
+                    Some(found) => values.contains(&found.as_str()),
+                    None => values.is_empty(),
+                }
+            };
+            let dates = values(&["date"]);
+            agrees(&title, &["title", "skill_group"])
+                && agrees(&organization, &["organization"])
+                && match &began {
+                    Some(found) if !dates.is_empty() => dates.contains(&found.as_str()),
+                    _ => true,
+                }
+        })
+        .map(|(id, _)| id))
+}
+
+/// Saves `fact` in `entry`, unless it's among `known` already, where it
+/// gains this source instead.
 fn save_fact(
     write: &mut Write,
     document: DocumentId,
     entry: Option<Uuid>,
+    known: &mut Vec<Known>,
     fact: &FoundFact,
+    saved: &mut Saved,
 ) -> Result<(), Error> {
+    let kind = fact.kind.stored();
+    let words = normalized(&fact.text);
+    let there = known
+        .iter()
+        .find(|known| known.kind == kind && known.words.contains(&words))
+        .map(|known| known.root);
+    if let Some(root) = there {
+        if let Some(source) = &fact.source {
+            save_source(write, document, root, source)?;
+        }
+        saved.there += 1;
+        return Ok(());
+    }
+
+    let review = fact.review.clone().or_else(|| repeated(fact, known));
     let id = Uuid::now_v7();
     write.insert(
         Facts,
         id,
         &[
-            facts::KIND.value(&fact.kind.stored()),
+            facts::KIND.value(&kind),
             facts::TEXT.value(&fact.text),
             facts::EXTRACTED.value(&fact.text),
             facts::ENTRY_ID.value(&entry),
-            facts::REVIEW.value(&fact.review.as_ref().map(|review| review.reason.stored())),
-            facts::REVIEW_NOTE.value(
-                &fact
-                    .review
-                    .as_ref()
-                    .and_then(|review| review.note.as_deref()),
-            ),
+            facts::REVIEW.value(&review.as_ref().map(|review| review.reason.stored())),
+            facts::REVIEW_NOTE.value(&review.as_ref().and_then(|review| review.note.as_deref())),
         ],
     )?;
-    if let Some((span, written)) = &fact.source {
-        write.insert(
-            FactSources,
-            Uuid::now_v7(),
-            &[
-                fact_sources::FACT_ID.value(&id),
-                fact_sources::DOCUMENT_ID.value(&document.0),
-                fact_sources::SPAN_START.value(&(span.start as i64)),
-                fact_sources::SPAN_END.value(&(span.end as i64)),
-                fact_sources::ORIGINAL_TEXT.value(written),
-            ],
-        )?;
+    if let Some(source) = &fact.source {
+        save_source(write, document, id, source)?;
     }
+    known.push(Known {
+        root: id,
+        kind: kind.to_owned(),
+        text: fact.text.clone(),
+        words: [words.clone(), words],
+        settled: false,
+    });
+    saved.added += 1;
+    saved.to_review += usize::from(review.is_some());
     Ok(())
+}
+
+/// Why a new fact may repeat one already there: an entry's title, dates or
+/// such differing from what it had, or a bullet or summary saying much the
+/// same in other words.
+fn repeated(fact: &FoundFact, known: &[Known]) -> Option<Review> {
+    let kind = fact.kind.stored();
+    let mut settled = known
+        .iter()
+        .filter(|known| known.settled && known.kind == kind);
+    match fact.kind {
+        FactKind::Title
+        | FactKind::Organization
+        | FactKind::Date
+        | FactKind::Location
+        | FactKind::SkillGroup => settled.next().map(|known| Review {
+            reason: ReviewReason::Duplicate,
+            note: Some(format!(
+                "This entry already had \u{201c}{}\u{201d}. Keep the one that's right.",
+                known.text
+            )),
+        }),
+        FactKind::Bullet | FactKind::Summary => {
+            let repeats = possible_duplicate(&fact.text);
+            settled.any(|known| repeats(&known.text)).then_some(Review {
+                reason: ReviewReason::Duplicate,
+                note: None,
+            })
+        }
+        FactKind::Name | FactKind::Skill | FactKind::Contact => None,
+    }
+}
+
+fn save_source(
+    write: &mut Write,
+    document: DocumentId,
+    fact: Uuid,
+    (span, written): &(Range<usize>, String),
+) -> Result<(), Error> {
+    write.insert(
+        FactSources,
+        Uuid::now_v7(),
+        &[
+            fact_sources::FACT_ID.value(&fact),
+            fact_sources::DOCUMENT_ID.value(&document.0),
+            fact_sources::SPAN_START.value(&(span.start as i64)),
+            fact_sources::SPAN_END.value(&(span.end as i64)),
+            fact_sources::ORIGINAL_TEXT.value(written),
+        ],
+    )
+}
+
+/// Text as compared to tell the same fact: its letters and digits, in
+/// lowercase. Spacing and punctuation differ with how a document was read
+/// and set, but a different word or number is a different fact.
+fn normalized(text: &str) -> String {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// A date's start, `normalized`: "mar2021" in "Mar 2021 – Present", so a
+/// job that has ended since is the same job.
+fn start(date: &str) -> String {
+    let date = date.to_lowercase();
+    let start = date
+        .split([
+            '-', '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}', '\u{2212}',
+        ])
+        .next()
+        .unwrap_or(&date);
+    normalized(start.split(" to ").next().unwrap_or(start))
 }
 
 /// Finds quotes in a text: as written, or else as the model may have
@@ -575,7 +868,7 @@ mod tests {
     use crate::model::redaction;
 
     const TEXT: &str = "Alex Rahman\n\
-        alex@example.com · github.com/alexr\n\
+        alex@example.com · github.com/alexr · linkedin.com/in/alexrah\nman-dev\n\
         Backend engineer who likes quiet on-call weeks.\n\
         Senior Engineer, Northwind (Berlin) Mar 2021 – Present\n\
         • Designed the event pipe-\n\
@@ -585,7 +878,8 @@ mod tests {
         • Built a real-\ntime tracker in Java.\n\
         • Wrote the team’s runbooks.\n\
         Languages: Java, JavaScript, Go\n\
-        Databases: PostgreSQL, SQL\n";
+        Databases: PostgreSQL, SQL\n\
+        • Mentored two new engin eers.\n";
 
     fn redacted() -> Redaction {
         Redaction::new(
@@ -616,7 +910,7 @@ mod tests {
         let extraction = answer(
             r#"```json
             {"summary": "Backend engineer who likes quiet on-call weeks.",
-             "contacts": ["[EMAIL_1]", "[LINK_1]"],
+             "contacts": ["[EMAIL_1]", "[LINK_1]", "[LINK_2]"],
              "entries": [
                {"kind": "experience", "title": "Senior Engineer", "organization": "Northwind",
                 "location": "Berlin", "dates": "Mar 2021 - Present",
@@ -644,6 +938,7 @@ mod tests {
                 ),
                 (FactKind::Contact, "alex@example.com"),
                 (FactKind::Contact, "github.com/alexr"),
+                (FactKind::Contact, "linkedin.com/in/alexrahman-dev"),
             ]
         );
         assert_eq!(
@@ -756,6 +1051,72 @@ mod tests {
     }
 
     #[test]
+    fn a_slip_the_model_fixes_is_kept_fixed_and_marked() {
+        let extraction = answer(
+            r#"{"entries": [{"kind": "experience", "bullets": [
+                {"quote": "Mentored two new engin eers.", "fixed": "Mentored two new engineers."},
+                {"quote": "Cut p99 latency from 480 ms to 95 ms.",
+                 "fixed": "Cut p99 latency from 480 ms to 90 ms."},
+                {"quote": "Wrote the team's runbooks.", "fixed": null}]}]}"#,
+        );
+        let facts = &extraction.entries[0].facts;
+        assert_eq!(facts[0].text, "Mentored two new engineers.");
+        assert_eq!(
+            facts[0]
+                .source
+                .as_ref()
+                .map(|(_, written)| written.as_str()),
+            Some("Mentored two new engin eers.")
+        );
+        let note = facts[0]
+            .review
+            .as_ref()
+            .and_then(|review| review.note.as_deref());
+        assert!(
+            note.is_some_and(|note| note.contains("\u{201c}Mentored two new engin eers.\u{201d}")),
+            "{note:?}"
+        );
+        assert_eq!(
+            (facts[1].text.as_str(), &facts[1].review),
+            ("Cut p99 latency from 480 ms to 95 ms.", &None),
+            "a fix that changes a number is ignored"
+        );
+        assert_eq!(
+            (facts[2].text.as_str(), &facts[2].review),
+            ("Wrote the team’s runbooks.", &None)
+        );
+    }
+
+    #[test]
+    fn a_quote_fixed_without_saying_is_found_and_cited() {
+        let extraction = answer(
+            r#"{"entries": [{"kind": "experience", "bullets": [
+                "Mentored two new engineers.", "Mentored two new engineers and an intern."]}]}"#,
+        );
+        let facts = &extraction.entries[0].facts;
+        assert_eq!(facts[0].text, "Mentored two new engineers.");
+        assert_eq!(
+            facts[0]
+                .source
+                .as_ref()
+                .map(|(_, written)| written.as_str()),
+            Some("Mentored two new engin eers.")
+        );
+        assert_eq!(
+            facts[0].review.as_ref().map(|review| review.reason),
+            Some(ReviewReason::Cleaned)
+        );
+        assert_eq!(
+            (
+                facts[1].source.as_ref(),
+                facts[1].review.as_ref().map(|review| review.reason)
+            ),
+            (None, Some(ReviewReason::Unsure)),
+            "words the text doesn't have aren't a fix"
+        );
+    }
+
+    #[test]
     fn a_quote_not_in_the_text_is_kept_and_marked_unsure() {
         let extraction = answer(
             r#"{"summary": "Jordan Ellis is a backend engineer.",
@@ -776,7 +1137,10 @@ mod tests {
             Some(ReviewReason::Unsure)
         );
         assert_eq!(extraction.entries[0].section.as_deref(), Some("Talks"));
-        assert_eq!(extraction.to_review(), 2);
+        assert!(
+            extraction.entries[0].facts[0].review.is_some(),
+            "a bullet as unsure as the summary"
+        );
     }
 
     #[test]
@@ -822,7 +1186,146 @@ mod tests {
         Ok(())
     }
 
-    /// Sends the junior and senior test CVs to the provider set up in the
+    fn found(kind: FactKind, text: &str) -> FoundFact {
+        FoundFact {
+            kind,
+            text: text.to_owned(),
+            source: Some((0..text.len(), text.to_owned())),
+            review: None,
+        }
+    }
+
+    fn job(dates: &str, bullets: &[&str]) -> FoundEntry {
+        let mut facts = vec![
+            found(FactKind::Title, "Senior Engineer"),
+            found(FactKind::Organization, "Northwind"),
+            found(FactKind::Date, dates),
+        ];
+        facts.extend(bullets.iter().map(|bullet| found(FactKind::Bullet, bullet)));
+        FoundEntry {
+            kind: EntryKind::Experience,
+            section: None,
+            facts,
+        }
+    }
+
+    fn languages(skills: &[&str]) -> FoundEntry {
+        let mut facts = vec![found(FactKind::SkillGroup, "Languages")];
+        facts.extend(skills.iter().map(|skill| found(FactKind::Skill, skill)));
+        FoundEntry {
+            kind: EntryKind::Skills,
+            section: None,
+            facts,
+        }
+    }
+
+    #[test]
+    fn a_fact_found_again_gains_a_source_instead_of_a_copy() -> Result<(), Error> {
+        let summary = "Backend engineer who likes quiet on-call weeks.";
+        let pipeline = "Designed the event pipeline for shipment updates.";
+        let first = Extraction {
+            profile: vec![found(FactKind::Summary, summary)],
+            entries: vec![
+                job(
+                    "Mar 2021 – Present",
+                    &[pipeline, "Cut p99 latency from 480 ms to 95 ms."],
+                ),
+                languages(&["Java"]),
+            ],
+        };
+        // The CV updated: the job has ended, a bullet is reworded and one
+        // added, a skill learned. Another job with the same title there,
+        // years before, stays its own entry.
+        let second = Extraction {
+            profile: vec![found(
+                FactKind::Summary,
+                "Backend engineer who likes quiet on call weeks",
+            )],
+            entries: vec![
+                job(
+                    "Mar 2021 - Jun 2024",
+                    &[
+                        "designed  the event pipeline for shipment updates",
+                        "Cut p99 latency from 480 ms to 95 ms with a cache.",
+                        "Mentored two engineers.",
+                    ],
+                ),
+                job("Jan 2015 – Dec 2016", &[]),
+                languages(&["Java", "Go"]),
+            ],
+        };
+
+        let mut writer = Writer::open_in_memory()?;
+        writer.execute(|write| {
+            let document = super::super::commands::import_document(write, None, TEXT)?;
+            save(write, document, &first)?;
+            // The user merged the pipeline bullet into a note of theirs.
+            let note =
+                super::super::commands::add_note(write, "Built the shipment event pipeline.")?;
+            let bullet: Uuid = write
+                .prepare("SELECT id FROM facts WHERE text = ?1")?
+                .query_row([pipeline], |row| row.get(0))?;
+            super::super::commands::merge_facts(write, note[0], &[super::super::FactId(bullet)])
+        })?;
+        let (saved, _) = writer.execute(|write| {
+            let document = super::super::commands::import_document(write, None, TEXT)?;
+            save(write, document, &second)
+        })?;
+        assert_eq!(
+            saved,
+            Saved {
+                added: 7,
+                there: 6,
+                to_review: 2
+            }
+        );
+
+        // Each live fact: its kind, text, review, how many sources it has,
+        // and which entry (by order) it's in.
+        let facts: Vec<String> = writer
+            .kron()
+            .prepare(
+                "SELECT concat_ws(' | ', facts.kind, facts.text, facts.review,
+                    (SELECT count(*) FROM fact_sources WHERE fact_id = facts.id),
+                    (SELECT count(*) FROM entries AS earlier
+                     WHERE earlier.id <= facts.entry_id AND earlier.kind = entries.kind))
+                 FROM facts LEFT JOIN entries ON entries.id = facts.entry_id
+                 WHERE facts.merged_into IS NULL AND facts.kind != 'name'
+                 ORDER BY facts.id",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            facts,
+            [
+                "summary | Backend engineer who likes quiet on-call weeks. | 2 | 0",
+                "title | Senior Engineer | 2 | 1",
+                "organization | Northwind | 2 | 1",
+                "date | Mar 2021 – Present | 1 | 1",
+                "bullet | Cut p99 latency from 480 ms to 95 ms. | 1 | 1",
+                "skill_group | Languages | 2 | 1",
+                "skill | Java | 2 | 1",
+                // Found again, the bullet merged into it is a second source.
+                "bullet | Built the shipment event pipeline. | 2 | 1",
+                "date | Mar 2021 - Jun 2024 | duplicate | 1 | 1",
+                "bullet | Cut p99 latency from 480 ms to 95 ms with a cache. | duplicate | 1 | 1",
+                "bullet | Mentored two engineers. | 1 | 1",
+                "title | Senior Engineer | 1 | 2",
+                "organization | Northwind | 1 | 2",
+                "date | Jan 2015 – Dec 2016 | 1 | 2",
+                "skill | Go | 1 | 1",
+            ]
+        );
+        let note: String = writer.kron().query_row(
+            "SELECT review_note FROM facts WHERE text = 'Mar 2021 - Jun 2024'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(note.contains("Mar 2021 – Present"), "{note}");
+        Ok(())
+    }
+
+    /// Sends the test CVs to the provider set up in the
     /// development data, with its key from the keyring, and scores the facts
     /// found against what each CV says (`*.facts`). It costs money and needs
     /// the network, so it runs only when asked:
@@ -967,6 +1470,19 @@ mod tests {
                     fact.text,
                     fact.review.as_ref().map(|review| review.reason)
                 );
+            }
+            // Each is something the reader got wrong, or the CV did.
+            for (kind, _, fact) in &found {
+                if let Some((_, written)) = &fact.source
+                    && *kind != FactKind::Contact
+                    && ![clean(written, false), clean(written, true)].contains(&fact.text)
+                {
+                    println!(
+                        "  fixed  {kind:?}: {:?} → {:?}",
+                        clean(written, false),
+                        fact.text
+                    );
+                }
             }
         }
         println!("== total ${total_cost:.5}");
