@@ -1,0 +1,515 @@
+# Every line the model wrote in résumés for the test CVs and the jobs in
+# `generation/jobs.txt`, with the facts it cites: written by
+# `generation::tests::write_test_set`, then labelled by hand, in
+# `cases.txt`'s format and labels. Each case's comment says where it's
+# from and what the verifier said when it was written. "verbatim" lines
+# copy their one fact word for word, and should pass.
+
+paraphrase
+# junior, Tolly, summary; the verifier passed
+fact: Frontend developer who cares about the last 10%: loading states, keyboard navigation, and the error message you see when the Wi-Fi drops. One year shipping a React Native app used by 30,000 riders; before that, a lot of late nights on hackathon projects.
+fact: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+fact: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+fact: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+fact: Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+fact: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+line: Frontend developer with a year shipping a React Native rider app used by 30,000 riders, focused on loading states, keyboard navigation, and error handling. Rebuilt a sign-up flow to cut drop-off from 38% to 21%, added offline support with a local SQLite cache, and wrote the team's first accessibility checklist. Also built a Next.js dashboard and Playwright tests, and won second place at the Dhaka AI Hackathon 2023 for a live bus map.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+line: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+line: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+line: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+
+paraphrase
+# junior, Tolly, bullet; the verifier passed
+fact: Paired with the backend team to move the fare estimate API from polling to WebSockets.
+fact: Review about ten pull requests a week and run the Friday demo for the mobile team.
+line: Paired with the backend team to move the fare estimate API from polling to WebSockets, and review about ten pull requests a week.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+line: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+line: Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Replaced a hand-written date picker with an accessible component library, removing 1,200 lines of code.
+line: Replaced a hand-written date picker with an accessible component library, removing 1,200 lines of code.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+line: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Reached 2,300 users in its first month after a post in a university Facebook group.
+line: Reached 2,300 users in its first month after a post in a university Facebook group.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: A browser game that teaches the Bijoy keyboard layout; open source, with 140 GitHub stars.
+line: A browser game that teaches the Bijoy keyboard layout; open source, with 140 GitHub stars.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: CGPA 3.71 / 4.00; thesis on predicting bus arrival times from crowd-sourced GPS traces.
+line: CGPA 3.71 / 4.00; thesis on predicting bus arrival times from crowd-sourced GPS traces.
+
+verbatim
+# junior, Tolly, bullet; the verifier passed
+fact: Teaching assistant for Data Structures (CSE 220) for two semesters.
+line: Teaching assistant for Data Structures (CSE 220) for two semesters.
+
+wrong_referent
+# junior, Ledgerline, summary; the verifier passed
+# TypeScript was the typing game, not a hackathon project.
+fact: Frontend developer who cares about the last 10%: loading states, keyboard navigation, and the error message you see when the Wi-Fi drops. One year shipping a React Native app used by 30,000 riders; before that, a lot of late nights on hackathon projects.
+fact: Junior Frontend Developer
+fact: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+fact: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+fact: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+fact: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+fact: TypeScript
+line: Frontend developer with about one year of professional experience building React Native and Next.js products, including a rider app used by 30,000 riders. Work spans accessibility, offline support, and testing, with hackathon projects in React and TypeScript.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+line: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+line: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+line: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Paired with the backend team to move the fare estimate API from polling to WebSockets.
+line: Paired with the backend team to move the fare estimate API from polling to WebSockets.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+line: Built an internal dashboard in Next.js for tracking failed deliveries by area, now used daily by the operations team.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+line: Wrote Playwright tests for the checkout flow that caught two pricing bugs before release.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Replaced a hand-written date picker with an accessible component library, removing 1,200 lines of code.
+line: Replaced a hand-written date picker with an accessible component library, removing 1,200 lines of code.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+line: A live map of Dhaka's city buses built from rider check-ins; won second place at the Dhaka AI Hackathon 2023 out of 64 teams.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Reached 2,300 users in its first month after a post in a university Facebook group.
+line: Reached 2,300 users in its first month after a post in a university Facebook group.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: A browser game that teaches the Bijoy keyboard layout; open source, with 140 GitHub stars.
+line: A browser game that teaches the Bijoy keyboard layout; open source, with 140 GitHub stars.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: CGPA 3.71 / 4.00; thesis on predicting bus arrival times from crowd-sourced GPS traces.
+line: CGPA 3.71 / 4.00; thesis on predicting bus arrival times from crowd-sourced GPS traces.
+
+verbatim
+# junior, Ledgerline, bullet; the verifier passed
+fact: Teaching assistant for Data Structures (CSE 220) for two semesters.
+line: Teaching assistant for Data Structures (CSE 220) for two semesters.
+
+paraphrase
+# senior, Quayside Bank, summary; the verifier passed
+fact: Staff engineer who likes boring infrastructure and the people who keep it running. Eleven years building payment and data systems in Go, Java and Kotlin; I have spent the last four making a 300-engineer company’s deploys safe enough that nobody talks about them.
+fact: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+fact: Set up the payments reliability programme: SLOs for 14 critical flows, an error-budget policy agreed with product, and a weekly review I still chair.
+fact: Led a team of five through PCI DSS Level 1 certification for the card platform.
+fact: Kubernetes
+fact: incident management
+line: Staff engineer with eleven years building payment and data systems in Go, Java and Kotlin, including four years making a 300-engineer company's deploys safe. Led progressive delivery for 180 services and cut failed production deploys by 64%, and set up a payments reliability programme with SLOs and an error-budget policy. Experienced in Kubernetes, incident management and regulated environments, including PCI DSS Level 1 certification.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+line: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+
+paraphrase
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Set up the payments reliability programme: SLOs for 14 critical flows, an error-budget policy agreed with product, and a weekly review I still chair.
+line: Set up the payments reliability programme: SLOs for 14 critical flows, an error-budget policy agreed with product, and a weekly review still chaired.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+line: Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+
+paraphrase
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Mentor six engineers across three teams; two have since been promoted to senior.
+line: Mentored six engineers across three teams; two have since been promoted to senior.
+
+paraphrase
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Wrote Lumenpay’s incident review guide and trained 40 incident commanders.
+line: Wrote the incident review guide and trained 40 incident commanders.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+line: Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+line: Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Led a team of five through PCI DSS Level 1 certification for the card platform.
+line: Led a team of five through PCI DSS Level 1 certification for the card platform.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+line: Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+line: Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+line: Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+
+verbatim
+# senior, Quayside Bank, bullet; the verifier passed
+fact: Thesis on consistency models in geo-replicated databases, graded 18/20.
+line: Thesis on consistency models in geo-replicated databases, graded 18/20.
+
+paraphrase
+# senior, Corvid AI, summary; the verifier rejected: InventedFigure("four making deploys safe across")
+# The fact's own count, reworded: a false flag.
+fact: Staff engineer who likes boring infrastructure and the people who keep it running. Eleven years building payment and data systems in Go, Java and Kotlin; I have spent the last four making a 300-engineer company’s deploys safe enough that nobody talks about them.
+fact: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+fact: Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+line: Staff engineer with eleven years building payment and data systems in Go, Java and Kotlin, including the last four making deploys safe across a 300-engineer company. Led a progressive delivery rollout for 180 services and a ledger migration to a sharded CockroachDB cluster with no customer-visible downtime.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+line: Led the design and rollout of a progressive delivery system for 180 services, cutting failed production deploys by 64% in its first year.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+line: Drove the migration of the ledger from a single PostgreSQL primary to a sharded CockroachDB cluster with no customer-visible downtime.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Cut the platform group’s cloud spend by €1.1M a year by rightsizing Kubernetes node pools and moving batch jobs to spot instances.
+line: Cut the platform group's cloud spend by €1.1M a year by rightsizing Kubernetes node pools and moving batch jobs to spot instances.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Mentor six engineers across three teams; two have since been promoted to senior.
+line: Mentor six engineers across three teams; two have since been promoted to senior.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+line: Built the card authorisation service in Go, handling 2,500 requests per second at peak with a p99 latency of 85 ms.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+line: Introduced contract testing between 22 services with Pact, replacing a shared staging environment that broke every week.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Led a team of five through PCI DSS Level 1 certification for the card platform.
+line: Led a team of five through PCI DSS Level 1 certification for the card platform.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+line: Wrote the streaming ingestion pipeline in Java on Kafka that took the product from daily to near-real-time reporting for 300 retail clients.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+line: Owned the on-call rotation for the data platform and reduced pages from 30 a week to 6.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+line: Automated the release checklist with Jenkins, taking releases from a half-day manual process to 40 minutes.
+
+verbatim
+# senior, Corvid AI, bullet; the verifier passed
+fact: Thesis on consistency models in geo-replicated databases, graded 18/20.
+line: Thesis on consistency models in geo-replicated databases, graded 18/20.
+
+paraphrase
+# columns, Brixmoney, summary; the verifier passed
+# "Mentoring" is true (CodeBridge Lagos) but rests on a fact it doesn't cite.
+fact: Android engineer who has spent five years making money apps feel calm. I like Kotlin, small pull requests, and screens that still make sense to my mum. Moved from Lagos to London in 2022 and kept building for people who pay with their phones first.
+fact: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+fact: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+fact: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+fact: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+fact: Android
+fact: Kotlin
+fact: Jetpack Compose
+fact: performance profiling
+line: Android engineer with five years building money apps, including leading a savings app's migration to Jetpack Compose and shipping offline-first transfers that reduced failed payments. Experienced in Kotlin, Compose, performance profiling, and mentoring engineers.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+line: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+line: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Built the round-ups feature end to end with the payments team; 41% of active users switched it on within three months.
+line: Built the round-ups feature end to end with the payments team; 41% of active users switched it on within three months.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+line: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+line: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+line: Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Wrote the app's first UI test suite with Espresso, taking coverage of the payments flow from zero to 70%.
+line: Wrote the app's first UI test suite with Espresso, taking coverage of the payments flow from zero to 70%.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Built client apps in Kotlin and Flutter for a pharmacy chain and a school fees platform.
+line: Built client apps in Kotlin and Flutter for a pharmacy chain and a school fees platform.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: Final-year project: a low-cost glucose reader that sends readings to a phone over Bluetooth Low Energy.
+line: Final-year project: a low-cost glucose reader that sends readings to a phone over Bluetooth Low Energy.
+
+verbatim
+# columns, Brixmoney, bullet; the verifier passed
+fact: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+line: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+
+paraphrase
+# columns, Hearthly, summary; the verifier passed
+fact: Android engineer who has spent five years making money apps feel calm. I like Kotlin, small pull requests, and screens that still make sense to my mum. Moved from Lagos to London in 2022 and kept building for people who pay with their phones first.
+fact: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+fact: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+fact: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+fact: Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+fact: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+line: Android engineer with five years building money apps, including leading a savings app's move to Jetpack Compose and cutting cold start time on low-end phones. Built offline-first payments and a USSD fallback used by 120,000 people a month, and runs a monthly code review clinic for eight engineers.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+line: Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+line: Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Built the round-ups feature end to end with the payments team; 41% of active users switched it on within three months.
+line: Built the round-ups feature end to end with the payments team; 41% of active users switched it on within three months.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+line: Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+line: Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+line: Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Wrote the app's first UI test suite with Espresso, taking coverage of the payments flow from zero to 70%.
+line: Wrote the app's first UI test suite with Espresso, taking coverage of the payments flow from zero to 70%.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Built client apps in Kotlin and Flutter for a pharmacy chain and a school fees platform.
+line: Built client apps in Kotlin and Flutter for a pharmacy chain and a school fees platform.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: Final-year project: a low-cost glucose reader that sends readings to a phone over Bluetooth Low Energy.
+line: Final-year project: a low-cost glucose reader that sends readings to a phone over Bluetooth Low Energy.
+
+verbatim
+# columns, Hearthly, bullet; the verifier passed
+fact: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+line: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+
+paraphrase
+# linkedin, Stallr, summary; the verifier passed
+fact: I build two-sided marketplaces, mostly the unglamorous parts: pricing, payouts and trust. Eight years in product, two before that as a data analyst, so I still write my own SQL and occasionally regret it. Right now I lead pricing and supply at Fietsly, a bike-sharing marketplace in six Dutch cities.
+fact: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+fact: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+fact: Set up the experimentation review that now signs off every pricing test before launch.
+fact: Ran the first A/B tests on search ranking, which lifted conversion from search by 6%.
+line: Senior product manager with eight years in product and two as a data analyst, focused on the unglamorous parts of two-sided marketplaces: pricing, payouts and trust. At Fietsly, a bike-sharing marketplace, introduced dynamic pricing that raised revenue per bike by 18% without lowering ride counts, and redesigned fleet partner payouts to cut disputes from about 60 a month to 9. Still writes SQL and has run experimentation from A/B tests on search ranking to a pricing test review process.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+line: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+line: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Set up the experimentation review that now signs off every pricing test before launch.
+line: Set up the experimentation review that now signs off every pricing test before launch.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Owned the rider app's checkout and subscriptions.
+line: Owned the rider app's checkout and subscriptions.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Launched the monthly pass, which grew to 23,000 subscribers in its first year.
+line: Launched the monthly pass, which grew to 23,000 subscribers in its first year.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Moved card payments to a new provider with no downtime during the switch.
+line: Moved card payments to a new provider with no downtime during the switch.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Ran the first A/B tests on search ranking, which lifted conversion from search by 6%.
+line: Ran the first A/B tests on search ranking, which lifted conversion from search by 6%.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Built the weekly trading dashboards used by category managers.
+line: Built the weekly trading dashboards used by category managers.
+
+verbatim
+# linkedin, Stallr, bullet; the verifier passed
+fact: Cleaned and modelled retail sales data for clients in fashion and groceries.
+line: Cleaned and modelled retail sales data for clients in fashion and groceries.
+
+scope_inflation
+# linkedin, Fenwick Health, summary; the verifier passed
+# The facts give a senior PM who leads pricing and supply, written up for a VP post.
+fact: I build two-sided marketplaces, mostly the unglamorous parts: pricing, payouts and trust. Eight years in product, two before that as a data analyst, so I still write my own SQL and occasionally regret it. Right now I lead pricing and supply at Fietsly, a bike-sharing marketplace in six Dutch cities.
+fact: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+fact: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+line: Product leader with eight years in product and two before that as a data analyst, focused on the unglamorous parts of two-sided marketplaces: pricing, payouts and trust. Currently leads pricing and supply at Fietsly, a bike-sharing marketplace in six Dutch cities, where dynamic pricing raised revenue per bike by 18% and a redesigned payout model cut disputes from about 60 a month to 9.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+line: Introduced dynamic pricing by neighbourhood and hour, raising revenue per bike by 18% without lowering ride counts.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+line: Redesigned the payout model for fleet partners, cutting payout disputes from about 60 a month to 9.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Set up the experimentation review that now signs off every pricing test before launch.
+line: Set up the experimentation review that now signs off every pricing test before launch.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Launched the monthly pass, which grew to 23,000 subscribers in its first year.
+line: Launched the monthly pass, which grew to 23,000 subscribers in its first year.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Owned the rider app's checkout and subscriptions.
+line: Owned the rider app's checkout and subscriptions.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Moved card payments to a new provider with no downtime during the switch.
+line: Moved card payments to a new provider with no downtime during the switch.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Ran the first A/B tests on search ranking, which lifted conversion from search by 6%.
+line: Ran the first A/B tests on search ranking, which lifted conversion from search by 6%.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Built the weekly trading dashboards used by category managers.
+line: Built the weekly trading dashboards used by category managers.
+
+verbatim
+# linkedin, Fenwick Health, bullet; the verifier passed
+fact: Cleaned and modelled retail sales data for clients in fashion and groceries.
+line: Cleaned and modelled retail sales data for clients in fashion and groceries.

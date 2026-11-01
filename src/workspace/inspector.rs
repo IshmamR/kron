@@ -4,7 +4,8 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ElementId, Entity, IntoElement, SharedString, Window, div, prelude::*,
+    AnyElement, App, ElementId, Entity, HighlightStyle, IntoElement, SharedString, StyledText,
+    Window, div, prelude::*,
 };
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -16,7 +17,7 @@ use super::parts::{
     source_excerpt, sources,
 };
 use crate::database::{Database, Error};
-use crate::model::commands;
+use crate::model::{commands, verifier};
 use crate::model::{
     ClaimId, EntryId, FactChange, FactId, FactKind, LineId, ResumeId, Review, ReviewReason,
     UnsupportedReason,
@@ -125,6 +126,7 @@ impl Inspector {
                     theme.warning,
                 ))
             })
+            .children(self.new_words(line, cx))
             .children(self.inspection.facts.iter().map(|cited| match &cited.fact {
                 Some(fact) => {
                     fact_card(fact, self.resume.change(cited.id), cx).into_any_element()
@@ -132,6 +134,48 @@ impl Inspector {
                 None => notice("This line cites a fact that no longer exists.", theme.danger)
                     .into_any_element(),
             }))
+    }
+
+    /// The line with the words its facts don't have marked, if it has any:
+    /// a fair rewording has some, so they're for the user to check, not
+    /// errors.
+    fn new_words(&self, line: &ShownLine, cx: &App) -> Option<impl IntoElement> {
+        let facts: Vec<&str> = self
+            .inspection
+            .facts
+            .iter()
+            .filter_map(|cited| cited.fact.as_ref())
+            .map(|fact| fact.text.as_str())
+            .collect();
+        let new = verifier::new_words(&line.text, &facts);
+        if facts.is_empty() || new.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        let highlight = HighlightStyle {
+            color: Some(theme.foreground),
+            background_color: Some(theme.warning.opacity(0.25)),
+            ..Default::default()
+        };
+        Some(
+            v_flex()
+                .gap_1()
+                .child(caption(
+                    "Marked: words its facts don't have. Check they're true of you.",
+                    cx,
+                ))
+                .child(
+                    div()
+                        .p_2()
+                        .rounded(theme.radius)
+                        .bg(theme.background)
+                        .text_sm()
+                        .child(
+                            StyledText::new(line.text.clone())
+                                .with_highlights(new.into_iter().map(|range| (range, highlight))),
+                        ),
+                ),
+        )
     }
 
     /// The claim, why it was left out, and what the user can do about it:

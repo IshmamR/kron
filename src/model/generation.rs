@@ -1001,4 +1001,189 @@ mod tests {
         assert!(draft.sections.len() > 2, "more than a header and a summary");
         Ok(())
     }
+    /// Builds the test set of real output: reads each test CV, finds its
+    /// facts and writes résumés for its jobs in `generation/jobs.txt` with
+    /// the provider set up in the development data, then writes every line
+    /// the model wrote, with the facts it cites and what the verifier said,
+    /// to `verifier/generated.txt`, labelled "?" for a person to label. It
+    /// costs money, needs the network and overwrites that file, so it runs
+    /// only when asked:
+    /// `cargo test write_test_set -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn write_test_set() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::model::extraction;
+
+        const JOBS: &str = include_str!("generation/jobs.txt");
+        const CVS: [(&str, &[u8]); 4] = [
+            ("junior", include_bytes!("extraction/junior.pdf")),
+            ("senior", include_bytes!("extraction/senior.pdf")),
+            ("columns", include_bytes!("extraction/columns.pdf")),
+            ("linkedin", include_bytes!("extraction/linkedin.pdf")),
+        ];
+        let device = dirs::data_dir()
+            .ok_or("no data directory")?
+            .join("kron-dev/device.sqlite");
+        let device = rusqlite::Connection::open_with_flags(
+            device,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let provider = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
+            .map_err(|error| format!("{error:?}"))?
+            .ok_or("no provider set up in the development data")?;
+        let key = crate::llm::key(provider.id)?.ok_or("no key saved for the provider")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let call = |request| {
+            runtime
+                .block_on(crate::llm::call(&provider, key.clone(), request))
+                .map_err(|error| error.to_string())
+        };
+        let jobs: Vec<(&str, &str, &str, String)> = JOBS
+            .split("\n===\n")
+            .filter_map(|block| {
+                let mut lines = block.lines().filter(|line| !line.starts_with('#'));
+                let mut field = |name: &str| {
+                    lines
+                        .find(|line| !line.is_empty())
+                        .and_then(|line| line.strip_prefix(name))
+                };
+                let (cv, title, company) = (field("cv: ")?, field("title: ")?, field("company: ")?);
+                let description: Vec<&str> = lines.collect();
+                Some((cv, title, company, description.join("\n").trim().to_owned()))
+            })
+            .collect();
+
+        let mut set = String::from(
+            "# Every line the model wrote in résumés for the test CVs and the jobs in\n\
+             # `generation/jobs.txt`, with the facts it cites: written by\n\
+             # `generation::tests::write_test_set`, then labelled by hand, in\n\
+             # `cases.txt`'s format and labels. Each case's comment says where it's\n\
+             # from and what the verifier said when it was written.\n",
+        );
+        let mut cost = 0.;
+        for (cv, pdf) in CVS {
+            let reading = crate::import::read(crate::import::Format::Pdf, pdf.to_vec())
+                .map_err(|error| format!("{error:?}"))?;
+            let guessed = crate::import::name::guess(&reading);
+            let names: Vec<&str> = guessed.as_deref().into_iter().collect();
+            let redaction = Redaction::new(
+                &reading.text,
+                &redaction::find(&reading.text, &names, &[]),
+                STAND_IN,
+            );
+            let reply = call(extraction::request(&redaction.text))?;
+            cost += reply.cost.unwrap_or(0.);
+            let found = extraction::Extraction::locate(
+                extraction::Answer::parse(&reply.response.text())?,
+                &reading.text,
+                &redaction,
+            );
+            let mut writer =
+                crate::database::Writer::open_in_memory().map_err(|error| error.to_string())?;
+            writer
+                .execute(|write| {
+                    let document =
+                        crate::model::commands::import_document(write, None, &reading.text)?;
+                    extraction::save(write, document, &found)
+                })
+                .map_err(|error| error.to_string())?;
+            let material = Material::read(writer.kron()).map_err(|error| error.to_string())?;
+            let listed = Redaction::new(
+                &material.listing,
+                &redaction::find(&material.listing, &names, &[]),
+                STAND_IN,
+            );
+
+            for (_, title, company, description) in jobs.iter().filter(|job| job.0 == cv) {
+                let job = Job {
+                    title,
+                    company,
+                    description,
+                };
+                let reply = call(request(&listed.text, &job))?;
+                cost += reply.cost.unwrap_or(0.);
+                let answer = Answer::parse(&reply.response.text())?;
+                let given: Vec<GivenFact> = material
+                    .facts
+                    .iter()
+                    .map(|fact| GivenFact {
+                        id: fact.id,
+                        text: &fact.text,
+                        hidden: false,
+                    })
+                    .collect();
+                // As `Draft::new` takes them: a bullet cites only facts of
+                // its own entry.
+                let mut written: Vec<(&str, Option<usize>, &Written)> = Vec::new();
+                written.extend(
+                    answer
+                        .summary
+                        .iter()
+                        .map(|summary| ("summary", None, summary)),
+                );
+                for chosen in &answer.entries {
+                    let entry = material.entry(&chosen.entry);
+                    written.extend(
+                        chosen
+                            .bullets
+                            .iter()
+                            .map(|bullet| ("bullet", entry, bullet)),
+                    );
+                }
+                let mut lines = 0;
+                for (kind, entry, line) in written {
+                    let text = listed.restore(line.text.trim(), &material.listing);
+                    let cited: Vec<usize> = line
+                        .facts
+                        .iter()
+                        .filter_map(|id| material.fact(id))
+                        .filter(|index| {
+                            entry.is_none_or(|entry| material.facts[*index].entry == Some(entry))
+                        })
+                        .fold(Vec::new(), |mut cited, index| {
+                            if !cited.contains(&index) {
+                                cited.push(index);
+                            }
+                            cited
+                        });
+                    let cites: Vec<FactId> = cited
+                        .iter()
+                        .map(|index| material.facts[*index].id)
+                        .collect();
+                    let verdict = match verifier::verify(&text, &cites, &given) {
+                        None => "passed".to_owned(),
+                        Some(reason) => format!("rejected: {reason:?}"),
+                    };
+                    set.push_str(&format!(
+                        "\n?\n# {cv}, {company}, {kind}; the verifier {verdict}\n"
+                    ));
+                    if cited.is_empty() {
+                        set.push_str("# cites no fact of its own entry\n");
+                    }
+                    for index in &cited {
+                        set.push_str(&format!(
+                            "fact: {}\n",
+                            material.facts[*index]
+                                .text
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ));
+                    }
+                    set.push_str(&format!("line: {text}\n"));
+                    lines += 1;
+                }
+                println!("{cv}, {company}: {lines} lines written");
+            }
+        }
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/model/verifier/generated.txt"
+        );
+        std::fs::write(path, set)?;
+        println!("== total ${cost:.5}");
+        Ok(())
+    }
 }

@@ -4,6 +4,7 @@
 // out of the résumé and listed as an unsupported claim.
 
 use std::borrow::Cow;
+use std::ops::Range;
 
 use rust_stemmers::{Algorithm, Stemmer};
 use text2num::{BasicAnnotate, LangInterpreter, Language, Token, find_numbers};
@@ -77,6 +78,19 @@ pub fn verify(text: &str, cites: &[FactId], given: &[GivenFact]) -> Option<Unsup
         (!counts_the_same)
             .then(|| UnsupportedReason::InventedFigure(text[figure.start..end].to_owned()))
     })
+}
+
+/// Where the line `text` has words that carry meaning and none of `facts`
+/// has, compared by stem: "AWS" or "leader" in a line whose facts say
+/// neither, for the user to check. It warns, it doesn't reject: a fair
+/// rewording uses words of its own. Figures are left to `verify`.
+pub fn new_words(text: &str, facts: &[&str]) -> Vec<Range<usize>> {
+    let known: Vec<String> = facts.iter().flat_map(|fact| content(fact, &[])).collect();
+    words(text, &figures(text))
+        .into_iter()
+        .filter(|(_, stem)| !known.contains(stem))
+        .map(|(range, _)| range)
+        .collect()
 }
 
 /// A number in a text.
@@ -393,7 +407,15 @@ fn counted(text: &str, figure: &Figure, figures: &[Figure]) -> (usize, Vec<Strin
 /// The stems of the words in `text` that carry meaning: not stop words, and
 /// not part of its `figures`.
 fn content(text: &str, figures: &[Figure]) -> Vec<String> {
-    let mut stems = Vec::new();
+    words(text, figures)
+        .into_iter()
+        .map(|(_, stem)| stem)
+        .collect()
+}
+
+/// The words in `text` that carry meaning, where each is and its stem.
+fn words(text: &str, figures: &[Figure]) -> Vec<(Range<usize>, String)> {
+    let mut words = Vec::new();
     let mut start = 0;
     while let Some(length) = text[start..].find(char::is_alphanumeric) {
         start += length;
@@ -403,11 +425,11 @@ fn content(text: &str, figures: &[Figure]) -> Vec<String> {
             .iter()
             .any(|figure| figure.start <= start && start < figure.end());
         if !in_figure && !stop_word(word) {
-            stems.push(stem(word));
+            words.push((start..end, stem(word)));
         }
         start = end;
     }
-    stems
+    words
 }
 
 /// Whether `word` is on NLTK's English stop word list: "the", "of", "an".
@@ -773,6 +795,8 @@ mod tests {
     }
 
     const CASES: &str = include_str!("verifier/cases.txt");
+    /// Lines a model wrote, labelled by hand (`generation::tests::write_test_set`).
+    const GENERATED: &str = include_str!("verifier/generated.txt");
     /// Labels the verifier handles: getting any of those cases wrong fails
     /// the test. The rest are only reported.
     const HANDLED: [&str; 4] = [
@@ -788,9 +812,8 @@ mod tests {
         line: &'static str,
     }
 
-    fn cases() -> Vec<Case> {
-        CASES
-            .split("\n\n")
+    fn cases(set: &'static str) -> Vec<Case> {
+        set.split("\n\n")
             .filter_map(|block| {
                 let mut lines = block
                     .lines()
@@ -817,19 +840,55 @@ mod tests {
             .collect()
     }
 
-    /// Runs every labelled case citing all its facts, and prints, per label,
-    /// how many the verifier gets wrong: false passes for
-    /// fabrications, false flags for valid lines. Run with --nocapture.
     #[test]
-    fn the_labelled_cases() {
+    fn words_a_line_adds_to_its_facts_are_found() {
+        let shown = |text: &str, facts: &[&str]| -> Vec<String> {
+            new_words(text, facts)
+                .into_iter()
+                .map(|range| text[range].to_owned())
+                .collect()
+        };
+        let fact = "Mentored four junior engineers through their first production launches.";
+        assert_eq!(
+            shown(fact, &[fact]),
+            Vec::<String>::new(),
+            "a copy adds nothing"
+        );
+        assert_eq!(
+            shown("Mentoring 4 junior engineers on AWS.", &[fact]),
+            ["AWS"],
+            "a word by its stem, a figure left to verify, a stop word skipped"
+        );
+        assert_eq!(
+            shown(
+                "Product leader with eight years in product.",
+                &[
+                    "Eight years in product.",
+                    "Right now I lead pricing and supply."
+                ]
+            ),
+            ["leader"],
+            "across every fact cited, and \"leader\" isn't \"lead\""
+        );
+    }
+
+    /// Whether a line with `label` is true, and should pass.
+    fn true_label(label: &str) -> bool {
+        matches!(label, "paraphrase" | "number_rewording" | "verbatim")
+    }
+
+    /// Runs every case of `set` citing all its facts, and prints, per label,
+    /// how many the verifier gets wrong: false passes for fabrications,
+    /// false flags for true lines. Returns the lines it got wrong whose
+    /// labels are among `must`.
+    fn score(name: &str, set: &'static str, must: &[&str]) -> Vec<&'static str> {
         let mut tally: Vec<(&str, usize, usize)> = Vec::new();
         let mut regressions = Vec::new();
-        for case in cases() {
+        for case in cases(set) {
             let given: Vec<GivenFact> = case.facts.iter().map(|text| fact(text)).collect();
             let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
             let flagged = verify(case.line, &cites, &given).is_some();
-            let should_pass = matches!(case.label, "paraphrase" | "number_rewording");
-            let wrong = flagged == should_pass;
+            let wrong = flagged == true_label(case.label);
             match tally.iter_mut().find(|(label, ..)| *label == case.label) {
                 Some((.., total, wrongs)) => {
                     *total += 1;
@@ -837,21 +896,45 @@ mod tests {
                 }
                 None => tally.push((case.label, 1, usize::from(wrong))),
             }
-            if wrong && HANDLED.contains(&case.label) {
+            if wrong && must.contains(&case.label) {
                 regressions.push(case.line);
             }
         }
+        eprintln!("{name}:");
         for (label, total, wrong) in &tally {
-            let kind = if matches!(*label, "paraphrase" | "number_rewording") {
+            let kind = if true_label(label) {
                 "false flags"
             } else {
                 "false passes"
             };
-            eprintln!("{label:<17} {wrong:>2} of {total:>2} {kind}");
+            eprintln!("  {label:<17} {wrong:>2} of {total:>2} {kind}");
         }
+        regressions
+    }
+
+    /// Run with --nocapture to print the tables.
+    #[test]
+    fn the_labelled_cases() {
+        let regressions = score("cases.txt", CASES, &HANDLED);
         assert!(
             regressions.is_empty(),
             "handled cases got wrong: {regressions:#?}"
+        );
+    }
+
+    /// Real output can't be held to every label `the_labelled_cases` is: its
+    /// lines weren't written to test one thing each. A fact copied word for
+    /// word must always pass, and every line must be labelled.
+    #[test]
+    fn lines_a_model_wrote() {
+        assert!(
+            cases(GENERATED).iter().all(|case| case.label != "?"),
+            "label every line in generated.txt"
+        );
+        let regressions = score("generated.txt", GENERATED, &["verbatim"]);
+        assert!(
+            regressions.is_empty(),
+            "copies of a fact flagged: {regressions:#?}"
         );
     }
 }

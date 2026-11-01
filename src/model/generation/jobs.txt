@@ -1,0 +1,66 @@
+# Made-up job posts for the test CVs (`extraction/*.pdf`), two each: one the
+# person fits, and a stretch asking for what they don't have, where a model
+# is most tempted to invent. Each: the CV it's for, its title and company,
+# then the description, up to the next "===".
+
+cv: junior
+title: Frontend Engineer, Rider App
+company: Tolly
+Tolly runs on-demand rickshaw and bike rides in Dhaka and Chattogram. We're looking for a frontend engineer for our rider app, built in React Native with TypeScript.
+
+You'll build new booking and payment flows, make the app work on slow networks and cheap Android phones, and care about accessibility. You'll work with designers and backend engineers, review code, and help us test with Playwright and Detox.
+
+Nice to have: experience with maps (Mapbox or Google Maps), offline-first apps, and a portfolio of side projects.
+===
+cv: junior
+title: Senior Full-Stack Engineer
+company: Ledgerline
+Ledgerline is a B2B invoicing platform. We need a senior full-stack engineer to lead a team of four.
+
+Requirements: 5+ years of professional experience; Node.js and TypeScript on the backend; React on the frontend; AWS (Lambda, DynamoDB, CDK); designing REST and GraphQL APIs; experience leading engineers and owning hiring; SOC 2 compliance work.
+
+You'll own the architecture of our billing service and report to the CTO.
+===
+cv: senior
+title: Principal Engineer, Developer Platform
+company: Quayside Bank
+Quayside Bank is a digital bank with 400 engineers. We're hiring a principal engineer for our developer platform team.
+
+You'll own how code gets to production: CI/CD, progressive delivery, deploy safety and rollback, on Kubernetes. You'll set technical direction across teams, mentor senior engineers, and work with security and compliance in a regulated environment. We build in Go, Java and Kotlin.
+
+Experience with payments systems and incident management is a strong plus.
+===
+cv: senior
+title: Head of Machine Learning Infrastructure
+company: Corvid AI
+Corvid AI trains large language models for legal teams. We need a head of ML infrastructure.
+
+You'll run a team of 12 engineers and own our GPU clusters (thousands of H100s), training pipelines in PyTorch and JAX, and model serving. Requirements: 8+ years in ML systems, experience managing managers, budgets over $20M, and publications at NeurIPS or ICML.
+===
+cv: columns
+title: Senior Android Engineer, Payments
+company: Brixmoney
+Brixmoney is a money app for people sending money home from the UK to West Africa. We're hiring a senior Android engineer.
+
+You'll build our transfer and card flows in Kotlin and Jetpack Compose, make the app reliable on poor connections, and mentor other mobile engineers. You'll care about accessibility, performance profiling and security. Experience with payments and offline-first sync is a big plus.
+===
+cv: columns
+title: Mobile Engineering Lead (iOS and Android)
+company: Hearthly
+Hearthly is a smart-home startup. We need a mobile lead to manage our team of six iOS and Android engineers.
+
+Requirements: 7+ years in mobile; deep Swift and SwiftUI experience; Kotlin Multiplatform in production; Bluetooth Low Energy and IoT device pairing; experience hiring and managing engineers; shipping apps with over 1 million users.
+===
+cv: linkedin
+title: Senior Product Manager, Marketplace Pricing
+company: Stallr
+Stallr is a marketplace for renting market stalls and pop-up spaces across the Netherlands and Belgium. We're hiring a senior product manager for pricing and supply.
+
+You'll own dynamic pricing, host payouts and trust and safety. You'll run experiments, write your own SQL, and work closely with engineering, design and operations. Experience with two-sided marketplaces is essential.
+===
+cv: linkedin
+title: VP of Product
+company: Fenwick Health
+Fenwick Health builds software for hospitals in the US. We're hiring a VP of Product to lead 15 product managers and designers.
+
+Requirements: 12+ years in product, 5+ managing product managers; full P&L ownership; experience selling enterprise SaaS to hospitals; HIPAA and FDA regulated products; reporting to the board.
