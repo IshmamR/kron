@@ -25,7 +25,7 @@ use crate::database::schema::{
     fact_versions, generations, line_citations, lines, sections, unsupported_claims,
 };
 use crate::database::{Error, Write};
-use crate::typeset;
+use crate::typeset::{self, Paper};
 
 /// What the model is told. The answer's shape is spelled out, since DeepSeek
 /// takes "a JSON object" rather than a schema.
@@ -507,8 +507,8 @@ impl Draft {
 }
 
 /// Saves `draft` as the job's current résumé, laid out with the default
-/// template on `paper`, "a4" or "letter".
-pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: &str) -> Result<ResumeId, Error> {
+/// template on `paper`.
+pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: Paper) -> Result<ResumeId, Error> {
     let generation = Uuid::now_v7();
     let template = typeset::template(typeset::DEFAULT_TEMPLATE);
     write.insert(
@@ -519,7 +519,7 @@ pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: &str) -> Result
             generations::KIND.value(&"resume"),
             generations::GENERATED_AT.value(&write.now()),
             generations::TEMPLATE_VERSION_ID.value(&Some(template.version_id)),
-            generations::PAPER.value(&Some(paper)),
+            generations::PAPER.value(&Some(paper.stored())),
         ],
     )?;
     for (position, section) in draft.sections.iter().enumerate() {
@@ -580,7 +580,7 @@ pub fn save(write: &mut Write, job: JobId, draft: &Draft, paper: &str) -> Result
 
 /// The paper a résumé is laid out on here: letter where it's the custom, by
 /// the locale, else A4.
-pub fn paper() -> &'static str {
+pub fn paper() -> Paper {
     let locale = ["LC_PAPER", "LC_ALL", "LANG"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
@@ -588,9 +588,9 @@ pub fn paper() -> &'static str {
     // The countries that use letter paper, by ISO 3166 code.
     const LETTER: [&str; 7] = ["_US", "_CA", "_MX", "_PH", "_CL", "_CO", "_VE"];
     if LETTER.iter().any(|country| locale.contains(country)) {
-        "letter"
+        Paper::Letter
     } else {
-        "a4"
+        Paper::A4
     }
 }
 
@@ -897,7 +897,7 @@ mod tests {
         let mut writer = sample::written()?;
         let (material, draft) = draft(writer.kron(), ANSWER);
         let job = sample::job(writer.kron(), "Cinder Labs")?;
-        let (resume, _) = writer.execute(|write| save(write, job, &draft, "a4"))?;
+        let (resume, _) = writer.execute(|write| save(write, job, &draft, Paper::A4))?;
         let read = Section::read_all(writer.kron(), resume)?;
         assert_eq!(shown(&read, &material), shown(&draft.sections, &material));
         let ids = |sections: &[Section]| -> Vec<LineId> {

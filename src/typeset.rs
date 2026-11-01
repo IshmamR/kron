@@ -1,5 +1,5 @@
-// Typst is the one layout engine: the same pages become the in-app preview and,
-// later, the exported PDF, so the preview can't drift from what gets sent.
+// Typst is the one layout engine: the same pages become the in-app preview and
+// the exported PDF, so the preview can't drift from what gets sent.
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration, Label};
@@ -119,6 +119,15 @@ impl Typesetter {
         Ok(TypesetResume { pages, layout })
     }
 
+    /// Lays out `markup` (from `resume_markup`) as a PDF file's bytes.
+    pub fn pdf(&self, markup: &str) -> Result<Vec<u8>, String> {
+        let document = self.compile(markup)?;
+        let pdf = typst_pdf::pdf(&document, &typst_pdf::PdfOptions::default())
+            .map_err(|errors| messages(&errors));
+        typst::comemo::evict(RENDERS_KEPT_IN_TYPST_CACHE);
+        pdf
+    }
+
     fn compile(&self, markup: &str) -> Result<PagedDocument, String> {
         let world = SingleFileWorld {
             typesetter: self,
@@ -126,14 +135,17 @@ impl Typesetter {
         };
         typst::compile::<PagedDocument>(&world)
             .output
-            .map_err(|errors| {
-                errors
-                    .iter()
-                    .map(|error| error.message.to_string())
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
+            .map_err(|errors| messages(&errors))
     }
+}
+
+/// Typst's errors as one message.
+fn messages(errors: &[typst::diag::SourceDiagnostic]) -> String {
+    errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 pub struct TypesetResume {
@@ -296,6 +308,32 @@ fn shares_row(line_box: &LineBox, other: &LineBox) -> bool {
     other.line != line_box.line && other.page == line_box.page && overlap > shorter / 2.
 }
 
+/// The paper a résumé is laid out on: per résumé, since applications to
+/// different countries want different sizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paper {
+    A4,
+    Letter,
+}
+
+impl Paper {
+    /// As `generations.paper` stores it; letter for anything else, as the
+    /// templates were drawn for it.
+    pub fn from_stored(stored: Option<&str>) -> Self {
+        match stored {
+            Some("a4") => Self::A4,
+            _ => Self::Letter,
+        }
+    }
+
+    pub fn stored(self) -> &'static str {
+        match self {
+            Self::A4 => "a4",
+            Self::Letter => "letter",
+        }
+    }
+}
+
 /// A design for résumés: Typst source that defines `render(resume)`.
 pub struct Template {
     pub key: &'static str,
@@ -395,8 +433,16 @@ pub fn install_templates(write: &mut Write) -> Result<(), database::Error> {
 /// find where it was laid out. A template may style, move or leave out a
 /// line, but must show it as the content it's given: turned into a string,
 /// it loses its label.
-pub fn resume_markup(template: &Template, sections: &[Section]) -> String {
+pub fn resume_markup(template: &Template, sections: &[Section], paper: Paper) -> String {
     let mut markup = String::from(template.source);
+    // After the template's own page rule, so its margins and background stay.
+    markup.push_str(&format!(
+        "\n#set page(paper: {})",
+        string_literal(match paper {
+            Paper::A4 => "a4",
+            Paper::Letter => "us-letter",
+        })
+    ));
     markup.push_str("\n#let resume = (sections: (\n");
     for section in sections {
         markup.push_str(&format!(
@@ -760,7 +806,7 @@ mod tests {
     }
 
     fn typeset(typesetter: &Typesetter, resume: &Resume) -> TypesetResume {
-        let markup = resume_markup(template(resume.template), &resume.sections);
+        let markup = resume_markup(template(resume.template), &resume.sections, Paper::Letter);
         match typesetter.render(&markup, 0.25) {
             Ok(typeset) => typeset,
             Err(error) => panic!("didn't compile in {:?}: {error}", resume.template),
@@ -783,6 +829,37 @@ mod tests {
                 (resume, typeset)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_resume_is_laid_out_on_its_paper_and_exported_as_a_pdf() {
+        let typesetter = Typesetter::new();
+        let Some(resume) = sample_resumes().into_iter().next() else {
+            panic!("no sample résumé");
+        };
+        for template in &TEMPLATES {
+            let size = |paper| {
+                let markup = resume_markup(template, &resume.sections, paper);
+                match typesetter.render(&markup, 0.25) {
+                    Ok(typeset) => typeset.layout.pages[0],
+                    Err(error) => panic!("didn't compile in {}: {error}", template.key),
+                }
+            };
+            // In points: A4 is 210 by 297 mm, letter 8.5 by 11 inches.
+            let near = |size: PageSize, width: f32, height: f32| {
+                (size.width - width).abs() < 0.5 && (size.height - height).abs() < 0.5
+            };
+            let a4 = size(Paper::A4);
+            assert!(near(a4, 595.3, 841.9), "{a4:?}");
+            let letter = size(Paper::Letter);
+            assert!(near(letter, 612., 792.), "{letter:?}");
+
+            let markup = resume_markup(template, &resume.sections, Paper::A4);
+            match typesetter.pdf(&markup) {
+                Ok(pdf) => assert!(pdf.starts_with(b"%PDF-"), "{}", template.key),
+                Err(error) => panic!("no PDF in {}: {error}", template.key),
+            }
+        }
     }
 
     #[test]

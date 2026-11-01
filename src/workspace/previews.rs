@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::database::schema::{Blocks, Generations, Lines, Sections};
 use crate::database::{Changed, Database, Error};
 use crate::model::{ResumeId, Section};
-use crate::typeset::{self, ResumeLayout, Typesetter, resume_markup};
+use crate::typeset::{self, Paper, ResumeLayout, Typesetter, resume_markup};
 
 /// Width of a US Letter page, the template's paper, in typographic points.
 const PAGE_WIDTH_POINTS: f32 = 612.;
@@ -55,6 +55,11 @@ pub struct RenderedPages {
 }
 
 impl Previews {
+    /// The typesetter, once the fonts have loaded.
+    pub fn typesetter(&self) -> Option<Arc<Typesetter>> {
+        self.typesetter.clone()
+    }
+
     pub fn new(database: Entity<Database>, cx: &mut Context<Self>) -> Self {
         let loading_fonts = cx.spawn(async move |this, cx| {
             let typesetter = cx.background_spawn(async { Typesetter::new() }).await;
@@ -286,22 +291,27 @@ impl Slot {
     }
 }
 
-/// The résumé laid out with its template version; `None` when there's no
-/// such résumé.
-fn read_markup(connection: &Connection, resume: ResumeId) -> Result<Option<String>, Error> {
-    let version: Option<Option<Uuid>> = connection
+/// The résumé laid out with its template version, on its paper; `None` when
+/// there's no such résumé.
+pub(super) fn read_markup(
+    connection: &Connection,
+    resume: ResumeId,
+) -> Result<Option<String>, Error> {
+    let generation: Option<(Option<Uuid>, Option<String>)> = connection
         .prepare_cached(
-            "SELECT template_version_id FROM generations WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT template_version_id, paper FROM generations
+             WHERE id = ?1 AND deleted_at IS NULL",
         )?
-        .query_row([resume.0], |row| row.get(0))
+        .query_row([resume.0], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?;
-    let Some(version) = version else {
+    let Some((version, paper)) = generation else {
         return Ok(None);
     };
     let sections = Section::read_all(connection, resume)?;
     Ok(Some(resume_markup(
         typeset::template_of_version(version),
         &sections,
+        Paper::from_stored(paper.as_deref()),
     )))
 }
 

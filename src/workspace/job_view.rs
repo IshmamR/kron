@@ -114,6 +114,8 @@ pub struct JobView {
     /// elsewhere.
     generating: bool,
     generation: Task<()>,
+    /// Saving the résumé shown as a PDF, from asking where to writing it.
+    export: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -234,6 +236,7 @@ impl JobView {
             scroll_pending: false,
             generating: false,
             generation: Task::ready(()),
+            export: Task::ready(()),
         }
     }
 
@@ -479,7 +482,15 @@ impl JobView {
                 h_flex()
                     .gap_2()
                     .when(self.shown_id().is_some(), |this| {
-                        this.child(self.generate_button(cx))
+                        this.child(
+                            Button::new("export-pdf")
+                                .label("Export PDF")
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.export(window, cx)
+                                })),
+                        )
+                        .child(self.generate_button(cx))
                     })
                     .child(
                         TabBar::new("job-tabs")
@@ -501,6 +512,89 @@ impl JobView {
                             })),
                     ),
             )
+    }
+
+    /// Asks where to save the résumé shown, as it's shown, and saves it there
+    /// as a PDF, laid out by the same Typst compile as the page on screen.
+    fn export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(resume) = self.shown_id() else {
+            return;
+        };
+        let Some(typesetter) = self.previews.read(cx).typesetter() else {
+            notify(
+                Notification::info("The fonts are still loading. Try again in a moment."),
+                window,
+                cx,
+            );
+            return;
+        };
+        let connection = self.database.read(cx).connection();
+        let read = || -> Result<_, Error> {
+            let name: Option<String> = connection
+                .query_row(
+                    "SELECT lines.text FROM lines
+                     JOIN blocks ON blocks.id = lines.block_id
+                     JOIN sections ON sections.id = blocks.section_id
+                     WHERE sections.generation_id = ?1 AND lines.role = 'name'
+                         AND lines.deleted_at IS NULL",
+                    [resume.0],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok((previews::read_markup(connection, resume)?, name))
+        };
+        let (markup, name) = match read() {
+            Ok((Some(markup), name)) => (markup, name),
+            Ok((None, _)) => return,
+            Err(error) => {
+                eprintln!("job view: couldn't read the résumé to export: {error}");
+                notify(Notification::error("Couldn't read the résumé."), window, cx);
+                return;
+            }
+        };
+        let company = self.summary.as_ref().map(|job| job.company.clone());
+        let file_name = pdf_name(name.as_deref(), company.as_deref());
+        let directory = dirs::document_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        let chosen = cx.prompt_for_new_path(&directory, Some(&file_name));
+        self.export = cx.spawn_in(window, async move |this, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    eprintln!("job view: the save dialog failed: {error}");
+                    return;
+                }
+                Err(error) => {
+                    eprintln!("job view: the save dialog closed: {error}");
+                    return;
+                }
+            };
+            let saved = cx
+                .background_spawn(async move {
+                    let pdf = typesetter.pdf(&markup)?;
+                    std::fs::write(&path, pdf).map_err(|error| error.to_string())?;
+                    Ok::<_, String>(path)
+                })
+                .await;
+            let message = match saved {
+                Ok(path) => {
+                    let shown = path.file_name().map_or_else(
+                        || path.display().to_string(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                    Notification::success(format!("Saved {shown}."))
+                }
+                Err(error) => {
+                    eprintln!("job view: couldn't export the résumé: {error}");
+                    Notification::error(format!("Couldn't save the PDF: {error}."))
+                }
+            };
+            if let Err(error) = this.update_in(cx, |_, window, cx| notify(message, window, cx)) {
+                eprintln!("job view: {error}");
+            }
+        });
     }
 
     /// "Generate", or "Regenerate" over a résumé there already.
@@ -1141,6 +1235,7 @@ fn outdated_notice(resume: &ShownResume, cx: &App) -> Option<impl IntoElement> {
     if marked {
         text.push_str(" Lines that use them are marked in the margin.");
     }
+    text.push_str(" Regenerate to write it from them as they are now.");
     let theme = cx.theme();
     Some(
         h_flex()
@@ -1153,15 +1248,7 @@ fn outdated_notice(resume: &ShownResume, cx: &App) -> Option<impl IntoElement> {
             .bg(theme.warning.opacity(0.08))
             .text_sm()
             .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-            .child(div().flex_1().child(text))
-            .child(
-                Button::new("regenerate")
-                    .label("Regenerate")
-                    .outline()
-                    .small()
-                    .disabled(true)
-                    .tooltip("Regenerating isn't available yet"),
-            ),
+            .child(div().flex_1().child(text)),
     )
 }
 
@@ -1312,6 +1399,26 @@ enum Tab {
     Application,
 }
 
+/// The name a résumé's PDF is offered under: the person's name and the
+/// company, without characters file names can't hold.
+fn pdf_name<'a>(name: Option<&'a str>, company: Option<&'a str>) -> String {
+    let filled = |part: Option<&'a str>| part.map(str::trim).filter(|part| !part.is_empty());
+    let parts: Vec<&str> = [filled(name).or(Some("Résumé")), filled(company)]
+        .into_iter()
+        .flatten()
+        .collect();
+    let name: String = parts
+        .join(" - ")
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => ' ',
+            character => character,
+        })
+        .collect();
+    format!("{name}.pdf")
+}
+
 fn centered_message(text: &'static str, cx: &App) -> impl IntoElement {
     div()
         .size_full()
@@ -1328,6 +1435,15 @@ mod tests {
     use gpui_kit::{TestAppContext, VisualTestContext};
 
     use super::*;
+
+    #[test]
+    fn a_pdf_is_offered_under_the_name_and_company() {
+        assert_eq!(
+            pdf_name(Some("Alex Rahman"), Some("Acme/Co: Labs")),
+            "Alex Rahman - Acme-Co- Labs.pdf"
+        );
+        assert_eq!(pdf_name(Some(" "), None), "Résumé.pdf");
+    }
     use crate::database::{TemporaryDirectory, Write};
     use crate::model::{ClaimId, FactId, UnsupportedReason, sample};
     use crate::workspace::testing;

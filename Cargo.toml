@@ -41,6 +41,7 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "time"] }
 typst = "0.15.1"
 typst-kit = { version = "0.15.1", features = ["scan-fonts", "embedded-fonts"] }
 typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
 typst-render = "0.15.1"
 uuid = { version = "1.28.0", features = ["v7"] }
 
