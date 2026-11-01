@@ -193,6 +193,7 @@ impl<'a> Device<'a> for Drawn {
             Some(BfString::String(text)) => text,
             None => return,
         };
+        let text = unligated(text);
         let drawn_font = matches!(glyph, PdfGlyph::Type3(_));
         let transform = transform * glyph_transform;
         let origin = transform * Point::ZERO;
@@ -314,10 +315,12 @@ fn write_page<'a>(reading: &mut Reading, number: usize, glyphs: &'a [Glyph]) -> 
             if position > 0 {
                 reading.text.push(' ');
             }
+            let run = &glyphs[runs[*run].glyphs.clone()];
+            let tracking = tracking(run);
             let mut previous: Option<&Glyph> = None;
-            for glyph in &glyphs[runs[*run].glyphs.clone()] {
+            for glyph in run {
                 if previous.is_some_and(|previous| {
-                    glyph.left - previous.right
+                    glyph.left - previous.right - tracking
                         > WORD_MARGIN * glyph.width().max(previous.width()).max(glyph.size)
                 }) {
                     reading.text.push(' ');
@@ -337,6 +340,44 @@ fn write_page<'a>(reading: &mut Reading, number: usize, glyphs: &'a [Glyph]) -> 
         above = Some((rect, size));
     }
     placed
+}
+
+/// The space set between every two letters of `run`, as a letter-spaced
+/// "C O N T A C T" heading has, so only a wider gap is a word's end: the
+/// middle gap, since most gaps are between letters. Ours.
+fn tracking(run: &[Glyph]) -> f64 {
+    let mut gaps: Vec<f64> = run
+        .windows(2)
+        .map(|pair| pair[1].left - pair[0].right)
+        .collect();
+    // Too few gaps to tell letters' from words'.
+    if gaps.len() < 3 {
+        return 0.;
+    }
+    gaps.sort_by(f64::total_cmp);
+    gaps[gaps.len() / 2].max(0.)
+}
+
+/// `text` with typographic ligatures, as "ﬁ", written as their letters, so
+/// "proﬁling" is found as "profiling".
+fn unligated(text: String) -> String {
+    if !text
+        .chars()
+        .any(|character| ('\u{FB00}'..='\u{FB06}').contains(&character))
+    {
+        return text;
+    }
+    text.chars()
+        .map(|character| match character {
+            '\u{FB00}' => "ff".to_owned(),
+            '\u{FB01}' => "fi".to_owned(),
+            '\u{FB02}' => "fl".to_owned(),
+            '\u{FB03}' => "ffi".to_owned(),
+            '\u{FB04}' => "ffl".to_owned(),
+            '\u{FB05}' | '\u{FB06}' => "st".to_owned(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 /// `glyphs` grouped into runs: glyphs drawn one after another, on the same
@@ -805,6 +846,21 @@ mod tests {
         assert_eq!(lines.first(), Some(&"Tasnim Chowdhury"));
         assert!(
             lines.contains(&"Paired with the backend team to move the fare estimate API from polling to WebSockets."),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn letter_spaced_headings_and_ligatures_are_read_as_words() {
+        let columns = reading(include_bytes!("../model/extraction/columns.pdf"));
+        let lines = lines(&columns);
+        for line in ["CONTACT", "SKILLS", "LANGUAGES", "performance profiling"] {
+            assert!(lines.contains(&line), "{line}: {lines:#?}");
+        }
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("Shipped offline-first transfers")),
             "{lines:#?}"
         );
     }

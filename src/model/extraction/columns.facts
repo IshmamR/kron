@@ -1,0 +1,56 @@
+summary	Android engineer who has spent five years making money apps feel calm. I like Kotlin, small pull requests, and screens that still make sense to my mum. Moved from Lagos to London in 2022 and kept building for people who pay with their phones first.
+contact	chiamaka.ab@example.com
+contact	+44 7700 900123
+contact	linkedin.com/in/chiamaka-adeyemi-brooks
+contact	github.com/chiamakaab
+title	Android Engineer II
+organization	Pennyroll
+location	London, UK
+date	Aug 2022 – Present
+bullet	Led the move of the savings app from XML views to Jetpack Compose, screen by screen, over 14 months without a feature freeze.
+bullet	Cut cold start time on low-end Android phones from 3.1 s to 1.4 s by deferring SDK set-up and trimming the dependency graph.
+bullet	Built the round-ups feature end to end with the payments team; 41% of active users switched it on within three months.
+bullet	Run the mobile guild's monthly code review clinic for eight engineers across two squads.
+title	Android Developer
+organization	Kudipay
+location	Lagos, Nigeria
+date	Mar 2020 – Jul 2022
+bullet	Shipped offline-first transfers that queue payments on patchy networks and retry safely, reducing failed transfers by 27%.
+bullet	Wrote the app's first UI test suite with Espresso, taking coverage of the payments flow from zero to 70%.
+bullet	Added a USSD fallback for customers without mobile data, now used by 120,000 people a month.
+title	Junior Mobile Developer
+organization	Hatchworks Studio
+location	Lagos, Nigeria
+date	Jun 2019 – Feb 2020
+bullet	Built client apps in Kotlin and Flutter for a pharmacy chain and a school fees platform.
+title	B.Eng. Electrical and Electronics Engineering
+organization	University of Lagos
+location	Lagos, Nigeria
+date	2014 – 2019
+bullet	Final-year project: a low-cost glucose reader that sends readings to a phone over Bluetooth Low Energy.
+title	naira-format
+date	2021
+skill	Kotlin
+skill	Kotlin Multiplatform
+bullet	A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+bullet	Speaker, Droidcon London 2023: “Compose on a £60 phone”.
+bullet	Mentor, CodeBridge Lagos (2020 – 2022): coached 30 first-time Android developers through their first published app.
+skill_group	Android
+skill	Kotlin
+skill	Jetpack Compose
+skill	Coroutines
+skill	Room
+skill	Hilt
+skill_group	Also
+skill	Flutter
+skill	Swift (basic)
+skill	GraphQL
+skill	Firebase
+skill_group	Practice
+skill	UI testing
+skill	accessibility
+skill	performance profiling
+skill_group	Languages
+skill	Yoruba (native)
+skill	English (fluent)
+skill	French (basic)

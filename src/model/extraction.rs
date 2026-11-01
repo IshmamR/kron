@@ -34,8 +34,8 @@ Answer with one JSON object:
       "title": the job title, degree, project or certificate name, or a skills line's label (like "Languages"), or null,
       "organization": the employer, school or issuer, or null,
       "location": or null,
-      "dates": as written, like "Mar 2021 – Present", or null,
-      "bullets": [each bullet point or sentence about it],
+      "dates": as written, like "Mar 2021 – Present", without a duration the text adds, like "(2 years 3 months)", or null,
+      "bullets": [each bullet point about it, or each sentence of a paragraph about it],
       "skills": [each skill or technology listed for it]
     }
   ]
@@ -46,10 +46,12 @@ Rules:
 - Leave out bullet markers (•, -, *) at the start of a point.
 - A bullet point is one quote, even when it wraps onto the next line: quote all of it, with the line break as a space.
 - Placeholders in square brackets, like [EMAIL_1], stand for hidden details. Copy them as they are. Never guess what they hide.
-- Each job, degree, project and certification is its own entry, in the order the text has them. Two roles at one employer are two entries.
+- Each job, degree, project and certification is its own entry, in the order the text has them. Two roles at one employer are two entries, each with the employer as its organization, even when the text names it once above both.
 - A skills line like "Languages: Go, Java" is an entry of kind "skills" with the title "Languages" and the skills "Go" and "Java".
 - Skills or technologies named with a project or job go in that entry's skills.
-- Talks, awards, publications, volunteering, spoken languages and anything else go in entries of kind "other", each item a bullet.
+- A paragraph about a job, degree or project is split into its sentences, each one bullet. The summary stays whole.
+- A list of spoken languages under a heading, like the skills, is a skills entry too, titled as the heading. A sentence about them is a bullet.
+- Talks, awards, publications, volunteering and anything else go in entries of kind "other", each item a bullet.
 - Leave out the person's name, section headings and the placeholders themselves.
 - Use null or [] for what the text doesn't give. Never add anything the text doesn't say."#;
 /// Room for a long CV's facts as JSON. Ours: a two-page CV is about 4,000
@@ -857,6 +859,16 @@ mod tests {
                 "senior",
                 include_bytes!("extraction/senior.pdf"),
                 include_str!("extraction/senior.facts"),
+            ),
+            (
+                "columns",
+                include_bytes!("extraction/columns.pdf"),
+                include_str!("extraction/columns.facts"),
+            ),
+            (
+                "linkedin",
+                include_bytes!("extraction/linkedin.pdf"),
+                include_str!("extraction/linkedin.facts"),
             ),
         ] {
             let reading = crate::import::read(crate::import::Format::Pdf, pdf.to_vec())

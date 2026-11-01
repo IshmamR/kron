@@ -125,11 +125,11 @@ pub fn find(text: &str, names: &[&str], hidden: &[&str]) -> Vec<Found> {
         let link = found_link
             .as_str()
             .trim_end_matches(['.', ',', ';', ':', '!', '?']);
-        add(
-            &mut found,
-            Identifier::Link,
-            found_link.start()..found_link.start() + link.len(),
-        );
+        let mut end = found_link.start() + link.len();
+        if end == found_link.end() {
+            end += wrapped(&text[end..]);
+        }
+        add(&mut found, Identifier::Link, found_link.start()..end);
     }
     for found_domain in DOMAIN.find_iter(text) {
         if name.within(found_domain.as_str()) {
@@ -239,6 +239,35 @@ impl Redaction {
     }
 }
 
+/// How much of `rest`, the text after a link, is the link wrapped onto the
+/// next line, as a narrow column breaks "linkedin.com/in/alexrah" before
+/// "man": a run with no spaces or capitals, so "Berlin" stays a word.
+fn wrapped(rest: &str) -> usize {
+    let Some(next) = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+    else {
+        return 0;
+    };
+    let run = next
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '(' | ')' | '<' | '>')
+        })
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    let continues = run
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_lowercase() || first.is_ascii_digit())
+        && !run.chars().any(char::is_uppercase);
+    if continues {
+        rest.len() - next.len() + run.len()
+    } else {
+        0
+    }
+}
+
 /// What the user's name is sent as in `text`: `stand_in`, or "[NAME]" where
 /// `text` already has it, since a quote of it couldn't be told from one of
 /// the user's name.
@@ -318,7 +347,13 @@ impl Name {
                 .filter(|part| lowercase.contains(part.as_str()))
                 .count()
                 > 1;
-        glued && !self.parts.contains(&lowercase) && self.within(text)
+        // "Adeyemi-Brooks" is the name as written, not a username.
+        let written = text.split('-').all(|piece| {
+            let lowercase = normalize(piece);
+            piece.chars().next().is_some_and(char::is_uppercase)
+                && (self.parts.contains(&lowercase) || self.particles.contains(&lowercase))
+        });
+        glued && !written && !self.parts.contains(&lowercase) && self.within(text)
     }
 
     /// Whether `text`, as a web address, holds a part of the name long
@@ -529,7 +564,11 @@ mod tests {
     fn particles_and_hyphens_stay_inside_the_name() {
         for (names, text, expected) in [
             (["Sami ul Haque"], "Sami ul Haque", "Jordan Ellis"),
-            (["Sami ul Haque"], "Sami-ul Haque wrote", "Jordan Ellis wrote"),
+            (
+                ["Sami ul Haque"],
+                "Sami-ul Haque wrote",
+                "Jordan Ellis wrote",
+            ),
             (["Sami ul Haque"], "Haque ul", "Jordan Ellis ul"),
             (["Daan van der Velde"], "Van der Velde, D.", "Jordan Ellis"),
             (
@@ -539,6 +578,11 @@ mod tests {
             ),
             (["Siobhán O'Neill"], "Siobhán O’Neill's", "Jordan Ellis's"),
             (["Ronan McDonald"], "R. McDonald", "Jordan Ellis"),
+            (
+                ["Chiamaka Adeyemi-Brooks"],
+                "Chiamaka Adeyemi-Brooks, Adeyemi-Brooks's",
+                "Jordan Ellis, Jordan Ellis's",
+            ),
         ] {
             assert_eq!(redacted(text, &names), expected, "{text}");
         }
@@ -589,6 +633,14 @@ mod tests {
             ("@alex", "[HANDLE_1]"),
             ("alexrahman", "[HANDLE_1]"),
             ("AlexRahman's", "[HANDLE_1]'s"),
+            (
+                "linkedin.com/in/alexrah\nman (LinkedIn)",
+                "[LINK_1] (LinkedIn)",
+            ),
+            (
+                "github.com/alexr\nBerlin, Germany",
+                "[LINK_1]\nBerlin, Germany",
+            ),
         ] {
             assert_eq!(redacted(text, &names), expected, "{text}");
         }
@@ -663,7 +715,10 @@ mod tests {
     fn quotes_in_the_redacted_text_map_back_to_the_original() {
         let text = "Alex Rahman\nalex@example.com\nLed Rahman's team of 12.";
         let redaction = Redaction::new(text, &find(text, &["Alex Rahman"], &[]), STAND_IN);
-        assert_eq!(redaction.text, "Jordan Ellis\n[EMAIL_1]\nLed Jordan Ellis's team of 12.");
+        assert_eq!(
+            redaction.text,
+            "Jordan Ellis\n[EMAIL_1]\nLed Jordan Ellis's team of 12."
+        );
         let original = |quote: &str| {
             let start = redaction.text.find(quote).expect("a quote in the text");
             &text[redaction.original(start..start + quote.len())]
