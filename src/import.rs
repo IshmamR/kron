@@ -50,9 +50,8 @@ pub enum Warning {
     /// The page has pictures but no text, like a scanned page, so none of
     /// its words were read.
     NoText { page: usize },
-    /// The page uses a font drawn as pictures (Type 3), which gives no
-    /// letter widths and often no text, so its words may come apart or be
-    /// missing.
+    /// The page uses a font drawn as pictures (Type 3) with letters that
+    /// don't say what they are, so some of its words are missing.
     DrawnFont { page: usize },
 }
 

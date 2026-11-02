@@ -618,20 +618,32 @@ pub fn last_instructions(connection: &Connection, job: JobId) -> Result<Option<S
         .flatten())
 }
 
-/// The paper a résumé is laid out on here: letter where it's the custom, by
-/// the locale, else A4.
-pub fn paper() -> Paper {
+/// The paper a new résumé is laid out on: the one the user last chose, or
+/// else letter where the locale's country uses it, and A4 elsewhere. The
+/// locale is only a guess: many systems are set to en_US wherever they are.
+pub fn paper(connection: &Connection) -> Result<Paper, Error> {
+    let last: Option<Option<String>> = connection
+        .prepare_cached(
+            "SELECT paper FROM generations
+             WHERE kind = 'resume' AND paper IS NOT NULL AND deleted_at IS NULL
+             ORDER BY generated_at DESC, id DESC LIMIT 1",
+        )?
+        .query_row([], |row| row.get(0))
+        .optional()?;
+    if let Some(last) = last {
+        return Ok(Paper::from_stored(last.as_deref()));
+    }
     let locale = ["LC_PAPER", "LC_ALL", "LANG"]
         .into_iter()
         .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
         .unwrap_or_default();
     // The countries that use letter paper, by ISO 3166 code.
     const LETTER: [&str; 7] = ["_US", "_CA", "_MX", "_PH", "_CL", "_CO", "_VE"];
-    if LETTER.iter().any(|country| locale.contains(country)) {
+    Ok(if LETTER.iter().any(|country| locale.contains(country)) {
         Paper::Letter
     } else {
         Paper::A4
-    }
+    })
 }
 
 fn save_block(
@@ -975,6 +987,18 @@ mod tests {
             None,
             "the latest's, even none"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_new_resume_starts_on_the_paper_last_chosen() -> Result<(), Error> {
+        let mut writer = sample::written()?;
+        let job = sample::job(writer.kron(), "Cinder Labs")?;
+        for chosen in [Paper::A4, Paper::Letter] {
+            let (_, draft) = draft(writer.kron(), "{}");
+            writer.execute(|write| save(write, job, &draft, chosen, None))?;
+            assert_eq!(paper(writer.kron())?, chosen);
+        }
         Ok(())
     }
 

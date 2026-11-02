@@ -14,6 +14,7 @@ use std::ops::Range;
 
 use rig_core::completion::CompletionRequest;
 use rig_core::completion::options::{GenerationOptions, Reasoning};
+use rusqlite::Connection;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -381,6 +382,29 @@ pub fn save(
         }
     }
     Ok(saved)
+}
+
+/// The documents whose facts haven't been found, as saved with no AI set
+/// up, oldest first, with their file names: none for text pasted or written.
+/// Only the user's name confirmed while starting out may cite one, and an
+/// extraction that found nothing still counts as done.
+pub fn unread(connection: &Connection) -> Result<Vec<(DocumentId, Option<String>)>, Error> {
+    Ok(connection
+        .prepare_cached(
+            "SELECT documents.id, documents.file_name FROM documents
+             WHERE documents.deleted_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM fact_sources
+                   JOIN facts ON facts.id = fact_sources.fact_id
+                   WHERE fact_sources.document_id = documents.id AND facts.kind != 'name')
+               AND NOT EXISTS (
+                   SELECT 1 FROM llm_runs
+                   WHERE llm_runs.document_id = documents.id
+                     AND llm_runs.task = 'extract_facts' AND llm_runs.outcome = 'done')
+             ORDER BY documents.added_at, documents.id",
+        )?
+        .query_map([], |row| Ok((DocumentId(row.get(0)?), row.get(1)?)))?
+        .collect::<Result<_, _>>()?)
 }
 
 /// What an extraction's `save` did.
@@ -1168,6 +1192,26 @@ mod tests {
                 "bullet | Spoke at RustConf 2024. | custom | Talks",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_document_is_unread_until_its_facts_are_found() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        let (document, _) = writer.execute(|write| {
+            let document = super::super::commands::import_document(write, None, TEXT)?;
+            super::super::commands::add_name(write, "Alex Rahman", Some(document))?;
+            Ok(document)
+        })?;
+        assert_eq!(
+            unread(writer.kron())?,
+            [(document, None)],
+            "the name confirmed is no fact found"
+        );
+        let extraction =
+            answer(r#"{"entries": [{"kind": "experience", "title": "Senior Engineer"}]}"#);
+        writer.execute(|write| save(write, document, &extraction))?;
+        assert_eq!(unread(writer.kron())?, []);
         Ok(())
     }
 

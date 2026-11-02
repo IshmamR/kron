@@ -29,6 +29,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice, notify};
 use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
+use super::{SetUpAi, ShowFacts};
 use crate::database::{Database, Error};
 use crate::import::{self, Format, Warning, name};
 use crate::llm::{self, Purpose};
@@ -73,6 +74,8 @@ pub struct ImportPage {
     focus_handle: FocusHandle,
     /// Reading a file or saving it; replaced, the one before stops.
     task: Task<()>,
+    /// The documents sent for their facts and not back yet.
+    finding: Vec<DocumentId>,
 }
 
 impl Render for ImportPage {
@@ -143,6 +146,39 @@ impl ImportPage {
             }),
             focus_handle: cx.focus_handle(),
             task: Task::ready(()),
+            finding: Vec::new(),
+        }
+    }
+
+    /// Whether `document` was sent for its facts and isn't back yet.
+    pub fn is_finding(&self, document: DocumentId) -> bool {
+        self.finding.contains(&document)
+    }
+
+    /// Finds the facts in a document saved before, as one saved with no AI
+    /// set up: shown first as the model would be sent it, as on import.
+    pub fn find_facts(
+        &mut self,
+        document: DocumentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_choosing() {
+            return;
+        }
+        let read = self.database.read(cx).connection().query_row(
+            "SELECT documents.file_name, document_texts.text FROM documents
+             JOIN document_texts ON document_texts.document_id = documents.id
+             WHERE documents.id = ?1",
+            [document.0],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        );
+        match read {
+            Ok((file_name, text)) => {
+                let label = file_name.map_or("your text".into(), SharedString::from);
+                self.check(document, label, text.into(), None, window, cx);
+            }
+            Err(error) => eprintln!("import page: couldn't read the document: {error}"),
         }
     }
 
@@ -504,8 +540,17 @@ impl ImportPage {
             Ok(None) => {
                 notify(
                     Notification::warning(format!(
-                        "To find the facts in {label}, add an AI provider in Settings."
-                    )),
+                        "To find the facts in {label}, set up an AI provider."
+                    ))
+                    .action(|_, _, cx| {
+                        Button::new("set-up-ai")
+                            .label("Set up AI")
+                            .small()
+                            .on_click(cx.listener(|notification, _, window, cx| {
+                                notification.dismiss(window, cx);
+                                window.dispatch_action(Box::new(SetUpAi), cx);
+                            }))
+                    }),
                     window,
                     cx,
                 );
@@ -525,7 +570,8 @@ impl ImportPage {
         let start = Instant::now();
         let call = llm::complete(&provider, extraction::request(&redaction.text), cx);
         let database = self.database.clone();
-        cx.spawn_in(window, async move |_, cx| {
+        self.finding.push(document);
+        cx.spawn_in(window, async move |this, cx| {
             let reply = call.await;
             let duration = start.elapsed();
             let found = match &reply {
@@ -569,6 +615,13 @@ impl ImportPage {
                     return;
                 }
             };
+            let finished = this.update(cx, |this, cx| {
+                this.finding.retain(|finding| *finding != document);
+                cx.notify();
+            });
+            if let Err(error) = finished {
+                eprintln!("import page: {error}");
+            }
             let message = match saved {
                 Ok(Ok(saved)) => {
                     let mut message =
@@ -583,7 +636,15 @@ impl ImportPage {
                         1 => message.push_str(" 1 needs a look."),
                         count => message.push_str(&format!(" {count} need a look.")),
                     }
-                    Notification::success(message)
+                    Notification::success(message).action(|_, _, cx| {
+                        Button::new("show-facts")
+                            .label("Show facts")
+                            .small()
+                            .on_click(cx.listener(|notification, _, window, cx| {
+                                notification.dismiss(window, cx);
+                                window.dispatch_action(Box::new(ShowFacts), cx);
+                            }))
+                    })
                 }
                 Ok(Err(problem)) => {
                     Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
@@ -943,8 +1004,8 @@ fn warning_message(warning: &Warning) -> String {
             page + 1
         ),
         Warning::DrawnFont { page } => format!(
-            "Page {} uses a font whose text can't be fully read, so some of its words may be \
-             split up or missing below.",
+            "Page {} uses a font that doesn't say what some of its letters are, so some words \
+             below have letters missing. Fix them before saving.",
             page + 1
         ),
     }
@@ -1181,6 +1242,27 @@ mod tests {
         let saved = open.saved_without_file();
         assert_eq!(saved.len(), before + 1);
         assert_eq!(saved.last().map(String::as_str), Some("Alex Rahman\nRust"));
+    }
+
+    #[test]
+    fn a_document_saved_before_is_checked_before_its_facts_are_found() {
+        let mut app = TestAppContext::single();
+        let mut open = open_on(&mut app, testing::open_empty);
+        testing::run(open.cx, &open.database, |write| {
+            let document = commands::import_document(write, None, "Sami ul Haque\nRust\n")?;
+            commands::add_name(write, "Sami ul Haque", Some(document)).map(|_| ())
+        });
+        let document = open.database.read_with(open.cx, |database, _| {
+            database
+                .connection()
+                .query_row("SELECT id FROM documents", [], |row| row.get(0))
+                .map(DocumentId)
+        });
+        let Ok(document) = document else {
+            panic!("the document saved: {document:?}");
+        };
+        open.act(|page, window, cx| page.find_facts(document, window, cx));
+        assert_eq!(open.shown(), Shown::Check("Jordan Ellis\nRust\n".into()));
     }
 
     #[test]

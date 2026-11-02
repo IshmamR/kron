@@ -37,7 +37,7 @@ use crate::model::generation::{self, Draft, Material};
 use crate::model::redaction::{self, Redaction};
 use crate::model::settings;
 use crate::model::{self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands};
-use crate::typeset::{self, LineBox, PageSize, Template};
+use crate::typeset::{self, LineBox, PageSize, Paper, Template};
 
 const KEY_CONTEXT: &str = "JobView";
 /// Pages are shown this wide: a bit over US Letter at 96 dpi.
@@ -78,6 +78,13 @@ pub fn init(cx: &mut App) {
 #[action(namespace = job_view, no_json)]
 struct UseTemplate {
     key: &'static str,
+}
+
+/// Lays the current résumé out on another paper.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = job_view, no_json)]
+struct UsePaper {
+    paper: Paper,
 }
 
 pub enum JobViewEvent {
@@ -177,6 +184,14 @@ impl Render for JobView {
                     this.database
                         .read(cx)
                         .queue(move |write| commands::set_template(write, job, key));
+                }
+            }))
+            .on_action(cx.listener(|this, action: &UsePaper, _, cx| {
+                if let Some(job) = this.job {
+                    let paper = action.paper;
+                    this.database
+                        .read(cx)
+                        .queue(move |write| commands::set_paper(write, job, paper));
                 }
             }))
             .size_full()
@@ -702,9 +717,10 @@ impl JobView {
             )?;
             let names = redaction::names(connection)?;
             let stand_in = settings::stand_in_name(connection)?;
-            Ok((posting, Material::read(connection)?, names, stand_in))
+            let paper = generation::paper(connection)?;
+            Ok((posting, Material::read(connection)?, names, stand_in, paper))
         };
-        let ((title, company, description), material, names, stand_in) = match read() {
+        let ((title, company, description), material, names, stand_in, paper) = match read() {
             Ok(read) => read,
             Err(error) => {
                 eprintln!("job view: couldn't read what a résumé is written from: {error}");
@@ -763,7 +779,7 @@ impl JobView {
                                 write,
                                 job,
                                 draft,
-                                generation::paper(),
+                                paper,
                                 instructions.as_deref(),
                             )?)
                         }
@@ -831,7 +847,7 @@ impl JobView {
                     v_flex()
                         .size_full()
                         .children(version.map(|version| {
-                            template_bar(version.template, !showing_current, cx)
+                            template_bar(version, !showing_current, cx)
                         }))
                         .when_some(sent_notice(sent, self.showing_sent, cx), |this, notice| {
                             this.child(notice)
@@ -1106,18 +1122,27 @@ fn scale(page: PageSize) -> f32 {
 }
 
 /// Above the page, as it's about the page: which template lays the résumé
-/// out, and a menu to pick another. Its content stays as it is, so switching
-/// is only a new layout. A version that was sent keeps its template, so for
-/// one it's only named.
-fn template_bar(current: &'static Template, read_only: bool, cx: &App) -> impl IntoElement {
+/// out and on what paper, and menus to pick others. Its content stays as it
+/// is, so switching is only a new layout. A version that was sent keeps its
+/// template and paper, so for one they're only named.
+fn template_bar(version: &Version, read_only: bool, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
-    let picker = if read_only {
-        div()
-            .text_sm()
-            .child(current.name)
-            .into_any_element()
+    let (picker, paper) = if read_only {
+        (
+            div()
+                .text_sm()
+                .child(version.template.name)
+                .into_any_element(),
+            div()
+                .text_sm()
+                .child(version.paper.label())
+                .into_any_element(),
+        )
     } else {
-        template_menu(current).into_any_element()
+        (
+            template_menu(version.template).into_any_element(),
+            paper_menu(version.paper).into_any_element(),
+        )
     };
     h_flex()
         .flex_none()
@@ -1133,6 +1158,8 @@ fn template_bar(current: &'static Template, read_only: bool, cx: &App) -> impl I
         )
         .child(div().text_sm().text_color(theme.muted_foreground).child("Template"))
         .child(picker)
+        .child(div().text_sm().text_color(theme.muted_foreground).child("Paper"))
+        .child(paper)
         .child(
             div()
                 .text_xs()
@@ -1163,6 +1190,24 @@ fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
             menu
         })
         .into_any_element()
+}
+
+fn paper_menu(current: Paper) -> impl IntoElement {
+    Button::new("paper")
+        .label(current.label())
+        .dropdown_caret(true)
+        .outline()
+        .small()
+        .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
+            for paper in Paper::ALL {
+                menu = menu.menu_with_check(
+                    paper.label(),
+                    paper == current,
+                    Box::new(UsePaper { paper }),
+                );
+            }
+            menu
+        })
 }
 
 /// `generated_at` is the résumé version's on screen.
@@ -1320,6 +1365,7 @@ struct Version {
     id: ResumeId,
     generated_at: DateTime<Utc>,
     template: &'static Template,
+    paper: Paper,
 }
 
 impl Versions {
@@ -1329,11 +1375,12 @@ impl Versions {
                 id: ResumeId(row.get(0)?),
                 generated_at: DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default(),
                 template: typeset::template_of_version(row.get(2)?),
+                paper: Paper::from_stored(row.get::<_, Option<String>>(3)?.as_deref()),
             })
         };
         let current = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id FROM generations
+                "SELECT id, generated_at, template_version_id, paper FROM generations
                  WHERE job_id = ?1 AND kind = 'resume' AND deleted_at IS NULL
                  ORDER BY generated_at DESC, id DESC LIMIT 1",
             )?
@@ -1341,7 +1388,7 @@ impl Versions {
             .optional()?;
         let sent = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id FROM generations
+                "SELECT id, generated_at, template_version_id, paper FROM generations
                  WHERE id = (
                      SELECT resume_id FROM events
                      WHERE job_id = ?1 AND kind = 'applied' AND resume_id IS NOT NULL
@@ -1954,6 +2001,18 @@ mod tests {
         view.settle();
         let template = view.read(|view| view.shown_version().map(|version| version.template.key));
         assert_eq!(template, Some("sidebar"));
+    }
+
+    #[test]
+    fn a_paper_switch_shows_in_the_template_bar() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        for paper in Paper::ALL {
+            view.cx.dispatch_action(UsePaper { paper });
+            view.settle();
+            let shown = view.read(|view| view.shown_version().map(|version| version.paper));
+            assert_eq!(shown, Some(paper));
+        }
     }
 
     #[test]

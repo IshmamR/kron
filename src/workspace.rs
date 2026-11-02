@@ -24,12 +24,12 @@ use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{
-    SettingField, SettingGroup, SettingItem, SettingPage, Settings,
+    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
 use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{IconName, Root, Sizable, WindowExt, h_flex};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
     KeyBinding, Pixels, SharedString, Subscription, Task, Window, WindowBounds, actions, div,
@@ -37,11 +37,12 @@ use gpui_kit::{
 };
 
 use crate::appearance::{Appearance, Motion};
-use crate::database::schema::{self, Facts};
+use crate::database::schema::{self, Documents, FactSources, Facts, LlmRuns};
 use crate::database::{Changed, Database};
 use crate::llm::{self, Purpose};
 use crate::model::settings::{self, DeviceSettings, LastPage};
-use crate::model::{Application, FactId, JobId, LineId};
+use crate::model::extraction;
+use crate::model::{Application, DocumentId, FactId, JobId, LineId};
 use crate::window;
 use ai_settings::AiSettings;
 use facts_page::FactsPage;
@@ -65,7 +66,21 @@ const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// Wide enough for a description's lines to read as they were written.
 const JOB_FORM_WIDTH: f32 = 640.;
 
-actions!(workspace, [ToggleSidebar, ShowShortcuts, Undo, Redo]);
+/// Settings' page for the AI provider, after "General".
+const AI_SETTINGS_PAGE: usize = 1;
+
+actions!(
+    workspace,
+    [
+        ToggleSidebar,
+        ShowShortcuts,
+        Undo,
+        Redo,
+        /// Opens Settings on the AI provider.
+        SetUpAi,
+        ShowFacts
+    ]
+);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -103,6 +118,12 @@ pub struct Workspace {
     /// Facts that need review, for the sidebar's badge: counted on start,
     /// and again after facts change.
     needs_review: usize,
+    /// Documents whose facts haven't been found, as saved with no AI set up,
+    /// with their file names: read on start, and again after they change.
+    unread: Vec<(DocumentId, Option<String>)>,
+    /// Settings keeps the page picked under its id; each "Set up AI" gives
+    /// it a new one, opening on `AI_SETTINGS_PAGE`.
+    settings_id: usize,
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
@@ -140,6 +161,7 @@ impl Render for Workspace {
                 .track_focus(&self.focus_handle)
                 .size_full()
                 .child(settings_page(
+                    self.settings_id,
                     self.database.clone(),
                     self.ai_settings.clone(),
                     self.stand_in_name.clone(),
@@ -162,6 +184,13 @@ impl Render for Workspace {
                 this.save_page(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &SetUpAi, window, cx| {
+                this.settings_id += 1;
+                this.open_page(Page::Settings, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowFacts, window, cx| {
+                this.open_page(Page::Facts, window, cx)
+            }))
             .on_action(|_: &ShowShortcuts, window, cx| shortcuts::open(window, cx))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo_or_redo(false, window, cx)))
@@ -172,7 +201,14 @@ impl Render for Workspace {
                 None => h_flex()
                     .size_full()
                     .child(self.render_sidebar(cx))
-                    .child(div().flex_1().min_w_0().h_full().child(page))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .children(self.render_unread(cx))
+                            .child(div().flex_1().min_h_0().child(page)),
+                    )
                     .into_any_element(),
             })
     }
@@ -218,6 +254,12 @@ impl Workspace {
             cx.subscribe(&database, |this, database, changed: &Changed, cx| {
                 if changed.touches(Facts) {
                     this.count_needs_review(cx);
+                }
+                if changed.touches(Documents)
+                    || changed.touches(FactSources)
+                    || changed.touches(LlmRuns)
+                {
+                    this.read_unread(cx);
                 }
                 // Read back, not set where they're chosen, so a change synced
                 // from another device applies the same way.
@@ -266,7 +308,12 @@ impl Workspace {
                     |this, _, event, window, cx| match event {
                         OnboardingEvent::Done => {
                             this.onboarding = None;
-                            this.open_resumes(window, cx);
+                            // "Set up AI" may have been asked for on the way.
+                            if this.page == Page::Settings {
+                                this.open_page(Page::Settings, window, cx);
+                            } else {
+                                this.open_resumes(window, cx);
+                            }
                         }
                     },
                 ));
@@ -281,6 +328,8 @@ impl Workspace {
 
         let mut workspace = Self {
             needs_review: 0,
+            unread: Vec::new(),
+            settings_id: 0,
             database,
             page: Page::Resumes,
             sidebar_collapsed: device.sidebar_collapsed,
@@ -300,6 +349,7 @@ impl Workspace {
             _subscriptions: subscriptions,
         };
         workspace.count_needs_review(cx);
+        workspace.read_unread(cx);
         workspace.restore_page(device.last_page, window, cx);
         if workspace.onboarding.is_some() {
             workspace.import_page.focus_handle(cx).focus(window, cx);
@@ -368,6 +418,86 @@ impl Workspace {
         self.database
             .read(cx)
             .queue(move |write| settings::save_window(write, saved));
+    }
+
+    fn read_unread(&mut self, cx: &mut Context<Self>) {
+        match extraction::unread(self.database.read(cx).connection()) {
+            Ok(unread) => {
+                self.unread = unread;
+                cx.notify();
+            }
+            Err(error) => {
+                eprintln!("workspace: couldn't read the documents to find facts in: {error}")
+            }
+        }
+    }
+
+    /// Above the résumés and facts while a document's facts haven't been
+    /// found, as when it was imported with no AI set up: without them,
+    /// there's nothing to write a résumé from. Gone while they're found.
+    fn render_unread(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
+        if !matches!(self.page, Page::Resumes | Page::Job | Page::Facts) {
+            return None;
+        }
+        let import_page = self.import_page.read(cx);
+        let unread: Vec<&(DocumentId, Option<String>)> = self
+            .unread
+            .iter()
+            .filter(|(document, _)| !import_page.is_finding(*document))
+            .collect();
+        let &(first, ref file_name) = *unread.first()?;
+        let text = match unread.len() {
+            1 => format!(
+                "The facts in {} haven't been found yet, and résumés are written from them.",
+                file_name.as_deref().unwrap_or("the text you added")
+            ),
+            count => format!(
+                "The facts in {count} of your documents haven't been found yet, and résumés \
+                 are written from them."
+            ),
+        };
+        let has_provider = llm::assigned(
+            self.database.read(cx).device_connection(),
+            Purpose::ExtractFacts,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("workspace: couldn't read the AI provider: {error}");
+            None
+        })
+        .is_some();
+        let button = if has_provider {
+            Button::new("find-facts")
+                .label("Find facts")
+                .primary()
+                .small()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_page(Page::Import, window, cx);
+                    this.import_page.update(cx, |import_page, cx| {
+                        import_page.find_facts(first, window, cx)
+                    });
+                }))
+        } else {
+            Button::new("set-up-ai")
+                .label("Set up AI")
+                .primary()
+                .small()
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(SetUpAi), cx))
+        };
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .flex_none()
+                .gap_3()
+                .px_4()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.info.opacity(0.08))
+                .text_sm()
+                .child(Icon::new(IconName::Info).small().text_color(theme.info))
+                .child(div().flex_1().child(text))
+                .child(button),
+        )
     }
 
     fn count_needs_review(&mut self, cx: &mut Context<Self>) {
@@ -618,6 +748,7 @@ fn apply_settings(stored: settings::Settings, cx: &mut App) {
 /// Each choice is written to `settings`; the workspace applies it once the
 /// write commits. The AI provider and model are this device's.
 fn settings_page(
+    id: usize,
     database: Entity<Database>,
     ai_settings: Entity<AiSettings>,
     stand_in_name: Entity<StandInName>,
@@ -634,8 +765,15 @@ fn settings_page(
         })
         .collect();
 
-    Settings::new("settings")
+    // Used only as the id's state is made: Settings first opens on its first
+    // page, and on AI from "Set up AI".
+    let start = if id == 0 { 0 } else { AI_SETTINGS_PAGE };
+    Settings::new(("settings", id))
         .with_group_variant(GroupBoxVariant::Outline)
+        .default_selected_index(SelectIndex {
+            page_ix: start,
+            group_ix: None,
+        })
         .page(
             SettingPage::new("General").group(
                 SettingGroup::new().title("Appearance").item(
@@ -813,6 +951,8 @@ mod tests {
     use super::*;
     use crate::database::{Error, TemporaryDirectory, Write};
     use crate::model::commands;
+    use crate::model::extraction::{Extraction, FoundEntry, FoundFact};
+    use crate::model::{EntryKind, FactKind};
 
     struct Open<'a> {
         workspace: Entity<Workspace>,
@@ -892,6 +1032,69 @@ mod tests {
         assert!(open.read(|workspace, _| workspace.page == Page::Facts));
         let selected = open.read(|workspace, cx| workspace.facts_page.read(cx).selected());
         assert_eq!(selected, Some(fact));
+    }
+
+    #[test]
+    fn a_document_without_facts_is_offered_until_they_are_found() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        assert_eq!(open.read(|workspace, _| workspace.unread.len()), 0);
+        open.run(|write| commands::import_document(write, None, "Rust\n").map(|_| ()));
+        let document =
+            DocumentId(open.id("SELECT id FROM documents ORDER BY added_at DESC LIMIT 1"));
+        assert_eq!(
+            open.read(|workspace, _| workspace.unread.clone()),
+            [(document, None)]
+        );
+        let found = Extraction {
+            profile: Vec::new(),
+            entries: vec![FoundEntry {
+                kind: EntryKind::Skills,
+                section: None,
+                facts: vec![FoundFact {
+                    kind: FactKind::Skill,
+                    text: "Rust".into(),
+                    source: Some((0..4, "Rust".into())),
+                    review: None,
+                }],
+            }],
+        };
+        open.run(move |write| extraction::save(write, document, &found).map(|_| ()));
+        assert_eq!(open.read(|workspace, _| workspace.unread.len()), 0);
+    }
+
+    #[test]
+    fn set_up_ai_opens_settings_on_ai_and_show_facts_the_facts() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.cx.dispatch_action(SetUpAi);
+        open.cx.run_until_parked();
+        assert_eq!(
+            open.read(|workspace, _| (workspace.page, workspace.settings_id)),
+            (Page::Settings, 1),
+            "a new id, so it opens on AI"
+        );
+        open.cx.dispatch_action(ShowFacts);
+        open.cx.run_until_parked();
+        assert_eq!(open.read(|workspace, _| workspace.page), Page::Facts);
+    }
+
+    #[test]
+    fn set_up_ai_asked_for_while_starting_out_opens_settings_after() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_empty(&mut app);
+        let (workspace, cx) =
+            app.add_window_view(|window, cx| Workspace::new(database.clone(), window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(SetUpAi);
+        cx.run_until_parked();
+        testing::run(cx, &database, |write| {
+            commands::import_document(write, None, "Rust\n").map(|_| ())
+        });
+        let shown = workspace.read_with(cx, |workspace, _| {
+            (workspace.onboarding.is_some(), workspace.page)
+        });
+        assert_eq!(shown, (false, Page::Settings));
     }
 
     #[test]

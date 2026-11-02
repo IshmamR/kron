@@ -317,6 +317,8 @@ pub enum Paper {
 }
 
 impl Paper {
+    pub const ALL: [Self; 2] = [Self::A4, Self::Letter];
+
     /// As `generations.paper` stores it; letter for anything else, as the
     /// templates were drawn for it.
     pub fn from_stored(stored: Option<&str>) -> Self {
@@ -330,6 +332,13 @@ impl Paper {
         match self {
             Self::A4 => "a4",
             Self::Letter => "letter",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::A4 => "A4",
+            Self::Letter => "US Letter",
         }
     }
 }

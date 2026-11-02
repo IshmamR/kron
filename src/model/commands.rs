@@ -270,6 +270,20 @@ pub fn set_template(write: &mut Write, job: JobId, key: &str) -> Result<(), Erro
     )
 }
 
+/// Lays the job's current résumé out on `paper`.
+pub fn set_paper(write: &mut Write, job: JobId, paper: typeset::Paper) -> Result<(), Error> {
+    let generation: Option<Uuid> = write
+        .prepare(
+            "SELECT generation_id FROM current_generations WHERE job_id = ?1 AND kind = 'resume'",
+        )?
+        .query_row([job.0], |row| row.get(0))
+        .optional()?;
+    let Some(generation) = generation else {
+        return Ok(());
+    };
+    write.set(generations::PAPER, generation, &Some(paper.stored()))
+}
+
 /// A job as the user adds it.
 pub struct NewJob<'a> {
     pub title: &'a str,
@@ -847,6 +861,28 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(typeset::template_of_version(version).key, "sidebar");
+        Ok(())
+    }
+
+    #[test]
+    fn a_paper_switch_lays_out_the_current_resume() -> Result<(), Error> {
+        let mut writer = with_sample()?;
+        let job = sample::job(writer.kron(), "Ledgerly")?;
+        let paper = |writer: &Writer| -> rusqlite::Result<Option<String>> {
+            writer.kron().query_row(
+                "SELECT paper FROM current_generations WHERE job_id = ?1 AND kind = 'resume'",
+                [job.0],
+                |row| row.get(0),
+            )
+        };
+        run(&mut writer, |write| {
+            set_paper(write, job, typeset::Paper::A4)
+        })?;
+        assert_eq!(paper(&writer)?.as_deref(), Some("a4"));
+        run(&mut writer, |write| {
+            set_paper(write, job, typeset::Paper::Letter)
+        })?;
+        assert_eq!(paper(&writer)?.as_deref(), Some("letter"));
         Ok(())
     }
 }

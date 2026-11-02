@@ -78,7 +78,7 @@ pub fn read(bytes: Vec<u8>) -> Result<Reading, Error> {
         if drawn.picture && drawn.glyphs.is_empty() {
             reading.warnings.push(Warning::NoText { page: number });
         }
-        if drawn.drawn_font {
+        if drawn.lost_text {
             reading.warnings.push(Warning::DrawnFont { page: number });
         }
         let first_line = reading.lines.len();
@@ -163,8 +163,9 @@ struct Drawn {
     glyphs: Vec<Glyph>,
     /// Whether it draws an image.
     picture: bool,
-    /// Whether it draws a Type 3 glyph.
-    drawn_font: bool,
+    /// Whether it draws a Type 3 glyph that says nothing of what it is,
+    /// so a letter is missing. Chrome draws text in them that reads fine.
+    lost_text: bool,
     /// Where a Type 3 font draws spaces.
     spaces: Vec<Point>,
     /// The `actual_texts` of the page's marked content not yet begun.
@@ -200,20 +201,23 @@ impl<'a> Device<'a> for Drawn {
         _: &Paint<'a>,
         _: &GlyphDrawMode,
     ) {
-        if let PdfGlyph::Type3(_) = glyph {
-            self.drawn_font = true;
-        }
         let text = match glyph.as_unicode() {
             Some(BfString::Char(character)) => Some(character.to_string()),
             Some(BfString::String(text)) => Some(text),
             None => None,
         };
+        let has_text = text.is_some();
         // A glyph without text of its own, as Chrome draws the en dash it
         // sets between digits, may have it in the span it's drawn in.
         let Some(text) = text
             .filter(|text| !text.chars().any(icon))
             .or_else(|| self.spans.last_mut().and_then(Option::take))
         else {
+            // An icon's text is in the Private Use Area: only a glyph with
+            // none at all lost a letter.
+            if !has_text && let PdfGlyph::Type3(_) = glyph {
+                self.lost_text = true;
+            }
             return;
         };
         let text = unligated(text);
@@ -619,7 +623,8 @@ mod tests {
 
     /// A PDF whose pages each draw their content, with their annotations.
     /// They can draw in Helvetica as `/F1`, which the PDF names but doesn't
-    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`; and a
+    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`, and
+    /// in one that draws them without saying what they are as `/F4`; and a
     /// grey image as `/Image`.
     fn pdf(pages: &[(&str, &str)]) -> Vec<u8> {
         let stream = |content: &str| {
@@ -629,7 +634,7 @@ mod tests {
             )
         };
         let kids: Vec<String> = (0..pages.len())
-            .map(|page| format!("{} 0 R", 8 + 2 * page))
+            .map(|page| format!("{} 0 R", 9 + 2 * page))
             .collect();
         let mut objects = vec![
             "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
@@ -655,13 +660,18 @@ mod tests {
                  1 beginbfrange <61> <62> <0061> endbfrange \
                  endcmap CMapName currentdict /CMap defineresource pop end end",
             ),
+            "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] \
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /g1 6 0 R /g2 6 0 R >> \
+             /Encoding << /Type /Encoding /Differences [97 /g1 /g2] >> \
+             /FirstChar 97 /LastChar 98 /Widths [500 500] >>"
+                .to_owned(),
         ];
         for (page, (content, annotations)) in pages.iter().enumerate() {
             objects.push(format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R \
-                 /Resources << /Font << /F1 3 0 R /F3 5 0 R >> /XObject << /Image 4 0 R >> >> \
+                 /Resources << /Font << /F1 3 0 R /F3 5 0 R /F4 8 0 R >> /XObject << /Image 4 0 R >> >> \
                  /Annots [{annotations}] >>",
-                9 + 2 * page
+                10 + 2 * page
             ));
             objects.push(stream(content));
         }
@@ -902,6 +912,11 @@ mod tests {
     fn a_font_drawn_as_pictures_is_read_as_words() {
         // Chrome prints the variable font Inter as Type 3 fonts.
         let junior = reading(include_bytes!("../model/extraction/junior.pdf"));
+        assert_eq!(
+            junior.warnings,
+            [],
+            "every letter is read, so nothing is warned about"
+        );
         let lines = lines(&junior);
         assert_eq!(lines.first(), Some(&"Tasnim Chowdhury"));
         assert!(
@@ -934,14 +949,15 @@ mod tests {
     }
 
     #[test]
-    fn a_font_drawn_as_pictures_is_warned_about() {
+    fn a_font_drawn_as_pictures_is_warned_about_only_when_letters_are_lost() {
         let document = pdf(&[
             ("BT /F1 10 Tf 72 700 Td (Alex) Tj ET", ""),
             ("BT /F3 10 Tf 72 700 Td (ab) Tj ET", ""),
+            ("BT /F4 10 Tf 72 700 Td (ab) Tj ET", ""),
         ]);
         assert_eq!(
             reading(&document).warnings,
-            [Warning::DrawnFont { page: 1 }]
+            [Warning::DrawnFont { page: 2 }]
         );
     }
 }
