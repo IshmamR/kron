@@ -31,7 +31,7 @@ use crate::typeset::{self, Paper};
 /// takes "a JSON object" rather than a schema.
 const PREAMBLE: &str = r#"You write a résumé for one job from facts about a person. Each fact has an id, like F12. Facts are grouped in entries, like E3: a job, degree, project, certification, group of skills, or other items like talks.
 
-Answer with one JSON object:
+Answer with one JSON object. Ids are strings in it, like "F12" and "E3":
 {
   "summary": {"text": two or three sentences of what this person has done that matters most for the job, "facts": [the ids of the facts it rests on]}, or null,
   "entries": [
@@ -304,13 +304,16 @@ pub fn request(redacted: &str, job: &Job) -> CompletionRequest {
 }
 
 impl Answer {
-    /// Reads the model's answer, even wrapped in a Markdown code block.
+    /// Reads the model's answer, even wrapped in a Markdown code block, or
+    /// with ids written bare, as `[F12, F14]`: DeepSeek's JSON mode let
+    /// that through for a CV of 95 facts.
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         let json = match (text.find('{'), text.rfind('}')) {
             (Some(start), Some(end)) if start < end => &text[start..=end],
             _ => text,
         };
         serde_json::from_str(json)
+            .or_else(|error| serde_json::from_str(&quoted_ids(json)).map_err(|_| error))
     }
 }
 
@@ -646,6 +649,39 @@ pub fn paper(connection: &Connection) -> Result<Paper, Error> {
     })
 }
 
+/// `json` with each id outside a string, like `F12` or `E3`, put in quotes.
+fn quoted_ids(json: &str) -> String {
+    let mut quoted = String::with_capacity(json.len());
+    let mut characters = json.char_indices().peekable();
+    let mut in_string = false;
+    while let Some((index, character)) = characters.next() {
+        if in_string {
+            quoted.push(character);
+            match character {
+                '\\' => quoted.extend(characters.next().map(|(_, escaped)| escaped)),
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        let digits = json[index + character.len_utf8()..]
+            .find(|next: char| !next.is_ascii_digit())
+            .unwrap_or(json.len() - index - character.len_utf8());
+        if matches!(character, 'F' | 'E') && digits > 0 {
+            quoted.push('"');
+            quoted.push_str(&json[index..index + 1 + digits]);
+            quoted.push('"');
+            for _ in 0..digits {
+                characters.next();
+            }
+            continue;
+        }
+        in_string = character == '"';
+        quoted.push(character);
+    }
+    quoted
+}
+
 fn save_block(
     write: &mut Write,
     section: Uuid,
@@ -929,6 +965,48 @@ mod tests {
             ],
             "a figure no fact states, and a fact of another job"
         );
+    }
+
+    #[test]
+    fn ids_written_bare_are_read_and_text_like_them_is_left() {
+        let answer = Answer::parse(
+            r#"{"summary": {"text": "Cut F1 \"E2\" time.", "facts": [F1, F12]},
+                "entries": [{"entry": E3, "bullets": [{"text": "Ran F9.", "facts": [F4]}],
+                             "skills": [F5]}],
+                "skills": [{"entry": E6, "skills": [F7,F8]}], "items": [F10]}"#,
+        );
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => panic!("bare ids are read: {error}"),
+        };
+        let summary = answer.summary.unwrap_or_default();
+        assert_eq!(summary.text, "Cut F1 \"E2\" time.");
+        assert_eq!(summary.facts, ["F1", "F12"]);
+        let entry = answer.entries.first().map(|entry| {
+            let bullet = entry
+                .bullets
+                .first()
+                .map(|bullet| (&bullet.text, &bullet.facts));
+            (&entry.entry, bullet, &entry.skills)
+        });
+        let (bullet_text, bullet_facts) = (String::from("Ran F9."), vec![String::from("F4")]);
+        assert_eq!(
+            entry,
+            Some((
+                &"E3".to_owned(),
+                Some((&bullet_text, &bullet_facts)),
+                &vec!["F5".to_owned()]
+            ))
+        );
+        let skills = answer
+            .skills
+            .first()
+            .map(|skills| (&skills.entry, &skills.skills));
+        assert_eq!(
+            skills,
+            Some((&"E6".to_owned(), &vec!["F7".to_owned(), "F8".to_owned()]))
+        );
+        assert_eq!(answer.items, ["F10"]);
     }
 
     #[test]
