@@ -8,6 +8,9 @@
 // and the items. Every line the model wrote goes through the verifier, and
 // one that fails is left out and listed as an unsupported claim.
 
+use std::ops::Range;
+
+use chrono::{Datelike, Local};
 use rig_core::completion::CompletionRequest;
 use rig_core::completion::options::{GenerationOptions, Reasoning};
 use rusqlite::{Connection, OptionalExtension};
@@ -79,6 +82,9 @@ pub struct Material {
     contacts: Vec<Given>,
     /// The facts as the model is given them, before redaction.
     pub listing: String,
+    /// This month, as `month` counts them, which "present" in a job's
+    /// dates means.
+    now: i32,
 }
 
 struct Given {
@@ -169,6 +175,10 @@ impl Material {
             name: None,
             contacts: Vec::new(),
             listing: String::new(),
+            now: {
+                let today = Local::now().date_naive();
+                month(today.year(), today.month0())
+            },
         };
         let mut entry_ids: Vec<Uuid> = Vec::new();
         while let Some(row) = rows.next()? {
@@ -228,6 +238,41 @@ impl Material {
             ),
             None => self.listing.clone(),
         }
+    }
+
+    /// How many whole years the jobs' dates cover, a month two jobs share
+    /// counted once, and the date facts that say so. A year with no month
+    /// counts from its end when a job starts in it and to its start when one
+    /// ends in it, so a guess never adds time.
+    fn experience(&self) -> (u32, Vec<usize>) {
+        let mut dates = Vec::new();
+        let mut spans: Vec<Range<i32>> = Vec::new();
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == EntryKind::Experience)
+        {
+            for index in &entry.facts {
+                let fact = &self.facts[*index];
+                if fact.kind == FactKind::Date
+                    && let Some(span) = span(&fact.text, self.now)
+                {
+                    dates.push(*index);
+                    spans.push(span);
+                }
+            }
+        }
+        spans.sort_by_key(|span| span.start);
+        let mut months = 0;
+        let mut counted_to = i32::MIN;
+        for span in spans {
+            let start = span.start.max(counted_to);
+            if span.end > start {
+                months += span.end - start;
+                counted_to = span.end;
+            }
+        }
+        (u32::try_from(months / 12).unwrap_or_default(), dates)
     }
 
     /// Whether there's nothing to make a résumé from but a name and contacts.
@@ -332,9 +377,15 @@ impl Draft {
             })
             .collect();
         let mut claims = Vec::new();
+        let (years, dates) = material.experience();
         // A line the model wrote, citing those of `facts` that `allowed`
-        // lets it, if the verifier passes it.
-        let mut written = |written: &Written, allowed: &dyn Fn(usize) -> bool| -> Option<Line> {
+        // lets it, if the verifier passes it. With `summary`, it may also
+        // say how many years the person has worked, as the jobs' dates
+        // count them, and cites those dates.
+        let mut written = |written: &Written,
+                           allowed: &dyn Fn(usize) -> bool,
+                           summary: bool|
+         -> Option<Line> {
             let text = redaction.restore(written.text.trim(), sent);
             if text.is_empty() {
                 return None;
@@ -346,13 +397,28 @@ impl Draft {
                     cites.push(id);
                 }
             }
-            match verifier::verify(&text, &cites, &given) {
-                None => Some(line(text, cites)),
-                Some(reason) => {
-                    claims.push((text, reason));
-                    None
+            let Some(reason) = verifier::verify(&text, &cites, &given) else {
+                return Some(line(text, cites));
+            };
+            let worked = years_worked(&text);
+            if summary && !worked.is_empty() && worked.iter().all(|(_, claimed)| *claimed <= years)
+            {
+                let mut rest = text.clone();
+                for (range, _) in worked.iter().rev() {
+                    rest.replace_range(range.clone(), "");
+                }
+                if verifier::verify(&rest, &cites, &given).is_none() {
+                    for date in &dates {
+                        let id = material.facts[*date].id;
+                        if !cites.contains(&id) {
+                            cites.push(id);
+                        }
+                    }
+                    return Some(line(text, cites));
                 }
             }
+            claims.push((text, reason));
+            None
         };
 
         let mut sections = vec![Section {
@@ -373,7 +439,7 @@ impl Draft {
         if let Some(summary) = answer
             .summary
             .as_ref()
-            .and_then(|summary| written(summary, &|_| true))
+            .and_then(|summary| written(summary, &|_| true, true))
         {
             sections.push(Section {
                 kind: SectionKind::Summary,
@@ -400,7 +466,7 @@ impl Draft {
                     let bullets = chosen
                         .bullets
                         .iter()
-                        .filter_map(|bullet| written(bullet, &in_entry))
+                        .filter_map(|bullet| written(bullet, &in_entry, false))
                         .collect();
                     let block = entry_block(material, *entry, &chosen.skills, bullets)?;
                     Some((
@@ -647,6 +713,110 @@ pub fn paper(connection: &Connection) -> Result<Paper, Error> {
     } else {
         Paper::A4
     })
+}
+
+/// A month as a count from year 0, so months subtract.
+fn month(year: i32, month0: u32) -> i32 {
+    year * 12 + i32::try_from(month0).unwrap_or_default()
+}
+
+/// The months a job's dates, like "June 2021 – Present" or "2018 – 2021",
+/// cover, "present" being `now`; `None` without a start and an end.
+fn span(dates: &str, now: i32) -> Option<Range<i32>> {
+    const MONTHS: [&str; 12] = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ];
+    let dates = dates.to_lowercase();
+    let mut parts = dates
+        .split(['-', '\u{2013}', '\u{2014}', '\u{2212}'])
+        .flat_map(|part| part.split(" to "));
+    let (start, end) = (parts.next()?, parts.next()?);
+    // A month named, or else the year's last month for a start and its
+    // first for an end.
+    let read = |part: &str, starts: bool| -> Option<i32> {
+        let year = part
+            .split(|character: char| !character.is_ascii_digit())
+            .find_map(|digits| {
+                digits
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|year| (1900..2100).contains(year))
+            })?;
+        let named = part
+            .split(|character: char| !character.is_alphabetic())
+            .find_map(|word| {
+                MONTHS
+                    .iter()
+                    .position(|name| word.len() >= 3 && word.starts_with(name))
+            });
+        let month0 = named.map_or(if starts { 11 } else { 0 }, |month0| month0 as u32);
+        Some(month(year, month0))
+    };
+    let start = read(start, true)?;
+    let end = if ["present", "now", "current"]
+        .iter()
+        .any(|word| end.contains(word))
+    {
+        now
+    } else {
+        read(end, false)?
+    };
+    (end > start).then_some(start..end)
+}
+
+/// Where `text` says how many years the person has worked, as "5 years",
+/// "5+ years" or "five years", with the number.
+fn years_worked(text: &str) -> Vec<(Range<usize>, u32)> {
+    const WORDS: [&str; 20] = [
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+    ];
+    let lower = text.to_lowercase();
+    let mut found = Vec::new();
+    for (at, _) in lower.match_indices("year") {
+        let before = lower[..at].trim_end();
+        let before = before.strip_suffix('+').unwrap_or(before).trim_end();
+        let word_start = before
+            .rfind(|character: char| !character.is_alphanumeric())
+            .map_or(0, |index| index + 1);
+        let word = &before[word_start..];
+        let number = word.parse::<u32>().ok().or_else(|| {
+            WORDS
+                .iter()
+                .position(|name| *name == word)
+                .and_then(|index| u32::try_from(index + 1).ok())
+        });
+        let end = at
+            + if lower[at..].starts_with("years") {
+                5
+            } else {
+                4
+            };
+        if let Some(number) = number
+            && !word.is_empty()
+        {
+            found.push((word_start..end, number));
+        }
+    }
+    found
 }
 
 /// `json` with each id outside a string, like `F12` or `E3`, put in quotes.
@@ -964,6 +1134,76 @@ mod tests {
                 ),
             ],
             "a figure no fact states, and a fact of another job"
+        );
+    }
+
+    #[test]
+    fn a_jobs_dates_are_read_as_the_months_they_cover() {
+        let now = month(2026, 10);
+        assert_eq!(span("June 2021 – Present", now), Some(month(2021, 5)..now));
+        assert_eq!(
+            span("Jan 2024 - May 2024", now),
+            Some(month(2024, 0)..month(2024, 4))
+        );
+        assert_eq!(
+            span("2018 – 2021", now),
+            Some(month(2018, 11)..month(2021, 0)),
+            "a year alone adds no time it may not have had"
+        );
+        assert_eq!(span("2015", now), None);
+        assert_eq!(span("May 2024 – Jan 2024", now), None);
+    }
+
+    #[test]
+    fn the_summary_may_say_the_years_the_jobs_dates_cover() {
+        let writer = match sample::written() {
+            Ok(writer) => writer,
+            Err(error) => panic!("the sample: {error}"),
+        };
+        let mut material = match Material::read(writer.kron()) {
+            Ok(material) => material,
+            Err(error) => panic!("the sample's facts: {error}"),
+        };
+        // 2016 – 2018, 2018 – 2021 and 2021 – present: 97 months.
+        material.now = month(2026, 10);
+        assert_eq!(material.experience().0, 8);
+        let summary = |text: &str| {
+            let json = format!(r#"{{"summary": {{"text": "{text}", "facts": ["F9"]}}}}"#);
+            let answer = match Answer::parse(&json) {
+                Ok(answer) => answer,
+                Err(error) => panic!("{json}: {error}"),
+            };
+            let redaction = Redaction::new(&material.listing, &[], STAND_IN);
+            let draft = Draft::new(&answer, &material, &material.listing, &redaction);
+            let kept = draft
+                .sections
+                .iter()
+                .find(|section| section.kind == SectionKind::Summary)
+                .and_then(|section| section.blocks.first())
+                .map(|block| match block {
+                    Block::Text(line) => line.cites.len(),
+                    _ => 0,
+                });
+            (kept, draft.claims.len())
+        };
+        assert_eq!(
+            summary("Backend engineer with 8+ years, moving 12 services from Python to Rust."),
+            (Some(4), 0),
+            "kept, citing the three jobs' dates too"
+        );
+        assert_eq!(
+            summary("Backend engineer with seven years, moving 12 services from Python to Rust."),
+            (Some(4), 0)
+        );
+        assert_eq!(
+            summary("Backend engineer with 9 years, moving 12 services from Python to Rust."),
+            (None, 1),
+            "more than the dates cover"
+        );
+        assert_eq!(
+            summary("Backend engineer with 8 years, moving 30 services from Python to Rust."),
+            (None, 1),
+            "the rest of it is still checked"
         );
     }
 
