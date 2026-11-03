@@ -1,5 +1,5 @@
 -- kron.sqlite migration 3: a résumé's or cover letter's tree by its parent
--- keys, so reading one doesn't scan every generation's. See docs/storage.md.
+-- keys, so reading one doesn't scan every generation's. See ARCHITECTURE.md.
 
 CREATE INDEX sections_by_generation ON sections(generation_id);
 CREATE INDEX blocks_by_section ON blocks(section_id);

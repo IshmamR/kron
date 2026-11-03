@@ -1,6 +1,6 @@
 //! Generates `src/database/schema.rs`'s tables and columns from the
 //! migrations, so a command naming a column that doesn't exist, or giving it
-//! a value of the wrong type, fails to compile. See docs/storage.md.
+//! a value of the wrong type, fails to compile. See ARCHITECTURE.md.
 
 use std::error::Error;
 use std::fmt::Write as _;

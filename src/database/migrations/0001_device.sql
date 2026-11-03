@@ -1,4 +1,4 @@
--- device.sqlite migration 1: the first schema. See docs/storage.md.
+-- device.sqlite migration 1: the first schema. See ARCHITECTURE.md.
 
 -- One row: its key can only be 1, so a second insert fails. Written by the
 -- app on first open, since SQL can't make a UUIDv7.

@@ -1,6 +1,5 @@
-// What views run to change facts, notes and applications: each is a command
-// for `Database::write`. The library is reloaded from the database after
-// each one, until views query it themselves (storage.md, step 4).
+// What views run to change facts, notes, jobs and résumés: each is a command
+// for `Database::write`, run in one transaction.
 
 use std::ops::Range;
 

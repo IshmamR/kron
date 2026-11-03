@@ -1,5 +1,5 @@
 -- kron.sqlite migration 2: indexes the facts page needs to stay fast on a
--- heavy user's data. See docs/storage.md.
+-- heavy user's data. See ARCHITECTURE.md.
 
 -- Following merges: from a fact to the facts merged into it. Partial, since
 -- few facts are ever merged.

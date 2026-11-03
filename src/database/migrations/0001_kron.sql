@@ -1,4 +1,4 @@
--- kron.sqlite migration 1: the first schema. See docs/storage.md.
+-- kron.sqlite migration 1: the first schema. See ARCHITECTURE.md.
 
 -- Sources and facts --------------------------------------------------------
 CREATE TABLE files (
@@ -416,8 +416,9 @@ INSERT INTO settings (singleton) VALUES (1);
 -- unless it has an unsent change to that field, and then the newer clock wins.
 -- Written only while sync is on: turning it on uploads the records themselves.
 -- Here, not in device.sqlite, so a change and its entry commit together: WAL
--- makes no promise across two files. Measured against a version per field kept
--- on every device (48 MB, 9 ms more per generated résumé): see storage.md.
+-- makes no promise across two files. Measured on a heavy user's data, a version
+-- per field kept on every device took 48 MB and 9 ms more per generated résumé;
+-- this takes nothing once synced and under 1 ms per résumé.
 CREATE TABLE outbox (
     table_name  TEXT NOT NULL,
     row_key     BLOB NOT NULL,      -- the primary key's values joined: an id, two ids, an id and a path, 1 for `settings`
