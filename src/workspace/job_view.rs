@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
@@ -23,7 +24,7 @@ use gpui_kit::{
 };
 use rusqlite::{Connection, OptionalExtension};
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
-use super::inspector::{Inspection, Inspector};
+use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
 use super::parts::notify;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
@@ -59,7 +60,15 @@ const OUTDATED_MARKER: u32 = 0xbf8700;
 
 actions!(
     job_view,
-    [SelectNextLine, SelectPreviousLine, Back, ShowResumeTab, ShowApplicationTab]
+    [
+        SelectNextLine,
+        SelectPreviousLine,
+        Back,
+        ShowResumeTab,
+        ShowApplicationTab,
+        EditLine,
+        CancelLineEdit
+    ]
 );
 
 pub fn init(cx: &mut App) {
@@ -69,6 +78,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-1", ShowResumeTab, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT)),
+        KeyBinding::new("enter", EditLine, Some(KEY_CONTEXT)),
+        // Esc in a text box does nothing of its own.
+        KeyBinding::new(
+            "escape",
+            CancelLineEdit,
+            Some(&format!("{LINE_EDITOR_CONTEXT} > Input")),
+        ),
     ]);
     application_view::init(cx);
 }
@@ -109,6 +125,10 @@ pub struct JobView {
     inspection: Option<Rc<Inspection>>,
     application: Entity<ApplicationView>,
     selected: Option<LineId>,
+    /// The selected line's text, to edit in the inspector.
+    line_editor: Entity<TextareaState>,
+    /// The line `line_editor` holds.
+    editing: Option<LineId>,
     hovered: Option<LineId>,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
@@ -137,6 +157,7 @@ impl EventEmitter<JobViewEvent> for JobView {}
 impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read(cx);
+        self.sync_line_editor(window, cx);
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
         let shown = self.shown_id();
         let render = shown.and_then(|resume| {
@@ -172,6 +193,8 @@ impl Render for JobView {
                 cx.listener(|this, _: &SelectPreviousLine, _, cx| this.move_selection(false, cx)),
             )
             .on_action(cx.listener(Self::back))
+            .on_action(cx.listener(Self::edit_line))
+            .on_action(cx.listener(Self::cancel_line_edit))
             .on_action(cx.listener(|this, _: &ShowResumeTab, window, cx| {
                 this.set_tab(Tab::Resume, window, cx)
             }))
@@ -215,8 +238,25 @@ impl JobView {
         let application = cx.new(|cx| {
             ApplicationView::new(database.clone(), window, cx)
         });
+        let line_editor = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(1, 10)
+                .submit_on_enter(true)
+        });
         Self {
             _subscriptions: vec![
+                cx.subscribe_in(
+                    &line_editor,
+                    window,
+                    |this, _, event, window, cx| match event {
+                        InputEvent::PressEnter { .. } => {
+                            this.save_line(cx);
+                            this.focus_handle.focus(window, cx);
+                        }
+                        InputEvent::Blur => this.save_line(cx),
+                        InputEvent::Change | InputEvent::Focus => {}
+                    },
+                ),
                 cx.subscribe(&database, |this, _, changed: &Changed, cx| {
                     if shows(changed) {
                         this.summary = None;
@@ -248,6 +288,8 @@ impl JobView {
             inspection: None,
             application,
             selected: None,
+            line_editor,
+            editing: None,
             hovered: None,
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
@@ -325,6 +367,72 @@ impl JobView {
         } else {
             cx.emit(JobViewEvent::Close);
         }
+    }
+
+    /// Enter on a line of the current résumé: puts the cursor in its text.
+    fn edit_line(&mut self, _: &EditLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab == Tab::Resume && self.showing_sent.is_none() && self.selected.is_some() {
+            self.line_editor
+                .update(cx, |editor, cx| editor.focus(window, cx));
+        }
+    }
+
+    /// Esc while editing a line: puts its text back and leaves the editor.
+    fn cancel_line_edit(
+        &mut self,
+        _: &CancelLineEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(text) = self.editing.and_then(|line| self.line_text(line)) {
+            self.line_editor
+                .update(cx, |editor, cx| editor.set_value(text, window, cx));
+        }
+        self.focus_handle.focus(window, cx);
+    }
+
+    fn line_text(&self, line: LineId) -> Option<String> {
+        self.shown
+            .as_ref()?
+            .lines
+            .iter()
+            .find(|each| each.id == line)
+            .map(|line| line.text.clone())
+    }
+
+    /// Loads the selected line into the editor when the selection changes,
+    /// saving what was typed for the one before, or when its text changed
+    /// elsewhere while the editor wasn't in use.
+    fn sync_line_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((line, text)) = self
+            .selected
+            .zip(self.selected.and_then(|line| self.line_text(line)))
+        else {
+            return;
+        };
+        let editor = self.line_editor.read(cx);
+        let focused = editor.focus_handle(cx).is_focused(window);
+        if self.editing != Some(line) {
+            self.save_line(cx);
+        } else if focused || editor.value() == text {
+            return;
+        }
+        self.editing = Some(line);
+        self.line_editor
+            .update(cx, |editor, cx| editor.set_value(text, window, cx));
+    }
+
+    fn save_line(&mut self, cx: &mut Context<Self>) {
+        let Some(line) = self.editing else {
+            return;
+        };
+        let text = self.line_editor.read(cx).value().trim().to_string();
+        if text.is_empty() || self.line_text(line).is_none_or(|current| current == text) {
+            return;
+        }
+        self.database
+            .read(cx)
+            .queue(move |write| commands::edit_line(write, line, &text));
     }
 
     fn move_selection(&mut self, forward: bool, cx: &mut Context<Self>) {
@@ -869,7 +977,7 @@ impl JobView {
                             self.database.clone(),
                             resume.clone(),
                             inspection.clone(),
-                            showing_current,
+                            showing_current.then(|| self.line_editor.clone()),
                         )
                     })),
             )
@@ -1969,6 +2077,112 @@ mod tests {
 
         view.run(move |write| commands::set_hidden(write, latency, false));
         assert!(view.shown().changes.is_empty(), "showing it again undoes it");
+    }
+
+    /// Ledgerly's line citing the latency fact, selected.
+    fn select_latency_line(view: &mut View) -> LineId {
+        let latency = view.fact("Cut p99 latency");
+        let line = view
+            .shown()
+            .lines
+            .iter()
+            .find(|line| line.cites.contains(&latency))
+            .map(|line| line.id);
+        let Some(line) = line else {
+            panic!("no Ledgerly line cites the latency fact");
+        };
+        view.update(|view, cx| view.select_line(line, cx));
+        line
+    }
+
+    /// Enter on the selected line, then `text` in place of its own.
+    fn type_line(view: &mut View, text: &str) {
+        view.keys("enter");
+        let editor = view.read(|view| view.line_editor.clone());
+        view.cx.update(|window, cx| {
+            let focused = editor.read(cx).focus_handle(cx).is_focused(window);
+            assert!(focused, "Enter puts the cursor in the line");
+            editor.update(cx, |editor, cx| editor.set_value("", window, cx));
+        });
+        view.cx.simulate_input(text);
+        view.settle();
+    }
+
+    fn stored_text(view: &mut View, line: LineId) -> String {
+        view.connection(|connection| {
+            connection.query_row("SELECT text FROM lines WHERE id = ?1", [line.0], |row| {
+                row.get(0)
+            })
+        })
+    }
+
+    #[test]
+    fn an_edited_line_saves_on_enter_and_says_what_its_facts_dont() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        let line = select_latency_line(&mut view);
+
+        type_line(&mut view, "Cut p99 latency from 480 ms to 15 ms.");
+        view.keys("enter");
+        assert_eq!(
+            stored_text(&mut view, line),
+            "Cut p99 latency from 480 ms to 15 ms."
+        );
+        assert!(
+            view.shown()
+                .lines
+                .iter()
+                .any(|each| each.id == line && each.is_edited())
+        );
+        assert_eq!(
+            view.inspection().edit_problem,
+            Some(UnsupportedReason::InventedFigure("15".to_owned()))
+        );
+
+        type_line(&mut view, "Cut p99 latency to 95 ms.");
+        view.keys("enter");
+        assert_eq!(stored_text(&mut view, line), "Cut p99 latency to 95 ms.");
+        assert_eq!(view.inspection().edit_problem, None);
+
+        view.run(move |write| commands::revert_line(write, line));
+        assert!(view.shown().lines.iter().all(|each| !each.is_edited()));
+        let generated = stored_text(&mut view, line);
+        let editor = view.read(|view| view.line_editor.clone());
+        assert_eq!(
+            editor.read_with(view.cx, |editor, _| editor.value().to_string()),
+            generated,
+            "the editor shows the line as reverted"
+        );
+    }
+
+    #[test]
+    fn escape_puts_an_edited_line_back_and_moving_away_saves_it() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        let line = select_latency_line(&mut view);
+        let generated = stored_text(&mut view, line);
+
+        type_line(&mut view, "Something else.");
+        view.keys("escape");
+        assert_eq!(stored_text(&mut view, line), generated);
+        assert_eq!(
+            view.selected(),
+            Some(line),
+            "Esc leaves the editor, not the line"
+        );
+
+        type_line(&mut view, "Cut p99 latency to 95 ms.");
+        let other = view
+            .shown()
+            .lines
+            .iter()
+            .find(|each| each.id != line)
+            .map(|each| each.id);
+        let Some(other) = other else {
+            panic!("Ledgerly's résumé has one line");
+        };
+        view.update(|view, cx| view.select_line(other, cx));
+        assert_eq!(stored_text(&mut view, line), "Cut p99 latency to 95 ms.");
     }
 
     #[test]

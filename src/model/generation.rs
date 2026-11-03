@@ -175,10 +175,7 @@ impl Material {
             name: None,
             contacts: Vec::new(),
             listing: String::new(),
-            now: {
-                let today = Local::now().date_naive();
-                month(today.year(), today.month0())
-            },
+            now: this_month(),
         };
         let mut entry_ids: Vec<Uuid> = Vec::new();
         while let Some(row) = rows.next()? {
@@ -262,17 +259,7 @@ impl Material {
                 }
             }
         }
-        spans.sort_by_key(|span| span.start);
-        let mut months = 0;
-        let mut counted_to = i32::MIN;
-        for span in spans {
-            let start = span.start.max(counted_to);
-            if span.end > start {
-                months += span.end - start;
-                counted_to = span.end;
-            }
-        }
-        (u32::try_from(months / 12).unwrap_or_default(), dates)
+        (years_covered(spans), dates)
     }
 
     /// Whether there's nothing to make a résumé from but a name and contacts.
@@ -382,32 +369,26 @@ impl Draft {
         // lets it, if the verifier passes it. With `summary`, it may also
         // say how many years the person has worked, as the jobs' dates
         // count them, and cites those dates.
-        let mut written = |written: &Written,
-                           allowed: &dyn Fn(usize) -> bool,
-                           summary: bool|
-         -> Option<Line> {
-            let text = redaction.restore(written.text.trim(), sent);
-            if text.is_empty() {
-                return None;
-            }
-            let mut cites: Vec<FactId> = Vec::new();
-            for index in written.facts.iter().filter_map(|id| material.fact(id)) {
-                let id = material.facts[index].id;
-                if allowed(index) && !cites.contains(&id) {
-                    cites.push(id);
+        let mut written =
+            |written: &Written, allowed: &dyn Fn(usize) -> bool, summary: bool| -> Option<Line> {
+                let text = redaction.restore(written.text.trim(), sent);
+                if text.is_empty() {
+                    return None;
                 }
-            }
-            let Some(reason) = verifier::verify(&text, &cites, &given) else {
-                return Some(line(text, cites));
-            };
-            let worked = years_worked(&text);
-            if summary && !worked.is_empty() && worked.iter().all(|(_, claimed)| *claimed <= years)
-            {
-                let mut rest = text.clone();
-                for (range, _) in worked.iter().rev() {
-                    rest.replace_range(range.clone(), "");
+                let mut cites: Vec<FactId> = Vec::new();
+                for index in written.facts.iter().filter_map(|id| material.fact(id)) {
+                    let id = material.facts[index].id;
+                    if allowed(index) && !cites.contains(&id) {
+                        cites.push(id);
+                    }
                 }
-                if verifier::verify(&rest, &cites, &given).is_none() {
+                let Some(reason) = verifier::verify(&text, &cites, &given) else {
+                    return Some(line(text, cites));
+                };
+                if summary
+                    && let Some(rest) = without_years_worked(&text, years)
+                    && verifier::verify(&rest, &cites, &given).is_none()
+                {
                     for date in &dates {
                         let id = material.facts[*date].id;
                         if !cites.contains(&id) {
@@ -416,10 +397,9 @@ impl Draft {
                     }
                     return Some(line(text, cites));
                 }
-            }
-            claims.push((text, reason));
-            None
-        };
+                claims.push((text, reason));
+                None
+            };
 
         let mut sections = vec![Section {
             kind: SectionKind::Header,
@@ -713,6 +693,59 @@ pub fn paper(connection: &Connection) -> Result<Paper, Error> {
     } else {
         Paper::A4
     })
+}
+
+/// Why `text`, a line the user edited, says more than the facts it `cites`,
+/// if it does, as a generated line is checked. Like the summary it may say
+/// how many years the person has worked, as far as the cited `dates` cover.
+pub fn check_edit(
+    text: &str,
+    cites: &[FactId],
+    given: &[GivenFact],
+    dates: &[&str],
+) -> Option<UnsupportedReason> {
+    let reason = verifier::verify(text, cites, given)?;
+    let now = this_month();
+    let years = years_covered(dates.iter().filter_map(|dates| span(dates, now)).collect());
+    without_years_worked(text, years)
+        .filter(|rest| verifier::verify(rest, cites, given).is_none())
+        .map_or(Some(reason), |_| None)
+}
+
+/// The month it is now, as `month` counts it.
+fn this_month() -> i32 {
+    let today = Local::now().date_naive();
+    month(today.year(), today.month0())
+}
+
+/// How many whole years `spans` of months cover, a month two share counted
+/// once.
+fn years_covered(mut spans: Vec<Range<i32>>) -> u32 {
+    spans.sort_by_key(|span| span.start);
+    let mut months = 0;
+    let mut counted_to = i32::MIN;
+    for span in spans {
+        let start = span.start.max(counted_to);
+        if span.end > start {
+            months += span.end - start;
+            counted_to = span.end;
+        }
+    }
+    u32::try_from(months / 12).unwrap_or_default()
+}
+
+/// `text` without where it says how many years the person has worked, if
+/// it says so and never more than `years`.
+fn without_years_worked(text: &str, years: u32) -> Option<String> {
+    let worked = years_worked(text);
+    if worked.is_empty() || worked.iter().any(|(_, claimed)| *claimed > years) {
+        return None;
+    }
+    let mut rest = text.to_owned();
+    for (range, _) in worked.iter().rev() {
+        rest.replace_range(range.clone(), "");
+    }
+    Some(rest)
 }
 
 /// A month as a count from year 0, so months subtract.
@@ -1152,6 +1185,45 @@ mod tests {
         );
         assert_eq!(span("2015", now), None);
         assert_eq!(span("May 2024 – Jan 2024", now), None);
+    }
+
+    #[test]
+    fn an_edit_is_checked_against_its_facts_and_the_years_their_dates_cover() {
+        let (bullet, dates) = (FactId(Uuid::now_v7()), FactId(Uuid::now_v7()));
+        let given = [
+            GivenFact {
+                id: bullet,
+                text: "Led the migration of 12 backend services from Python to Rust.",
+                hidden: false,
+            },
+            GivenFact {
+                id: dates,
+                text: "Jan 2010 – Jan 2020",
+                hidden: false,
+            },
+        ];
+        let check =
+            |text: &str| check_edit(text, &[bullet, dates], &given, &["Jan 2010 – Jan 2020"]);
+        assert_eq!(check("Moved 12 backend services to Rust."), None);
+        assert_eq!(
+            check("Moved 14 backend services to Rust."),
+            Some(UnsupportedReason::InventedFigure("14".to_owned()))
+        );
+        assert_eq!(
+            check("Ten years of moving backend services to Rust, 12 of them."),
+            None
+        );
+        assert!(check("11 years of moving backend services to Rust.").is_some());
+        assert!(
+            check_edit(
+                "10 years of backend services in Rust.",
+                &[bullet],
+                &given,
+                &[]
+            )
+            .is_some(),
+            "without dates there are no years to say"
+        );
     }
 
     #[test]

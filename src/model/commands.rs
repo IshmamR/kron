@@ -7,11 +7,11 @@ use std::ops::Range;
 use rusqlite::OptionalExtension;
 use uuid::Uuid;
 
-use super::{ClaimId, DocumentId, EventId, FactId, JobEvent, JobEventKind, JobId};
+use super::{ClaimId, DocumentId, EventId, FactId, JobEvent, JobEventKind, JobId, LineId};
 use crate::database::schema::{
     CustomSections, DocumentTexts, Documents, Entries, Events, FactSources, Facts, JobDescriptions,
     Jobs, custom_sections, document_texts, documents, entries, events, fact_sources, facts,
-    generations, job_descriptions, jobs, unsupported_claims,
+    generations, job_descriptions, jobs, lines, unsupported_claims,
 };
 use crate::database::{Error, Write};
 use crate::typeset;
@@ -282,6 +282,31 @@ pub fn set_paper(write: &mut Write, job: JobId, paper: typeset::Paper) -> Result
         return Ok(());
     };
     write.set(generations::PAPER, generation, &Some(paper.stored()))
+}
+
+/// Rewords a résumé line, as the user would say it. It stays on the page
+/// even if it says more than its facts: the inspector says what. Empty text
+/// changes nothing.
+pub fn edit_line(write: &mut Write, line: LineId, text: &str) -> Result<(), Error> {
+    let text = text.trim();
+    let current: String = write
+        .prepare("SELECT text FROM lines WHERE id = ?1")?
+        .query_row([line.0], |row| row.get(0))?;
+    if text.is_empty() || text == current {
+        return Ok(());
+    }
+    write.set(lines::TEXT, line.0, &text)
+}
+
+/// Puts the line back as generated.
+pub fn revert_line(write: &mut Write, line: LineId) -> Result<(), Error> {
+    let (text, generated): (String, String) = write
+        .prepare("SELECT text, generated FROM lines WHERE id = ?1")?
+        .query_row([line.0], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    if text == generated {
+        return Ok(());
+    }
+    write.set(lines::TEXT, line.0, &generated)
 }
 
 /// A job as the user adds it.
@@ -883,6 +908,36 @@ mod tests {
             set_paper(write, job, typeset::Paper::Letter)
         })?;
         assert_eq!(paper(&writer)?.as_deref(), Some("letter"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_line_edit_keeps_what_was_generated_and_reverts_to_it() -> Result<(), Error> {
+        let mut writer = with_sample()?;
+        let (line, generated): (Uuid, String) = writer.kron().query_row(
+            "SELECT id, generated FROM lines WHERE generated LIKE 'Led the migration%'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let line = LineId(line);
+        let stored = |writer: &Writer| -> rusqlite::Result<(String, String)> {
+            writer.kron().query_row(
+                "SELECT text, generated FROM lines WHERE id = ?1",
+                [line.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        };
+        run(&mut writer, |write| {
+            edit_line(write, line, "  Moved 12 services to Rust.  ")
+        })?;
+        assert_eq!(
+            stored(&writer)?,
+            ("Moved 12 services to Rust.".to_owned(), generated.clone())
+        );
+        run(&mut writer, |write| edit_line(write, line, " "))?;
+        assert_eq!(stored(&writer)?.0, "Moved 12 services to Rust.");
+        run(&mut writer, |write| revert_line(write, line))?;
+        assert_eq!(stored(&writer)?, (generated.clone(), generated));
         Ok(())
     }
 }

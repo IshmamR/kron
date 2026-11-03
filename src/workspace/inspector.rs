@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
@@ -17,14 +18,17 @@ use super::parts::{
     source_excerpt, sources,
 };
 use crate::database::{Database, Error};
-use crate::model::{commands, verifier};
+use crate::model::verifier::GivenFact;
 use crate::model::{
     ClaimId, EntryId, FactChange, FactId, FactKind, LineId, ResumeId, Review, ReviewReason,
     UnsupportedReason,
 };
+use crate::model::{commands, generation, verifier};
 
 /// Longer merge chains than this are a loop, which merging never makes.
 const MERGE_DEPTH: usize = 64;
+/// Around the selected line's editor, for its keys.
+pub(super) const LINE_EDITOR_CONTEXT: &str = "LineEditor";
 
 /// The job view's right-hand panel: where the selected line came from, and
 /// what the generator couldn't back with a fact.
@@ -33,8 +37,9 @@ pub struct Inspector {
     database: Entity<Database>,
     resume: Rc<ShownResume>,
     inspection: Rc<Inspection>,
-    /// False for an older version, whose claims can't be acted on.
-    current: bool,
+    /// Holds the selected line's text to edit. `None` for an older
+    /// version, whose lines and claims can't be acted on.
+    line_editor: Option<Entity<TextareaState>>,
 }
 
 impl RenderOnce for Inspector {
@@ -105,27 +110,43 @@ impl Inspector {
         database: Entity<Database>,
         resume: Rc<ShownResume>,
         inspection: Rc<Inspection>,
-        current: bool,
+        line_editor: Option<Entity<TextareaState>>,
     ) -> Self {
         Self {
             database,
             resume,
             inspection,
-            current,
+            line_editor,
         }
     }
 
     fn sources(&self, line: &ShownLine, cx: &App) -> impl IntoElement {
         let theme = cx.theme();
+        let edited = line.is_edited().then(|| {
+            let (text, color): (SharedString, _) = match &self.inspection.edit_problem {
+                Some(reason) => (
+                    format!(
+                        "{}. Your edit stays as you wrote it: check it's true of you, or revert.",
+                        unsupported_reason(reason)
+                    )
+                    .into(),
+                    theme.danger,
+                ),
+                None => (
+                    "You edited this line after it was generated. Check it still says only \
+                     what its facts say."
+                        .into(),
+                    theme.warning,
+                ),
+            };
+            notice(text, color)
+        });
         v_flex()
             .gap_3()
-            .when(line.is_edited(), |this| {
-                this.child(notice(
-                    "You edited this line after it was generated. Check it still says only \
-                     what its facts say.",
-                    theme.warning,
-                ))
+            .when_some(self.line_editor.as_ref(), |this, editor| {
+                this.child(self.line_editor(line, editor, cx))
             })
+            .children(edited)
             .children(self.new_words(line, cx))
             .children(self.inspection.facts.iter().map(|cited| match &cited.fact {
                 Some(fact) => {
@@ -134,6 +155,50 @@ impl Inspector {
                 None => notice("This line cites a fact that no longer exists.", theme.danger)
                     .into_any_element(),
             }))
+    }
+
+    /// The line's text to edit, saved on Enter or on leaving it, and once
+    /// edited, what was generated with a way back to it.
+    fn line_editor(
+        &self,
+        line: &ShownLine,
+        editor: &Entity<TextareaState>,
+        cx: &App,
+    ) -> impl IntoElement {
+        let database = self.database.clone();
+        let id = line.id;
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .key_context(LINE_EDITOR_CONTEXT)
+                    .child(Textarea::new(editor)),
+            )
+            .when(line.is_edited(), |this| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_start()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(caption(format!("Generated as “{}”", line.generated), cx)),
+                        )
+                        .child(
+                            Button::new("revert-line")
+                                .label("Revert")
+                                .icon(IconName::Undo2)
+                                .ghost()
+                                .xsmall()
+                                .on_click(move |_, _, cx| {
+                                    database
+                                        .read(cx)
+                                        .queue(move |write| commands::revert_line(write, id));
+                                }),
+                        ),
+                )
+            })
     }
 
     /// The line with the words its facts don't have marked, if it has any:
@@ -243,7 +308,9 @@ impl Inspector {
                     .child(claim.text.clone()),
             )
             .child(div().text_xs().text_color(reason_color).child(reason))
-            .when(self.current, |this| this.child(h_flex().child(action)))
+            .when(self.line_editor.is_some(), |this| {
+                this.child(h_flex().child(action))
+            })
             .into_any_element()
     }
 }
@@ -255,6 +322,9 @@ pub struct Inspection {
     pub(super) line: Option<LineId>,
     /// The selected line's facts, in the order it cites them.
     pub(super) facts: Vec<CitedFact>,
+    /// What the selected line says that its facts don't, once the user
+    /// edited it.
+    pub(super) edit_problem: Option<UnsupportedReason>,
     pub(super) claims: Vec<Claim>,
 }
 
@@ -291,9 +361,8 @@ impl Inspection {
         resume: &ShownResume,
         line: Option<LineId>,
     ) -> Result<Self, Error> {
-        let cites = line
-            .and_then(|line| resume.lines.iter().find(|each| each.id == line))
-            .map_or(&[][..], |line| &line.cites);
+        let selected = line.and_then(|line| resume.lines.iter().find(|each| each.id == line));
+        let cites = selected.map_or(&[][..], |line| &line.cites);
         let mut facts = Vec::new();
         for &fact in cites {
             facts.push(CitedFact {
@@ -301,10 +370,30 @@ impl Inspection {
                 fact: inspected_fact(connection, fact)?,
             });
         }
+        let edit_problem = selected.filter(|line| line.is_edited()).and_then(|line| {
+            let cited = || {
+                facts
+                    .iter()
+                    .filter_map(|cited| cited.fact.as_ref().map(|fact| (cited.id, fact)))
+            };
+            let given: Vec<GivenFact> = cited()
+                .map(|(id, fact)| GivenFact {
+                    id,
+                    text: &fact.text,
+                    hidden: fact.hidden,
+                })
+                .collect();
+            let dates: Vec<&str> = cited()
+                .filter(|(_, fact)| fact.kind == FactKind::Date)
+                .map(|(_, fact)| fact.text.as_str())
+                .collect();
+            generation::check_edit(&line.text, cites, &given, &dates)
+        });
         Ok(Self {
             resume: resume.id,
             line,
             facts,
+            edit_problem,
             claims: claims(connection, resume.id)?,
         })
     }
@@ -315,6 +404,7 @@ impl Inspection {
             resume,
             line,
             facts: Vec::new(),
+            edit_problem: None,
             claims: Vec::new(),
         }
     }
