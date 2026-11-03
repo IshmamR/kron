@@ -308,6 +308,8 @@ struct Run {
     size: f64,
     /// The average width of its characters.
     character: f64,
+    /// It ends with a comma, so the line under it goes on with it.
+    runs_on: bool,
 }
 
 /// Adds page `number`'s `glyphs` to `reading` as lines, in reading order.
@@ -433,6 +435,7 @@ fn runs(glyphs: &[Glyph]) -> Vec<Run> {
                 rect: glyph.rect(),
                 size: glyph.size,
                 character: 0.,
+                runs_on: false,
             }),
         }
     }
@@ -443,6 +446,9 @@ fn runs(glyphs: &[Glyph]) -> Vec<Run> {
             .map(Glyph::width)
             .sum::<f64>()
             / count;
+        run.runs_on = glyphs[run.glyphs.clone()]
+            .last()
+            .is_some_and(|glyph| glyph.text.trim_end().ends_with(','));
     }
     runs
 }
@@ -474,7 +480,8 @@ fn read_order(runs: &[Run], mut region: Vec<usize>, rows: &mut Vec<Vec<usize>>) 
 /// Splits `region` at its widest gap down the page that separates columns,
 /// leaving the left in `region` and returning the right. A gap is at least
 /// as wide as the one that separates runs, and isn't between the cells of a
-/// table.
+/// table, unless the two sides' lines are out of step as a table's rows
+/// never are.
 fn split_down(runs: &[Run], region: &mut Vec<usize>) -> Option<Vec<usize>> {
     region.sort_by(|first, second| runs[*first].rect.x0.total_cmp(&runs[*second].rect.x0));
     let character =
@@ -492,6 +499,7 @@ fn split_down(runs: &[Run], region: &mut Vec<usize>) -> Option<Vec<usize>> {
     let (index, _) = gaps.into_iter().find(|(index, _)| {
         let (left, right) = region.split_at(*index);
         beside(runs, left, right).max(beside(runs, right, left)) <= TABLE_ROWS
+            || out_of_step(runs, left, right)
     })?;
     Some(region.split_off(index))
 }
@@ -502,14 +510,43 @@ fn beside(runs: &[Run], side: &[usize], other: &[usize]) -> f64 {
     let beside = side
         .iter()
         .filter(|first| {
-            other.iter().any(|second| {
-                let (first, second) = (&runs[**first], &runs[*second]);
-                let overlap = first.rect.y1.min(second.rect.y1) - first.rect.y0.max(second.rect.y0);
-                overlap > LINE_OVERLAP * first.size.min(second.size)
-            })
+            other
+                .iter()
+                .any(|second| same_line(&runs[**first], &runs[*second]))
         })
         .count();
     beside as f64 / side.len() as f64
+}
+
+fn same_line(first: &Run, second: &Run) -> bool {
+    let overlap = first.rect.y1.min(second.rect.y1) - first.rect.y0.max(second.rect.y0);
+    overlap > LINE_OVERLAP * first.size.min(second.size)
+}
+
+/// Whether a line going on from the one above it on one side is beside a
+/// line starting afresh on the other, as when two columns of skill groups
+/// wrap at different lines. A table's cells wrap within their row.
+fn out_of_step(runs: &[Run], left: &[usize], right: &[usize]) -> bool {
+    let goes_on = |side: &[usize], run: &Run| {
+        side.iter().any(|above| {
+            let above = &runs[*above];
+            above.runs_on
+                && run.rect.y0 > above.rect.y0
+                && run.rect.y0 - above.rect.y1 < LINE_MARGIN * above.size.max(run.size)
+                && run.rect.x0 < above.rect.x1
+                && above.rect.x0 < run.rect.x1
+        })
+    };
+    [(left, right), (right, left)].iter().any(|(side, other)| {
+        side.iter().any(|run| {
+            let run = &runs[*run];
+            goes_on(side, run)
+                && other.iter().any(|beside| {
+                    let beside = &runs[*beside];
+                    same_line(run, beside) && !goes_on(other, beside)
+                })
+        })
+    })
 }
 
 /// Splits `region` at its widest gap across the page, between runs on
@@ -737,6 +774,36 @@ mod tests {
         assert!(
             lines(&latex)
                 .contains(&"Languages Rust, Go, Python, SQL Tools Git, Grafana, Terraform")
+        );
+    }
+
+    #[test]
+    fn a_grid_whose_groups_wrap_is_read_column_by_column() {
+        // Two columns of skill groups, a group on the left wrapping onto the
+        // line beside the start of one on the right.
+        let document = pdf(&[(
+            "BT /F1 10 Tf 72 700 Td (Languages Go, Python) Tj ET\n\
+             BT /F1 10 Tf 72 688 Td (Frontend React, Next.js, Tailwind CSS,) Tj ET\n\
+             BT /F1 10 Tf 72 676 Td (TanStack Router, TanStack Query) Tj ET\n\
+             BT /F1 10 Tf 72 664 Td (Backend Node.js, Hono) Tj ET\n\
+             BT /F1 10 Tf 340 700 Td (Databases MongoDB, Redis) Tj ET\n\
+             BT /F1 10 Tf 340 688 Td (Design Figma) Tj ET\n\
+             BT /F1 10 Tf 340 676 Td (Testing Vitest, Jest) Tj ET\n\
+             BT /F1 10 Tf 340 664 Td (DevOps Docker, AWS) Tj ET",
+            "",
+        )]);
+        assert_eq!(
+            lines(&reading(&document)),
+            [
+                "Languages Go, Python",
+                "Frontend React, Next.js, Tailwind CSS,",
+                "TanStack Router, TanStack Query",
+                "Backend Node.js, Hono",
+                "Databases MongoDB, Redis",
+                "Design Figma",
+                "Testing Vitest, Jest",
+                "DevOps Docker, AWS",
+            ]
         );
     }
 
