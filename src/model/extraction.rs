@@ -310,13 +310,34 @@ impl Extraction {
                 });
             }
         }
-        // Contacts are only ever placeholders: their text never left.
-        for placeholder in &answer.contacts {
-            let replacement = redaction.replacements.iter().find(|replacement| {
-                replacement.placeholder == placeholder.trim()
-                    && replacement.identifier != Identifier::Name
-            });
-            if let Some(replacement) = replacement {
+        // Contacts are only ever placeholders: their text never left. The
+        // model may name some of a contact line's and not the rest, so what
+        // shares a line with one it named is a contact too.
+        let contact_lines: Vec<Range<usize>> = answer
+            .contacts
+            .iter()
+            .filter_map(|placeholder| {
+                redaction.replacements.iter().find(|replacement| {
+                    replacement.placeholder == placeholder.trim()
+                        && replacement.identifier != Identifier::Name
+                })
+            })
+            .map(|replacement| {
+                let start = original[..replacement.original.start]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+                let end = original[replacement.original.start..]
+                    .find('\n')
+                    .map_or(original.len(), |index| replacement.original.start + index);
+                start..end
+            })
+            .collect();
+        for replacement in &redaction.replacements {
+            if replacement.identifier != Identifier::Name
+                && contact_lines
+                    .iter()
+                    .any(|line| line.contains(&replacement.original.start))
+            {
                 let written = &original[replacement.original.clone()];
                 // A link wrapped onto the next line has no space in it.
                 let text = match replacement.identifier {
@@ -1122,6 +1143,24 @@ mod tests {
             ),
             (None, Some(ReviewReason::Unsure)),
             "words the text doesn't have aren't a fix"
+        );
+    }
+
+    #[test]
+    fn what_shares_a_line_with_a_contact_is_a_contact() {
+        let extraction = answer(r#"{"contacts": ["[EMAIL_1]"], "entries": []}"#);
+        let contacts: Vec<&str> = extraction
+            .profile
+            .iter()
+            .map(|fact| fact.text.as_str())
+            .collect();
+        assert_eq!(
+            contacts,
+            [
+                "alex@example.com",
+                "github.com/alexr",
+                "linkedin.com/in/alexrahman-dev"
+            ]
         );
     }
 

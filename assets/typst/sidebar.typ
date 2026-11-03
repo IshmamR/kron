@@ -53,13 +53,22 @@
   }
 })
 
+// `end` at the end of `start`'s last line, sharing its baseline. A long
+// `start` wraps in its column and `end` never does.
+#let row(start, end) = grid(
+  columns: (1fr, auto),
+  column-gutter: 1em,
+  align: (left, right + bottom),
+  start, end,
+)
+
 // The heading rows are sticky, so they stay on the page with the bullets.
-// Dates go on the title's line, pushed right, to share its baseline.
+// Dates go on the title's line, pushed right.
 #let entry(block) = {
-  std.block(above: 1em, below: 0.45em, sticky: true, {
-    text(size: 10.5pt, weight: "semibold", fill: accent, block.title)
-    if block.dates != none [#h(1fr) #text(size: 8.5pt, fill: muted, block.dates)]
-  })
+  std.block(above: 1em, below: 0.45em, sticky: true, row(
+    text(size: 10.5pt, weight: "semibold", fill: accent, block.title),
+    if block.dates != none { text(size: 8.5pt, fill: muted, block.dates) },
+  ))
   let details = (block.organization, block.location, block.stack).filter(detail => detail != none)
   if details.len() > 0 {
     std.block(above: 0.3em, below: 0.55em, sticky: true, text(fill: muted, details.join[ #sym.dot.c ]))

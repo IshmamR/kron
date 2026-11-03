@@ -761,7 +761,7 @@ impl World for SingleFileWorld<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ResumeId, sample};
+    use crate::model::{EntryBlock, ResumeId, sample};
 
     /// A résumé to lay out: its template and what it says.
     #[derive(Clone)]
@@ -1052,6 +1052,65 @@ mod tests {
         let page_count = typeset.layout.pages.len();
         assert!(page_count >= 2);
         assert_eq!(pages, (0..page_count).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn dates_stay_on_one_row_beside_a_long_title() {
+        let line = |text: &str| Line {
+            id: LineId::new(),
+            generated: text.to_owned(),
+            text: text.to_owned(),
+            cites: Vec::new(),
+        };
+        let entry = |title: &str, organization: &str| EntryBlock {
+            title: line(title),
+            organization: Some(line(organization)),
+            dates: Some(line("January 2020 – August 2024")),
+            location: None,
+            stack: None,
+            bullets: Vec::new(),
+        };
+        let short = entry("BSc", "East West University");
+        // Whether dates set after the title wrap depends on the room its last
+        // line leaves, so the title grows a word at a time.
+        let words: Vec<&str> =
+            "Bachelor of Science in Computer Science and Software Engineering with a minor \
+             in Applied Mathematics and Statistics"
+                .split(' ')
+                .collect();
+        let long: Vec<EntryBlock> = (1..=words.len())
+            .map(|count| entry(&words[..count].join(" "), "East West University"))
+            .collect();
+        let typesetter = Typesetter::new();
+        for template in &TEMPLATES {
+            let resume = Resume {
+                template: template.key,
+                sections: vec![Section {
+                    kind: SectionKind::Education,
+                    title: "Education".to_owned(),
+                    blocks: std::iter::once(&short)
+                        .chain(&long)
+                        .map(|entry| Block::Entry(Box::new(entry.clone())))
+                        .collect(),
+                }],
+            };
+            let typeset = typeset(&typesetter, &resume);
+            let height = |entry: &EntryBlock| {
+                let dates = entry.dates.as_ref().map(|dates| dates.id);
+                dates
+                    .and_then(|id| typeset.layout.boxes_of(id).next())
+                    .map(|line_box| line_box.bottom - line_box.top)
+                    .unwrap_or_default()
+            };
+            for entry in &long {
+                assert!(
+                    height(entry) < 1.5 * height(&short),
+                    "in {:?}, the dates wrap beside {:?}",
+                    template.key,
+                    entry.title.text
+                );
+            }
+        }
     }
 
     #[test]

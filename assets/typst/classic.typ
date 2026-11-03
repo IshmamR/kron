@@ -37,8 +37,14 @@
   text(size: 9.5pt, contacts.join[ #h(0.15em)|#h(0.15em) ])
 })
 
-// `right` pushed to the end of the line, so the two share a baseline.
-#let row(left, right) = [#left #h(1fr) #right]
+// `end` at the end of `start`'s last line, sharing its baseline. A long
+// `start` wraps in its column and `end` never does.
+#let row(start, end) = grid(
+  columns: (1fr, auto),
+  column-gutter: 1em,
+  align: (left, right + bottom),
+  start, end,
+)
 
 // A job leads with its title and dates; a school, like Jake's, with its name
 // and place, the degree and dates below.
@@ -54,7 +60,7 @@
   std.block(above: 0.62em, below: 0.4em, sticky: true, {
     row(if block.stack != none and kind != "education" { first } else { strong(first) }, first-right)
     if second != none or second-right != none {
-      linebreak()
+      v(0.42em, weak: true)
       row(maybe(emph, second), text(size: 9.5pt, maybe(emph, second-right)))
     }
   })
