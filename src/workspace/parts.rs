@@ -17,20 +17,25 @@ use crate::model::{EntryId, FactId, FactKind};
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
-        .gap_1()
+        .gap_2()
         .mb_2()
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
-        .text_color(cx.theme().muted_foreground)
-        .child(title.to_uppercase())
-        .when_some(count, |this, count| this.child(format!("({count})")))
+        .child(title.to_owned())
+        .when_some(count, |this, count| {
+            this.child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(count.to_string()),
+            )
+        })
 }
 
 pub fn card(cx: &App) -> Div {
     v_flex()
         .p_2()
         .rounded(cx.theme().radius)
-        .bg(cx.theme().secondary)
+        .bg(cx.theme().muted)
 }
 
 pub fn caption(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {

@@ -4,16 +4,16 @@ use std::rc::Rc;
 
 use chrono::{DateTime, Utc};
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::tag::Tag;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ObjectFit, Pixels,
-    Subscription, Window, actions, canvas, div, img, prelude::*, px, white,
+    Action, Anchor, AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ObjectFit,
+    Pixels, ScrollHandle, Subscription, Window, actions, canvas, div, img, prelude::*, px,
 };
 use rusqlite::Connection;
 
@@ -24,17 +24,14 @@ use crate::database::{Changed, Database, Error};
 use crate::model::{Application, JobId, Nudge, ResumeId, Stage};
 
 const KEY_CONTEXT: &str = "ResumeGrid";
-const CARD_WIDTH: Pixels = px(200.);
-/// The card minus the selection padding around the thumbnail.
-const THUMBNAIL_WIDTH: Pixels = px(192.);
+const CARD_WIDTH: Pixels = px(248.);
+const THUMBNAIL_WIDTH: Pixels = px(218.);
 /// US Letter proportions (8.5 × 11), so the page fills the box.
-const THUMBNAIL_HEIGHT: Pixels = px(248.);
-/// Matches `gap_6` and `px_6` below; used to work out how many cards fit in a
-/// row for ↑ and ↓.
-const CARD_GAP: Pixels = px(24.);
-const GRID_PADDING: Pixels = px(24.);
-/// White text needs the accent this dark or darker to read (4.5:1).
-const TITLE_ACCENT_MAX_LIGHTNESS: f32 = 0.45;
+const THUMBNAIL_HEIGHT: Pixels = px(282.);
+const CARD_GAP: Pixels = px(36.);
+const GRID_PADDING: Pixels = px(32.);
+const COMPACT_GRID_PADDING: Pixels = px(12.);
+const COMPACT_WINDOW_WIDTH: Pixels = px(640.);
 /// Résumé pages are paper, light in both themes.
 const PAPER: Hsla = Hsla {
     h: 0.,
@@ -53,6 +50,12 @@ actions!(
 #[action(namespace = resume_grid, no_json)]
 pub struct ShowFilter {
     pub index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = resume_grid, no_json)]
+struct SortJobs {
+    sort: JobSort,
 }
 
 pub fn init(cx: &mut App) {
@@ -75,21 +78,25 @@ pub fn init(cx: &mut App) {
 pub enum ResumeGridEvent {
     Open(JobId),
     NewJob,
+    FiltersChanged,
 }
 
 /// Home screen: one card per job, showing its résumé's first page.
 pub struct ResumeGrid {
     database: Entity<Database>,
     previews: Entity<Previews>,
-    /// Every job's application, and each one's current résumé: read when
-    /// first shown, and again after the database changes.
-    applications: Option<Vec<Application>>,
+    /// Read on startup and whenever jobs or their application history change.
+    applications: Vec<Application>,
     current_resumes: Option<HashMap<JobId, CurrentResume>>,
     selected: Option<JobId>,
     filter: JobFilter,
+    sort: JobSort,
+    search: Entity<InputState>,
+    query: String,
     focus_handle: FocusHandle,
     /// Width available to the cards at the last layout.
-    grid_width: Rc<Cell<Pixels>>,
+    card_area_width: Rc<Cell<Pixels>>,
+    scroll_handle: ScrollHandle,
     /// The thumbnails shown, held so `Previews` never evicts one on screen.
     thumbnails: Vec<PageRender>,
     _subscriptions: Vec<Subscription>,
@@ -108,20 +115,15 @@ impl Render for ResumeGrid {
             .iter()
             .map(|job| {
                 let resume = current_resumes.get(job)?.id;
-                self.previews
-                    .update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
+                self.previews.update(cx, |previews, cx| {
+                    previews.get(resume, pixels_per_point, cx)
+                })
             })
             .collect();
         self.thumbnails = renders.iter().flatten().cloned().collect();
 
-        let applications = self.applications.as_deref().unwrap_or_default();
+        let applications = &self.applications;
         let job_count = applications.len();
-        let counts = JobFilter::ALL.map(|filter| {
-            applications
-                .iter()
-                .filter(|job| filter.includes(job, now))
-                .count()
-        });
         let empty = jobs.is_empty();
         let cards: Vec<AnyElement> = jobs
             .iter()
@@ -132,7 +134,12 @@ impl Render for ResumeGrid {
                     .into_any_element()
             })
             .collect();
-        let grid_width = self.grid_width.clone();
+        let card_area_width = self.card_area_width.clone();
+        let padding = if window.viewport_size().width < COMPACT_WINDOW_WIDTH {
+            COMPACT_GRID_PADDING
+        } else {
+            GRID_PADDING
+        };
 
         v_flex()
             .track_focus(&self.focus_handle)
@@ -147,11 +154,21 @@ impl Render for ResumeGrid {
                 let columns = this.columns() as isize;
                 this.move_selection(columns, cx)
             }))
-            .on_action(cx.listener(|this, action: &ShowFilter, _, cx| {
-                this.set_filter(action.index, cx)
+            .on_action(
+                cx.listener(|this, action: &ShowFilter, _, cx| this.set_filter(action.index, cx)),
+            )
+            .on_action(cx.listener(|this, action: &SortJobs, _, cx| {
+                this.sort = action.sort;
+                cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
-                if let Some(job) = this.selected {
+            .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
+                if this.search.focus_handle(cx).is_focused(window) {
+                    return;
+                }
+                if let Some(job) = this
+                    .selected
+                    .filter(|job| this.visible_jobs(Utc::now()).contains(job))
+                {
                     cx.emit(ResumeGridEvent::Open(job));
                 }
             }))
@@ -159,87 +176,139 @@ impl Render for ResumeGrid {
             .child(
                 h_flex()
                     .flex_none()
-                    .items_baseline()
-                    .gap_2()
-                    .px(GRID_PADDING)
-                    .pt_5()
-                    .pb_3()
+                    .flex_wrap()
+                    .justify_between()
+                    .gap_3()
+                    .px(padding)
+                    .py_5()
                     .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Résumés"),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} · most recent activity first",
-                                job_count_label(jobs.len(), job_count, self.filter)
-                            )),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("new-job")
-                            .label("New job")
-                            .icon(IconName::Plus)
-                            .small()
-                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob))),
-                    )
-                    .child(
-                        TabBar::new("job-filter")
-                            .segmented()
-                            .small()
-                            .selected_index(
-                                JobFilter::ALL
-                                    .iter()
-                                    .position(|&filter| filter == self.filter)
-                                    .unwrap_or_default(),
+                        h_flex()
+                            .items_baseline()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("Résumés"),
                             )
-                            .children(JobFilter::ALL.iter().zip(counts).map(|(filter, count)| {
-                                Tab::new().label(format!("{} {count}", filter.label()))
-                            }))
-                            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                                this.set_filter(*index, cx)
-                            })),
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if jobs.len() == job_count {
+                                        job_count.to_string()
+                                    } else {
+                                        format!("{} of {job_count}", jobs.len())
+                                    }),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Input::new(&self.search)
+                                    .w(px(176.))
+                                    .small()
+                                    .prefix(Icon::new(IconName::Search).small())
+                                    .cleanable(true),
+                            )
+                            .child(sort_menu(self.sort))
+                            .child(
+                                Button::new("new-job")
+                                    .label("New job")
+                                    .icon(IconName::Plus)
+                                    .small()
+                                    .ghost()
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob)),
+                                    ),
+                            ),
                     ),
             )
-            .when(empty, |this| {
-                this.child(
-                    centered(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.filter.empty_text()),
+            .when_else(
+                empty,
+                |this| {
+                    this.child(
+                        centered(
+                            v_flex()
+                                .items_center()
+                                .gap_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .when_else(job_count == 0, |this| {
+                                    this.child(Icon::new(IconName::FileText))
+                                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child("Add your first job"))
+                                        .child("Each job has its own résumé and application history.")
+                                        .child(Button::new("first-job")
+                                            .label("New job").icon(IconName::Plus).primary()
+                                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob))))
+                                }, |this| {
+                                    this.child(if self.query.is_empty() {
+                                        self.filter.empty_text()
+                                    } else {
+                                        "No jobs match your search."
+                                    })
+                                }),
+                        )
+                        .flex_1(),
                     )
-                    .flex_1(),
-                )
-            })
-            .child(
-                div()
-                    .id("resume-grid-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(
+                },
+                |this| {
+                    this.child(
                         div()
                             .relative()
-                            .flex()
-                            .flex_wrap()
-                            .gap_6()
-                            .px(GRID_PADDING)
-                            .pb(GRID_PADDING)
+                            .flex_1()
+                            .min_h_0()
                             .child(
-                                canvas(
-                                    move |bounds, _, _| grid_width.set(bounds.size.width),
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .size_full(),
+                                div()
+                                    .id("resume-grid-scroll")
+                                    .relative()
+                                    .size_full()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_start()
+                                    .content_start()
+                                    .gap(CARD_GAP)
+                                    .px(padding)
+                                    .pt_5()
+                                    .pb_8()
+                                    .track_scroll(&self.scroll_handle)
+                                    .overflow_y_scroll()
+                                    .children(cards)
+                                    .child(
+                                        canvas(
+                                            move |bounds, _, _| {
+                                                card_area_width
+                                                    .set(bounds.size.width - padding * 2.);
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .size_full(),
+                                    ),
                             )
-                            .children(cards),
-                    ),
+                            .vertical_scrollbar(&self.scroll_handle),
+                    )
+                },
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .justify_between()
+                    .gap_2()
+                    .px(padding)
+                    .py_1()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(job_count_label(jobs.len(), job_count))
+                    .when(padding == GRID_PADDING, |this| {
+                        this.child("↑ ↓ ← → select · Return opens")
+                    }),
             )
     }
 }
@@ -254,14 +323,18 @@ impl ResumeGrid {
     pub fn new(
         database: Entity<Database>,
         previews: Entity<Previews>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let applications = read_applications(&database, cx);
         Self {
             _subscriptions: vec![
                 cx.observe(&previews, |_, _, cx| cx.notify()),
                 cx.subscribe(&database, |this, _, changed: &Changed, cx| {
                     if changed.touches(Jobs) || changed.touches(Events) {
-                        this.applications = None;
+                        this.applications = read_applications(&this.database, cx);
+                        cx.emit(ResumeGridEvent::FiltersChanged);
                         cx.notify();
                     }
                     if changed.touches(Generations)
@@ -273,15 +346,25 @@ impl ResumeGrid {
                         cx.notify();
                     }
                 }),
+                cx.subscribe(&search, |this, input, event, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.query = input.read(cx).value().trim().to_lowercase();
+                        cx.notify();
+                    }
+                }),
             ],
             database,
             previews,
-            applications: None,
+            applications,
             current_resumes: None,
             selected: None,
             filter: JobFilter::default(),
+            sort: JobSort::default(),
+            search,
+            query: String::new(),
             focus_handle: cx.focus_handle(),
-            grid_width: Rc::new(Cell::new(px(0.))),
+            card_area_width: Rc::new(Cell::new(px(0.))),
+            scroll_handle: ScrollHandle::new(),
             thumbnails: Vec::new(),
         }
     }
@@ -291,16 +374,10 @@ impl ResumeGrid {
         cx.notify();
     }
 
-    /// Reads the jobs and their résumés, unless they're read already.
+    /// Reads the current résumés after a change, when their previews are needed.
     fn read(&mut self, cx: &App) {
-        let connection = self.database.read(cx).connection();
-        if self.applications.is_none() {
-            self.applications = Some(Application::read_all(connection).unwrap_or_else(|error| {
-                eprintln!("résumé grid: couldn't read the jobs: {error}");
-                Vec::new()
-            }));
-        }
         if self.current_resumes.is_none() {
+            let connection = self.database.read(cx).connection();
             self.current_resumes = Some(current_resumes(connection).unwrap_or_else(|error| {
                 eprintln!("résumé grid: couldn't read the résumés: {error}");
                 HashMap::new()
@@ -309,26 +386,49 @@ impl ResumeGrid {
     }
 
     fn columns(&self) -> usize {
-        let available = self.grid_width.get() - GRID_PADDING * 2. + CARD_GAP;
+        let available = self.card_area_width.get() + CARD_GAP;
         ((available / (CARD_WIDTH + CARD_GAP)).floor() as usize).max(1)
     }
 
-    fn set_filter(&mut self, index: usize, cx: &mut Context<Self>) {
+    pub(super) fn set_filter(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(&filter) = JobFilter::ALL.get(index) {
             self.filter = filter;
+            cx.emit(ResumeGridEvent::FiltersChanged);
             cx.notify();
         }
     }
 
-    /// The jobs the filter lets through, most recently active first.
+    pub(super) fn filters(&self) -> impl Iterator<Item = (&'static str, usize, bool)> + '_ {
+        let now = Utc::now();
+        JobFilter::ALL.into_iter().map(move |filter| {
+            let count = self
+                .applications
+                .iter()
+                .filter(|job| filter.includes(job, now))
+                .count();
+            (filter.label(), count, self.filter == filter)
+        })
+    }
+
+    /// Jobs matching both the application filter and the search.
     fn visible_jobs(&self, now: DateTime<Utc>) -> Vec<JobId> {
         let mut jobs: Vec<&Application> = self
             .applications
             .iter()
-            .flatten()
             .filter(|job| self.filter.includes(job, now))
+            .filter(|job| {
+                self.query.is_empty()
+                    || job.title.to_lowercase().contains(&self.query)
+                    || job.company.to_lowercase().contains(&self.query)
+            })
             .collect();
-        jobs.sort_by_key(|job| std::cmp::Reverse(job.last_activity(now)));
+        match self.sort {
+            JobSort::LastActivity => {
+                jobs.sort_by_key(|job| std::cmp::Reverse(job.last_activity(now)))
+            }
+            JobSort::Company => jobs
+                .sort_by_cached_key(|job| (job.company.to_lowercase(), job.title.to_lowercase())),
+        }
         jobs.into_iter().map(|job| job.job).collect()
     }
 
@@ -338,14 +438,11 @@ impl ResumeGrid {
         let current = self
             .selected
             .and_then(|selected| jobs.iter().position(|&job| job == selected));
-        let next = match current {
-            Some(index) => index
-                .checked_add_signed(offset)
-                .and_then(|index| jobs.get(index)),
-            None => jobs.first(),
-        };
-        if let Some(&next) = next {
-            self.selected = Some(next);
+        let next = current.map_or(Some(0), |index| index.checked_add_signed(offset));
+        if let Some((index, &job)) = next.and_then(|index| jobs.get(index).map(|job| (index, job)))
+        {
+            self.selected = Some(job);
+            self.scroll_handle.scroll_to_item(index);
             cx.notify();
         }
     }
@@ -367,29 +464,28 @@ impl ResumeGrid {
             Some(PageRender::Ready(pages)) => pages.images.len(),
             _ => 0,
         };
-        let mut details = format!(
-            "{} · {}",
-            job.company,
-            application_view::stage_label(job.stage(now), now)
-        );
+        let stage = job.stage(now);
         let nudge = application_view::nudge_label(job, now);
-        // A calendar for an interview to come; otherwise, a quiet application.
         let nudge_icon = match job.nudge(now) {
             Some(Nudge::InterviewSoon { .. }) => IconName::Calendar,
             _ => IconName::Info,
         };
-        if page_count > 1 {
-            details.push_str(&format!(" · {page_count} pages"));
-        }
+        let stage_color = match stage {
+            Stage::Interview { .. } => theme.warning,
+            Stage::Offer => theme.primary,
+            _ => theme.muted_foreground,
+        };
 
         let thumbnail = match (resume, render) {
             (None, _) => centered(
-                div()
+                v_flex()
+                    .items_center()
+                    .gap_2()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("Not generated"),
+                    .child(Icon::new(IconName::FileText).small())
+                    .child("No résumé yet"),
             )
-            .bg(theme.muted)
             .into_any_element(),
             (Some(_), Some(PageRender::Ready(pages))) => match pages.images.first() {
                 Some(image) => img(image.clone())
@@ -418,7 +514,12 @@ impl ResumeGrid {
         v_flex()
             .id(job_card_id(id))
             .w(CARD_WIDTH)
+            .max_w_full()
+            .flex_none()
             .gap_2()
+            .rounded(theme.radius_lg)
+            .p_1()
+            .when(selected, |this| this.bg(theme.list_active))
             // Select on press, like Finder; a second press opens.
             .on_mouse_down(
                 MouseButton::Left,
@@ -432,93 +533,95 @@ impl ResumeGrid {
                 }),
             )
             .child(
-                div()
-                    .p_1()
-                    .rounded(theme.radius_lg)
-                    .when(selected, |this| this.bg(theme.list_active))
-                    .child(
-                        div()
-                            .w(THUMBNAIL_WIDTH)
-                            .h(THUMBNAIL_HEIGHT)
-                            .overflow_hidden()
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(if selected {
-                                theme.list_active_border
-                            } else {
-                                theme.border
-                            })
-                            .shadow_sm()
-                            .child(thumbnail),
-                    ),
+                h_flex().w_full().justify_center().child(
+                    div()
+                        .relative()
+                        .w(THUMBNAIL_WIDTH)
+                        .max_w_full()
+                        .aspect_ratio(THUMBNAIL_WIDTH / THUMBNAIL_HEIGHT)
+                        .when_else(
+                            resume.is_some(),
+                            |this| this.bg(PAPER).shadow_md(),
+                            |this| this.border_1().border_dashed().border_color(theme.border),
+                        )
+                        .child(thumbnail)
+                        .when(page_count > 1, |this| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .right_2()
+                                    .bottom_2()
+                                    .px_1()
+                                    .rounded_sm()
+                                    .bg(theme.popover)
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("{page_count} pages")),
+                            )
+                        }),
+                ),
             )
             .child(
                 v_flex()
+                    .min_w_0()
+                    .w_full()
                     .px_1()
+                    .pt_2()
+                    .pb_1()
                     .gap_0p5()
                     .child(
                         div()
-                            .px_1()
-                            .rounded(theme.radius)
                             .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .truncate()
-                            // Like Finder: the selected title sits on the accent colour,
-                            // darkened enough for white text to read in the light theme.
-                            .when(selected, |this| {
-                                let accent = theme.list_active_border;
-                                this.bg(Hsla {
-                                    l: accent.l.min(TITLE_ACCENT_MAX_LIGHTNESS),
-                                    ..accent
-                                })
-                                .text_color(white())
-                            })
                             .child(job.title.clone()),
                     )
                     .child(
                         div()
-                            .px_1()
-                            .text_xs()
+                            .text_sm()
                             .truncate()
                             .text_color(theme.muted_foreground)
-                            .child(details),
+                            .child(job.company.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1p5()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                div()
+                                    .size(px(5.))
+                                    .flex_none()
+                                    .rounded_full()
+                                    .bg(stage_color),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .child(application_view::stage_label(stage, now)),
+                            ),
                     )
                     .when(unsupported > 0 || outdated || nudge.is_some(), |this| {
                         this.child(
                             h_flex()
-                                .px_1()
+                                .gap_x_2()
+                                .gap_y_1()
                                 .pt_0p5()
-                                .gap_1()
                                 .flex_wrap()
-                                .when_some(nudge, |this, nudge| {
-                                    this.child(
-                                        Tag::secondary()
-                                            .outline()
-                                            .xsmall()
-                                            .gap_1()
-                                            .child(
-                                                Icon::new(nudge_icon.clone())
-                                                    .xsmall()
-                                                    .text_color(theme.muted_foreground),
-                                            )
-                                            .child(nudge),
-                                    )
-                                })
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
                                 .when(unsupported > 0, |this| {
                                     this.child(
-                                        Tag::danger()
-                                            .outline()
-                                            .xsmall()
+                                        h_flex()
+                                            .gap_1()
+                                            .text_color(theme.danger)
+                                            .child(Icon::new(IconName::Info).xsmall())
                                             .child(unsupported_label(unsupported)),
                                     )
                                 })
                                 .when(outdated, |this| {
-                                    // Neutral, with a yellow icon: yellow text is hard
-                                    // to read on a light background.
                                     this.child(
-                                        Tag::secondary()
-                                            .outline()
-                                            .xsmall()
+                                        h_flex()
                                             .gap_1()
                                             .child(
                                                 Icon::new(IconName::TriangleAlert)
@@ -527,11 +630,62 @@ impl ResumeGrid {
                                             )
                                             .child("Facts changed"),
                                     )
+                                })
+                                .when_some(nudge, |this, nudge| {
+                                    this.child(
+                                        h_flex()
+                                            .gap_1()
+                                            .child(Icon::new(nudge_icon).xsmall())
+                                            .child(nudge),
+                                    )
                                 }),
                         )
                     }),
             )
     }
+}
+
+fn read_applications(database: &Entity<Database>, cx: &App) -> Vec<Application> {
+    Application::read_all(database.read(cx).connection()).unwrap_or_else(|error| {
+        eprintln!("résumé grid: couldn't read the jobs: {error}");
+        Vec::new()
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum JobSort {
+    #[default]
+    LastActivity,
+    Company,
+}
+
+impl JobSort {
+    const ALL: [Self; 2] = [Self::LastActivity, Self::Company];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::LastActivity => "Last activity",
+            Self::Company => "Company",
+        }
+    }
+}
+
+fn sort_menu(current: JobSort) -> impl IntoElement {
+    Button::new("sort-jobs")
+        .label(current.label())
+        .ghost()
+        .small()
+        .dropdown_caret(true)
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
+            for sort in JobSort::ALL {
+                menu = menu.menu_with_check(
+                    sort.label(),
+                    sort == current,
+                    Box::new(SortJobs { sort }),
+                );
+            }
+            menu
+        })
 }
 
 /// What a card shows of its job's current résumé.
@@ -613,7 +767,7 @@ impl JobFilter {
 
     fn label(self) -> &'static str {
         match self {
-            Self::All => "All",
+            Self::All => "All applications",
             Self::Active => "Active",
             Self::Interviewing => "Interviewing",
             Self::Offers => "Offers",
@@ -644,11 +798,12 @@ impl JobFilter {
 }
 
 /// "9 jobs", or with a filter, "3 of 9 jobs".
-fn job_count_label(shown: usize, total: usize, filter: JobFilter) -> String {
+fn job_count_label(shown: usize, total: usize) -> String {
     let jobs = if total == 1 { "job" } else { "jobs" };
-    match filter {
-        JobFilter::All => format!("{total} {jobs}"),
-        _ => format!("{shown} of {total} {jobs}"),
+    if shown == total {
+        format!("{total} {jobs}")
+    } else {
+        format!("{shown} of {total} {jobs}")
     }
 }
 
@@ -786,8 +941,8 @@ mod tests {
         let (database, directory) = testing::open_sample(app);
         let previews = app.new(|cx| Previews::new(database.clone(), cx));
         let opened = Rc::new(Cell::new(None));
-        let (grid, cx) = app.add_window_view(|_, cx| {
-            ResumeGrid::new(database.clone(), previews.clone(), cx)
+        let (grid, cx) = app.add_window_view(|window, cx| {
+            ResumeGrid::new(database.clone(), previews.clone(), window, cx)
         });
         cx.update(|window, cx| {
             grid.focus_handle(cx).focus(window, cx);
@@ -925,6 +1080,37 @@ mod tests {
         assert!(closed > 0 && closed < all);
         grid.keys("ctrl-1");
         assert_eq!(grid.visible().len(), all);
+    }
+
+    #[test]
+    fn search_combines_with_application_filters_and_enter_opens_only_visible_jobs() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let ledgerly = grid.job("Ledgerly");
+        grid.cx.update(|window, cx| {
+            let search = grid.grid.read(cx).search.clone();
+            grid.grid.update(cx, |grid, cx| grid.select(ledgerly, cx));
+            search.update(cx, |search, cx| search.focus(window, cx));
+        });
+        grid.cx.simulate_input("lEdGeR");
+        assert_eq!(grid.visible(), vec![ledgerly]);
+        grid.keys("enter");
+        assert_eq!(
+            grid.opened.get(),
+            None,
+            "Enter in search stays in the library"
+        );
+        grid.cx
+            .update(|window, cx| grid.grid.focus_handle(cx).focus(window, cx));
+        grid.keys("ctrl-5 enter");
+        assert!(grid.visible().is_empty());
+        assert_eq!(
+            grid.opened.get(),
+            None,
+            "a filtered-out selection cannot open"
+        );
+        grid.keys("ctrl-1 enter");
+        assert_eq!(grid.opened.get(), Some(ledgerly));
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod job_form;
 mod job_view;
 mod onboarding;
 mod parts;
+mod palette_picker;
 mod previews;
 mod redaction_check;
 mod resume_grid;
@@ -21,22 +22,25 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::group_box::GroupBoxVariant;
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::sidebar::{Sidebar, SidebarCollapsible, SidebarMenu, SidebarMenuItem};
+use gpui_kit::component::sidebar::{
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
+};
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Icon, IconName, Root, Selectable, Sizable, WindowExt, h_flex, v_flex,
+};
 use gpui_kit::{
     Action, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
     KeyBinding, Pixels, SharedString, Subscription, Task, Window, WindowBounds, actions, div,
     prelude::*, px,
 };
 
-use crate::appearance::{Appearance, Motion};
+use crate::appearance::{Appearance, Motion, Palettes};
 use crate::database::schema::{self, Documents, FactSources, Facts, LlmRuns};
 use crate::database::{Changed, Database};
 use crate::llm::{self, Purpose};
@@ -54,9 +58,7 @@ use onboarding::{Onboarding, OnboardingEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
 
-/// Fixed rather than resizable: the kit animates a sidebar of fixed width
-/// down to its icons, and three short labels don't need more room.
-const SIDEBAR_WIDTH: Pixels = px(220.);
+const SIDEBAR_WIDTH: Pixels = px(204.);
 /// The collapse toggle's width: a collapsed menu item's, the strip's 48px
 /// less its padding.
 const TOGGLE_WIDTH: Pixels = px(32.);
@@ -160,13 +162,28 @@ impl Render for Workspace {
             Page::Settings => div()
                 .track_focus(&self.focus_handle)
                 .size_full()
-                .child(settings_page(
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .px_6()
+                        .py_4()
+                        .border_b_1()
+                        .border_color(cx.theme().border)
+                        .child(
+                            div()
+                                .text_2xl()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child("Settings"),
+                        ),
+                )
+                .child(div().flex_1().min_h_0().child(settings_page(
                     self.settings_id,
                     self.database.clone(),
                     self.ai_settings.clone(),
                     self.stand_in_name.clone(),
                     cx,
-                ))
+                )))
                 .into_any_element(),
         };
 
@@ -193,8 +210,12 @@ impl Render for Workspace {
             }))
             .on_action(|_: &ShowShortcuts, window, cx| shortcuts::open(window, cx))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &Undo, window, cx| this.undo_or_redo(false, window, cx)))
-            .on_action(cx.listener(|this, _: &Redo, window, cx| this.undo_or_redo(true, window, cx)))
+            .on_action(
+                cx.listener(|this, _: &Undo, window, cx| this.undo_or_redo(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &Redo, window, cx| this.undo_or_redo(true, window, cx)),
+            )
             .size_full()
             .child(match &self.onboarding {
                 Some(onboarding) => onboarding.clone().into_any_element(),
@@ -237,14 +258,10 @@ impl Workspace {
         });
 
         let previews = cx.new(|cx| Previews::new(database.clone(), cx));
-        let resume_grid = cx.new(|cx| {
-            ResumeGrid::new(database.clone(), previews.clone(), cx)
-        });
-        let job_view = cx.new(|cx| {
-            JobView::new(database.clone(), previews, window, cx)
-        });
-        let facts_page =
-            cx.new(|cx| FactsPage::new(database.clone(), window, cx));
+        let resume_grid =
+            cx.new(|cx| ResumeGrid::new(database.clone(), previews.clone(), window, cx));
+        let job_view = cx.new(|cx| JobView::new(database.clone(), previews, window, cx));
+        let facts_page = cx.new(|cx| FactsPage::new(database.clone(), window, cx));
         let import_page = cx.new(|cx| ImportPage::new(database.clone(), window, cx));
         let ai_settings = cx.new(|cx| AiSettings::new(database.clone(), window, cx));
         let stand_in_name = cx.new(|cx| StandInName::new(database.clone(), window, cx));
@@ -277,6 +294,7 @@ impl Workspace {
                 |this, _, event, window, cx| match event {
                     ResumeGridEvent::Open(job) => this.open_job(*job, window, cx),
                     ResumeGridEvent::NewJob => this.open_job_form(window, cx),
+                    ResumeGridEvent::FiltersChanged => cx.notify(),
                 },
             ),
             cx.subscribe_in(
@@ -287,6 +305,9 @@ impl Workspace {
                 },
             ),
             cx.observe_global_in::<Appearance>(window, |_, window, cx| {
+                Appearance::current(cx).apply(window, cx)
+            }),
+            cx.observe_global_in::<Palettes>(window, |_, window, cx| {
                 Appearance::current(cx).apply(window, cx)
             }),
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -579,10 +600,11 @@ impl Workspace {
         ));
         window.open_dialog(cx, {
             let form = form.clone();
-            move |dialog, _, _| {
+            move |dialog, _, cx| {
                 let form = form.clone();
                 dialog
                     .title("New job")
+                    .bg(cx.theme().popover)
                     .w(px(JOB_FORM_WIDTH))
                     .content(move |content, _, _| content.child(form.clone()))
             }
@@ -618,8 +640,10 @@ impl Workspace {
 
     fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
         let needs_review = self.needs_review;
-        let mut facts = SidebarMenuItem::new("Facts")
-            .icon(IconName::BookOpen)
+        let theme = cx.theme();
+        let nav_icon = |icon| Icon::new(icon).small().text_color(theme.primary);
+        let mut facts = SidebarMenuItem::new("Career facts")
+            .icon(nav_icon(IconName::BookOpen))
             .active(self.page == Page::Facts)
             .on_click(cx.listener(|this, _, window, cx| this.open_page(Page::Facts, window, cx)));
         if needs_review > 0 {
@@ -638,55 +662,105 @@ impl Workspace {
         }
 
         let collapsed = self.sidebar_collapsed;
-        let footer = h_flex()
-            .w_full()
-            .justify_between()
-            .child(
-                Button::new("keyboard-shortcuts")
-                    .ghost()
-                    .small()
-                    .label("Keyboard shortcuts")
-                    .on_click(|_, window, cx| shortcuts::open(window, cx)),
-            )
-            .children(
-                shortcuts::keystrokes_for(&ShowShortcuts, cx)
-                    .into_iter()
-                    .next()
-                    .map(Kbd::new),
+        let settings = Button::new("settings-navigation")
+            .ghost()
+            .small()
+            .h_7()
+            .icon(nav_icon(IconName::Settings))
+            .selected(self.page == Page::Settings)
+            .when_else(collapsed, |this| this.w_full(), |this| this.label("Settings"))
+            .tooltip("Settings")
+            .on_click(
+                cx.listener(|this, _, window, cx| this.open_page(Page::Settings, window, cx)),
             );
+        let keyboard = Button::new("keyboard-shortcuts")
+            .ghost()
+            .small()
+            .label(if collapsed { "?" } else { "Shortcuts" })
+            .tooltip_with_action("Keyboard shortcuts", &ShowShortcuts, None)
+            .on_click(|_, window, cx| shortcuts::open(window, cx));
+        let footer = v_flex().w_full().items_start().gap_1().child(settings).child(
+            h_flex()
+                .w_full()
+                .border_t_1()
+                .border_color(theme.sidebar_border)
+                .pt_1()
+                .when_else(
+                    collapsed,
+                    |this| this.justify_center(),
+                    |this| {
+                        this.gap_1()
+                            .child(
+                                Button::new("undo")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Undo2)
+                                    .tooltip_with_action("Undo", &Undo, None)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.undo_or_redo(false, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("redo")
+                                    .ghost()
+                                    .small()
+                                    .icon(IconName::Redo2)
+                                    .tooltip_with_action("Redo", &Redo, None)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.undo_or_redo(true, window, cx)
+                                    })),
+                            )
+                            .child(div().flex_1())
+                    },
+                )
+                .child(keyboard),
+        );
 
-        let item = |item: SidebarMenuItem| item.h_7();
-        let menu = SidebarMenu::new()
-            .child(item(
+        let library = SidebarMenu::new()
+            .gap_1()
+            .child(
                 SidebarMenuItem::new("Résumés")
-                    .icon(IconName::FileText)
+                    .h_7()
+                    .icon(nav_icon(IconName::FileText))
                     .active(matches!(self.page, Page::Resumes | Page::Job))
                     .on_click(cx.listener(|this, _, window, cx| this.open_resumes(window, cx))),
-            ))
-            .child(item(facts))
-            .child(item(
+            )
+            .child(facts.h_7())
+            .child(
                 SidebarMenuItem::new("Import")
-                    .icon(IconName::Inbox)
+                    .h_7()
+                    .icon(nav_icon(IconName::Inbox))
                     .active(self.page == Page::Import)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_page(Page::Import, window, cx)
-                    })),
-            ))
-            .child(item(
-                SidebarMenuItem::new("Settings")
-                    .icon(IconName::Settings)
-                    .active(self.page == Page::Settings)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_page(Page::Settings, window, cx)
-                    })),
-            ));
-        // At the top of the sidebar, as in Windows' navigation pane: always
-        // there, its icon in the column of the menu's, so it stays put as
-        // the sidebar collapses. Sized like a menu item.
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_page(Page::Import, window, cx)),
+                    ),
+            );
+        let applications = SidebarMenu::new().gap_1().children(
+            self.resume_grid.read(cx).filters().enumerate().map(
+                |(index, (label, count, active))| {
+                    SidebarMenuItem::new(label)
+                        .h_7()
+                        .pl_6()
+                        .active(active)
+                        .suffix(move |_, cx| {
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(count.to_string())
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.resume_grid.focus_handle(cx).focus(window, cx);
+                            this.resume_grid
+                                .update(cx, |grid, cx| grid.set_filter(index, cx));
+                        }))
+                },
+            ),
+        );
         let toggle = Button::new("toggle-sidebar")
             .ghost()
             .w(TOGGLE_WIDTH)
             .h_7()
+            .when(!collapsed, |this| this.ml_auto())
             .icon(if collapsed {
                 IconName::PanelLeftOpen
             } else {
@@ -703,26 +777,16 @@ impl Workspace {
             )
             .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
 
-        // Collapsed, the kit pads the header 4px less, the menu 8px on top
-        // and 8px at the sides against none and 12px expanded, puts a gap
-        // between the two, and centres the icons. Matching that when
-        // expanded keeps every icon where it is on toggling; items are kept
-        // as tall either way above. Both then move the menu up, closing
-        // most of the kit's gap under the toggle: collapsed by shortening the
-        // header, as the menu's own area clips what moves out of it.
-        let (toggle, menu) = if collapsed {
-            (toggle.mb(px(-15.)), menu)
-        } else {
-            (toggle.mt(px(-4.)).ml(px(-4.)), menu.mx(px(-4.)))
-        };
-
         Sidebar::new("sidebar")
             .collapsible(SidebarCollapsible::Icon)
             .collapsed(collapsed)
             .w(SIDEBAR_WIDTH)
             .header(toggle)
-            .child(menu)
-            .when(!collapsed, |this| this.footer(footer))
+            .child(SidebarGroup::new("Library").child(library))
+            .when(!collapsed && self.page == Page::Resumes, |this| {
+                this.child(SidebarGroup::new("Applications").child(applications.mt_0p5()))
+            })
+            .footer(footer)
     }
 }
 
@@ -737,6 +801,9 @@ enum Page {
 
 /// Sets the theme and motion to the stored settings, where they differ.
 fn apply_settings(stored: settings::Settings, cx: &mut App) {
+    if Palettes::current(cx) != stored.palettes {
+        cx.set_global(stored.palettes);
+    }
     if Appearance::current(cx) != stored.appearance {
         stored.appearance.set(cx);
     }
@@ -769,13 +836,17 @@ fn settings_page(
     // page, and on AI from "Set up AI".
     let start = if id == 0 { 0 } else { AI_SETTINGS_PAGE };
     Settings::new(("settings", id))
+        .sidebar_width(px(168.))
+        .sidebar_size_range(px(144.)..px(240.))
         .with_group_variant(GroupBoxVariant::Outline)
         .default_selected_index(SelectIndex {
             page_ix: start,
             group_ix: None,
         })
         .page(
-            SettingPage::new("General").group(
+            SettingPage::new("General")
+            .description("Make Kron feel at home on your desktop.")
+            .group(
                 SettingGroup::new().title("Appearance").item(
                     SettingItem::new(
                         "Theme",
@@ -795,6 +866,12 @@ fn settings_page(
                         ),
                     )
                     .description("Match system follows your desktop's light or dark setting."),
+                )
+                .item(
+                    SettingItem::render({
+                        let database = database.clone();
+                        move |_, _, cx| palette_picker::palette_picker(database.clone(), cx)
+                    }).keywords(["color", "palette", "moss", "midnight", "copper", "orchid", "olive", "porcelain", "linen", "glacier"]),
                 )
                 .item(
                     SettingItem::new(
@@ -929,6 +1006,7 @@ fn ai_page(
                     "API key",
                     SettingField::render(move |_, _, _| ai_settings.clone()),
                 )
+                .layout(gpui_kit::Axis::Vertical)
                 .description("Kept in your system keyring, never in Kron's data."),
             )
             .item(
@@ -936,6 +1014,7 @@ fn ai_page(
                     "Your name is sent as",
                     SettingField::render(move |_, _, _| stand_in_name.clone()),
                 )
+                .layout(gpui_kit::Axis::Vertical)
                 .description(
                     "A made-up name the AI sees in place of yours, so it reads your CV as \
                      written. Yours is put back in what comes back.",
@@ -1207,11 +1286,21 @@ mod tests {
         let mut open = open(&mut app);
         open.run(|write| {
             settings::set_appearance(write, Appearance::Dark)?;
+            settings::set_palette(write, crate::appearance::Palette::Moss)?;
+            settings::set_palette(write, crate::appearance::Palette::Glacier)?;
             settings::set_motion(write, Motion::Reduced)
         });
         assert_eq!(open.read(|_, cx| Appearance::current(cx)), Appearance::Dark);
         assert_eq!(open.read(|_, cx| Motion::current(cx)), Motion::Reduced);
+        assert_eq!(
+            open.read(|_, cx| cx.theme().primary),
+            gpui_kit::Hsla::from(gpui_kit::rgb(0x93c4ac)),
+        );
         open.run(|write| settings::set_appearance(write, Appearance::Light));
         assert_eq!(open.read(|_, cx| Appearance::current(cx)), Appearance::Light);
+        assert_eq!(
+            open.read(|_, cx| cx.theme().primary),
+            gpui_kit::Hsla::from(gpui_kit::rgb(0x376dbb)),
+        );
     }
 }

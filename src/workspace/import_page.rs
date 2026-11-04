@@ -17,6 +17,7 @@ use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::notification::Notification;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex,
 };
@@ -108,7 +109,7 @@ impl Render for ImportPage {
             .size_full()
             .flex()
             .justify_center()
-            .child(div().size_full().max_w(PAGE_MAX_WIDTH).p_4().child(content))
+            .child(div().size_full().max_w(PAGE_MAX_WIDTH).px_6().py_5().child(content))
     }
 }
 
@@ -679,7 +680,8 @@ impl ImportPage {
         v_flex()
             .id("drop-target")
             .size_full()
-            .gap_3()
+            .overflow_y_scrollbar()
+            .gap_4()
             .rounded(theme.radius_lg)
             .drag_over::<ExternalPaths>(|style, _, _, cx| {
                 style.bg(cx.theme().primary.opacity(0.04))
@@ -687,17 +689,22 @@ impl ImportPage {
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.import(paths.paths().to_vec(), window, cx)
             }))
-            .child(title("Import your CV".into()))
-            .child(caption(
-                "It's read on this device. You'll see the text before anything is saved.",
-                cx,
-            ))
+            .child(
+                v_flex().gap_2()
+                    .child(title("Import".into()))
+                    .child(div().text_sm().text_color(theme.muted_foreground)
+                        .child("Bring your experience into Kron.")),
+            )
             .children(self.render_problem(cx))
             .child(
-                h_flex()
+                v_flex()
                     .id("drop-card")
-                    .gap_3()
-                    .p_4()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .py_8()
+                    .px_5()
+                    .bg(theme.popover)
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_dashed()
@@ -707,14 +714,14 @@ impl ImportPage {
                     })
                     .child(
                         Icon::new(IconName::Inbox)
-                            .size(px(20.))
+                            .size(px(28.))
                             .text_color(theme.muted_foreground),
                     )
                     .child(
                         v_flex()
-                            .flex_1()
-                            .gap_0p5()
-                            .child(div().child("Drop your CV here"))
+                            .items_center()
+                            .gap_2()
+                            .child(div().font_weight(FontWeight::MEDIUM).child("Drop your CV here"))
                             .child(caption("PDF, Markdown or plain text.", cx)),
                     )
                     .child(
@@ -727,11 +734,13 @@ impl ImportPage {
             )
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_3()
-                    .p_4()
+                    .p_5()
                     .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
+                    .bg(theme.popover)
                     .child(
                         Icon::new(IconName::Copy)
                             .size(px(20.))
@@ -741,7 +750,7 @@ impl ImportPage {
                         v_flex()
                             .flex_1()
                             .gap_0p5()
-                            .child(div().child("Or paste it, or write it"))
+                            .child(div().child("Start with text"))
                             .child(caption(
                                 "Text from a website, a document or your LinkedIn page.",
                                 cx,
@@ -762,6 +771,14 @@ impl ImportPage {
                             .small()
                             .on_click(cx.listener(|this, _, window, cx| this.paste(window, cx))),
                     ),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .px_1()
+                    .pt_2()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("You're in control of what is shared"))
+                    .child(caption("Files are read on this device. Review the text, then choose which personal details to hide before an AI model receives it.", cx)),
             )
     }
 
@@ -863,8 +880,9 @@ impl ImportPage {
             .children(self.position().map(|position| caption(position, cx)))
             .child(
                 h_flex()
+                    .flex_wrap()
                     .justify_between()
-                    .gap_2()
+                    .gap_3()
                     .child(title(heading.into()))
                     .child(
                         h_flex()
@@ -953,7 +971,7 @@ struct Read {
 
 fn title(text: SharedString) -> impl IntoElement {
     div()
-        .text_lg()
+        .text_2xl()
         .font_weight(FontWeight::SEMIBOLD)
         .child(text)
 }

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::JobId;
-use crate::appearance::{Appearance, Motion};
+use crate::appearance::{Appearance, Motion, Palette, Palettes};
 use crate::database::schema::{self, device_settings, settings};
 use crate::database::{Error, Write};
 
@@ -11,16 +11,25 @@ use crate::database::{Error, Write};
 pub struct Settings {
     pub appearance: Appearance,
     pub motion: Motion,
+    pub palettes: Palettes,
 }
 
 impl Settings {
     pub fn read(connection: &Connection) -> Result<Self, Error> {
-        Ok(connection.query_row("SELECT appearance, motion FROM settings", [], |row| {
-            Ok(Self {
-                appearance: row.get(0)?,
-                motion: row.get(1)?,
-            })
-        })?)
+        Ok(connection.query_row(
+            "SELECT appearance, motion, light_palette, dark_palette FROM settings",
+            [],
+            |row| {
+                Ok(Self {
+                    appearance: row.get(0)?,
+                    motion: row.get(1)?,
+                    palettes: Palettes {
+                        light: row.get(2)?,
+                        dark: row.get(3)?,
+                    },
+                })
+            },
+        )?)
     }
 }
 
@@ -122,6 +131,15 @@ pub fn set_appearance(write: &mut Write, appearance: Appearance) -> Result<(), E
 
 pub fn set_motion(write: &mut Write, motion: Motion) -> Result<(), Error> {
     write.set(settings::MOTION, 1, &motion.stored())
+}
+
+pub fn set_palette(write: &mut Write, palette: Palette) -> Result<(), Error> {
+    let column = if palette.is_dark() {
+        settings::DARK_PALETTE
+    } else {
+        settings::LIGHT_PALETTE
+    };
+    write.set(column, 1, &palette.stored())
 }
 
 /// The made-up name sent to models in place of the user's.
@@ -229,6 +247,7 @@ mod tests {
             Settings {
                 appearance: Appearance::Dark,
                 motion: Motion::Reduced,
+                palettes: Palettes::default(),
             }
         );
         assert_eq!(
@@ -243,6 +262,27 @@ mod tests {
         // Leaving the job page forgets the job, as the schema's CHECK asks.
         writer.execute(|write| set_last_page(write, LastPage::Facts))?;
         assert_eq!(DeviceSettings::read(writer.device())?.last_page, LastPage::Facts);
+        Ok(())
+    }
+
+    #[test]
+    fn palette_choices_are_kept_separately_from_appearance() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        writer.execute(|write| {
+            set_palette(write, Palette::Glacier)?;
+            set_palette(write, Palette::Moss)
+        })?;
+        let stored = Settings::read(writer.kron())?;
+        assert_eq!(stored.appearance, Appearance::System);
+        assert_eq!(
+            stored.palettes,
+            Palettes {
+                light: Palette::Glacier,
+                dark: Palette::Moss
+            }
+        );
+        writer.execute(|write| set_appearance(write, Appearance::Dark))?;
+        assert_eq!(Settings::read(writer.kron())?.palettes, stored.palettes);
         Ok(())
     }
 

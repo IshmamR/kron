@@ -54,8 +54,8 @@ const SCROLL_MARGIN: f32 = 48.;
 
 // Drawn on the page, which is paper and stays light in both themes.
 const PAPER: u32 = 0xfafafa;
-const SELECTION: u32 = 0x2f6fde;
-const EDITED_MARKER: u32 = 0x2f6fde;
+const SELECTION: u32 = 0x497858;
+const EDITED_MARKER: u32 = 0x497858;
 const OUTDATED_MARKER: u32 = 0xbf8700;
 
 actions!(
@@ -240,7 +240,7 @@ impl JobView {
         });
         let line_editor = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .auto_grow(1, 10)
+                .auto_grow(3, 10)
                 .submit_on_enter(true)
         });
         Self {
@@ -598,9 +598,11 @@ impl JobView {
     fn render_header(&self, job: &Application, cx: &Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_none()
+            .flex_wrap()
             .justify_between()
-            .gap_4()
-            .pr_3()
+            .gap_3()
+            .px_4()
+            .py_3()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(job_header(
@@ -610,18 +612,8 @@ impl JobView {
             ))
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_2()
-                    .when(self.shown_id().is_some(), |this| {
-                        this.child(
-                            Button::new("export-pdf")
-                                .label("Export PDF")
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.export(window, cx)
-                                })),
-                        )
-                        .child(self.generate_button(cx))
-                    })
                     .child(
                         TabBar::new("job-tabs")
                             .segmented()
@@ -640,7 +632,18 @@ impl JobView {
                                 };
                                 this.set_tab(tab, window, cx)
                             })),
-                    ),
+                    )
+                    .when(self.shown_id().is_some(), |this| {
+                        this.child(self.generate_button(cx)).child(
+                            Button::new("export-pdf")
+                                .label("Export PDF")
+                                .icon(IconName::ArrowDown)
+                                .small()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.export(window, cx)),
+                                ),
+                        )
+                    }),
             )
     }
 
@@ -771,10 +774,11 @@ impl JobView {
         };
         window.open_dialog(cx, {
             let form = form.clone();
-            move |dialog, _, _| {
+            move |dialog, _, cx| {
                 let form = form.clone();
                 dialog
                     .title(title)
+                    .bg(cx.theme().popover)
                     .w(px(INSTRUCTIONS_FORM_WIDTH))
                     .content(move |content, _, _| content.child(form.clone()))
             }
@@ -944,6 +948,9 @@ impl JobView {
     }
 
     fn render_resume_tab(&self, render: Option<PageRender>, cx: &Context<Self>) -> AnyElement {
+        if self.shown_id().is_none() {
+            return self.render_resume(None, render, cx);
+        }
         let shown = self.shown.as_ref().filter(|resume| Some(resume.id) == self.shown_id());
         let version = self.shown_version();
         let showing_current = self.showing_sent.is_none();
@@ -1077,8 +1084,10 @@ impl JobView {
                     .size_full()
                     .track_scroll(&self.scroll_handle)
                     .overflow_y_scroll()
+                    .overflow_x_scroll()
                     .child(
                         v_flex()
+                            .min_w(PAGE_WIDTH + px(PAGE_GAP * 2.))
                             .items_center()
                             .gap(px(PAGE_GAP))
                             .py(px(PAGE_GAP))
@@ -1086,6 +1095,7 @@ impl JobView {
                     ),
             )
             .vertical_scrollbar(&self.scroll_handle)
+            .horizontal_scrollbar(&self.scroll_handle)
             .into_any_element()
     }
 
@@ -1254,30 +1264,22 @@ fn template_bar(version: &Version, read_only: bool, cx: &App) -> impl IntoElemen
     };
     h_flex()
         .flex_none()
-        .gap_2()
+        .gap_1()
         .px_4()
         .py_1()
         .border_b_1()
         .border_color(theme.border)
-        .child(
-            Icon::new(IconName::LayoutDashboard)
-                .small()
-                .text_color(theme.muted_foreground),
-        )
-        .child(div().text_sm().text_color(theme.muted_foreground).child("Template"))
         .child(picker)
-        .child(div().text_sm().text_color(theme.muted_foreground).child("Paper"))
+        .child(div().w(px(1.)).h_4().bg(theme.border))
         .child(paper)
-        .child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(if read_only {
-                    "Kept as it was sent"
-                } else {
-                    "Changes the look, not what it says"
-                }),
-        )
+        .when(read_only, |this| {
+            this.child(div().flex_1()).child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Sent version"),
+            )
+        })
 }
 
 fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
@@ -1285,8 +1287,9 @@ fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
     Button::new("template")
         .label(typeset::template(current).name)
         .dropdown_caret(true)
-        .outline()
+        .ghost()
         .small()
+        .tooltip("Résumé template")
         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
             for template in &typeset::TEMPLATES {
                 menu = menu.menu_with_check(
@@ -1304,8 +1307,9 @@ fn paper_menu(current: Paper) -> impl IntoElement {
     Button::new("paper")
         .label(current.label())
         .dropdown_caret(true)
-        .outline()
+        .ghost()
         .small()
+        .tooltip("Paper size")
         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
             for paper in Paper::ALL {
                 menu = menu.menu_with_check(
@@ -1325,7 +1329,7 @@ fn job_header(
     cx: &Context<JobView>,
 ) -> impl IntoElement {
     let mut details = vec![
-        job.company.clone(),
+        job.title.clone(),
         application_view::status_label(job, Utc::now()),
     ];
     if let Some(generated_at) = generated_at {
@@ -1336,10 +1340,9 @@ fn job_header(
     }
 
     h_flex()
-        .flex_none()
+        .flex_1()
+        .min_w(px(160.))
         .gap_2()
-        .px_2()
-        .py_2()
         .child(
             Button::new("back")
                 .ghost()
@@ -1355,7 +1358,7 @@ fn job_header(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .truncate()
-                        .child(job.title.clone()),
+                        .child(job.company.clone()),
                 )
                 .child(
                     div()
@@ -1406,7 +1409,7 @@ fn sent_notice(
             .bg(theme.secondary)
             .text_sm()
             .child(Icon::new(IconName::Info).small().text_color(theme.muted_foreground))
-            .child(div().flex_1().child(text))
+            .child(div().flex_1().min_w_0().child(text))
             .child(
                 Button::new("toggle-sent")
                     .label(label)

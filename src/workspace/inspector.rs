@@ -77,7 +77,7 @@ impl RenderOnce for Inspector {
         let theme = cx.theme();
         v_flex()
             .size_full()
-            .bg(theme.sidebar)
+            .bg(theme.popover)
             .border_l_1()
             .border_color(theme.border)
             .child(
@@ -86,7 +86,8 @@ impl RenderOnce for Inspector {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .p_3()
+                    .px_5()
+                    .py_4()
                     .child(heading("Source", None, cx))
                     .child(source),
             )
@@ -96,7 +97,8 @@ impl RenderOnce for Inspector {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .p_3()
+                    .px_5()
+                    .py_4()
                     .border_t_1()
                     .border_color(theme.border)
                     .child(heading("Unsupported claims", Some(claims.len()), cx))

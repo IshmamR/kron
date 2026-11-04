@@ -13,6 +13,7 @@ use gpui_kit::{
 use crate::database::Database;
 use crate::model::JobId;
 use crate::model::commands::{self, NewJob};
+use super::parts::caption;
 
 /// The longest each field may be, in characters, as the database keeps them.
 const TITLE_LENGTH: usize = 256;
@@ -53,7 +54,8 @@ impl Render for JobForm {
                 .child(text)
         };
         v_flex()
-            .gap_3()
+            .gap_4()
+            .child(caption("Add the role you're interested in and the posting it belongs to.", cx))
             .child(
                 h_flex()
                     .gap_3()
@@ -61,12 +63,14 @@ impl Render for JobForm {
                         v_flex()
                             .flex_1()
                             .gap_1()
-                            .child(label("Title"))
+                            .min_w_0()
+                            .child(label("Role"))
                             .child(Input::new(&self.title)),
                     )
                     .child(
                         v_flex()
                             .flex_1()
+                            .min_w_0()
                             .gap_1()
                             .child(label("Company"))
                             .child(Input::new(&self.company)),
@@ -75,13 +79,13 @@ impl Render for JobForm {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(label("Link"))
+                    .child(label("Posting link (optional)"))
                     .child(Input::new(&self.link)),
             )
             .child(
                 v_flex()
                     .gap_1()
-                    .child(label("Description"))
+                    .child(label("Job description"))
                     .child(Textarea::new(&self.description)),
             )
             .children(
@@ -91,11 +95,15 @@ impl Render for JobForm {
             )
             .child(
                 h_flex()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .justify_end()
                     .gap_2()
                     .child(
                         Button::new("cancel-job")
                             .label("Cancel")
+                            .ghost()
                             .small()
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(JobFormEvent::Cancelled))),
                     )

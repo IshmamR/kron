@@ -33,7 +33,7 @@ impl Render for InstructionsForm {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         v_flex()
-            .gap_3()
+            .gap_4()
             .child(caption(
                 "Anything to steer it, like what to lead with or leave out. It can change \
                  what's shown and in what order, never make a line say more than your facts.",
@@ -47,11 +47,15 @@ impl Render for InstructionsForm {
             )
             .child(
                 h_flex()
+                    .pt_3()
+                    .border_t_1()
+                    .border_color(theme.border)
                     .justify_end()
                     .gap_2()
                     .child(
                         Button::new("cancel-generate")
                             .label("Cancel")
+                            .ghost()
                             .small()
                             .on_click(
                                 cx.listener(|_, _, _, cx| {

@@ -164,47 +164,54 @@ impl Render for FactsPage {
             }))
             .on_action(cx.listener(|this, _: &AddFacts, window, cx| this.add_note(window, cx)))
             .size_full()
+            .flex()
+            .flex_col()
+            .child(self.render_header(cx))
             .child(
-                h_resizable("facts-page")
-                    .with_state(&self.layout)
-                    .child(
-                        resizable_panel()
-                            .size(LIST_WIDTH)
-                            .size_range(LIST_MIN_WIDTH..LIST_MAX_WIDTH)
-                            .child(
-                                v_flex()
+                div().flex_1().min_h_0().child(
+                    h_resizable("facts-page")
+                        .with_state(&self.layout)
+                        .child(
+                            resizable_panel()
+                                .size(LIST_WIDTH)
+                                .size_range(LIST_MIN_WIDTH..LIST_MAX_WIDTH)
+                                .child(
+                                    v_flex()
+                                        .size_full()
+                                        .child(self.render_toolbar(cx))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .px_4()
+                                                .py_2()
+                                                .border_b_1()
+                                                .border_color(theme.border)
+                                                .key_context(SEARCH_CONTEXT)
+                                                .child(
+                                                    Input::new(&self.search)
+                                                        .prefix(
+                                                            Icon::new(IconName::Search)
+                                                                .text_color(theme.muted_foreground),
+                                                        )
+                                                        .small()
+                                                        .cleanable(true),
+                                                ),
+                                        )
+                                        .child(List::new(&self.list).flex_1().min_h_0()),
+                                ),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                div()
+                                    .id("fact-detail")
                                     .size_full()
-                                    .child(self.render_toolbar(cx))
+                                    .overflow_y_scrollbar()
                                     .child(
-                                        div()
-                                            .flex_none()
-                                            .px_2()
-                                            .py_1()
-                                            .border_b_1()
-                                            .border_color(theme.border)
-                                            .key_context(SEARCH_CONTEXT)
-                                            .child(
-                                                Input::new(&self.search)
-                                                    .prefix(
-                                                        Icon::new(IconName::Search)
-                                                            .text_color(theme.muted_foreground),
-                                                    )
-                                                    .cleanable(true)
-                                                    .appearance(false),
-                                            ),
-                                    )
-                                    .child(List::new(&self.list).flex_1().min_h_0()),
+                                        div().max_w(DETAIL_MAX_WIDTH).px_6().py_5().child(detail),
+                                    ),
                             ),
-                    )
-                    .child(
-                        resizable_panel().child(
-                            div()
-                                .id("fact-detail")
-                                .size_full()
-                                .overflow_y_scrollbar()
-                                .child(div().max_w(DETAIL_MAX_WIDTH).p_4().child(detail)),
                         ),
-                    ),
+                ),
             )
     }
 }
@@ -633,6 +640,45 @@ impl FactsPage {
         }));
     }
 
+    fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
+        let count = self.list.read(cx).delegate().all().len();
+        h_flex()
+            .flex_none()
+            .flex_wrap()
+            .justify_between()
+            .gap_3()
+            .px_6()
+            .py_4()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_baseline()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Career facts"),
+                    )
+                    .child(caption(
+                        if count == 1 {
+                            "1 fact".to_string()
+                        } else {
+                            format!("{count} facts")
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                Button::new("add-facts")
+                    .label("Add facts")
+                    .icon(IconName::Plus)
+                    .small()
+                    .on_click(cx.listener(|this, _, window, cx| this.open_add_form(window, cx))),
+            )
+    }
+
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
         let list = self.list.read(cx).delegate();
         let count = |filter: Filter| list.all().iter().filter(|fact| filter.includes(fact)).count();
@@ -642,36 +688,21 @@ impl FactsPage {
             .position(|&each| each == filter)
             .unwrap_or_default();
 
-        h_flex()
-            .flex_none()
-            .gap_2()
-            .px_2()
-            .py_2()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .child(
-                TabBar::new("fact-filter")
-                    .segmented()
-                    .small()
-                    .flex_1()
-                    .selected_index(selected_index)
-                    .children(Filter::ALL.map(|filter| {
-                        Tab::new().label(format!("{} {}", filter.label(), count(filter)))
-                    }))
-                    .on_click(cx.listener(|this, index: &usize, window, cx| {
-                        if let Some(&filter) = Filter::ALL.get(*index) {
-                            this.set_filter(filter, window, cx);
-                        }
-                    })),
-            )
-            .child(
-                Button::new("add-facts")
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .small()
-                    .tooltip("Add facts")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_add_form(window, cx))),
-            )
+        h_flex().flex_none().gap_2().px_4().pt_3().child(
+            TabBar::new("fact-filter")
+                .segmented()
+                .small()
+                .flex_1()
+                .selected_index(selected_index)
+                .children(Filter::ALL.map(|filter| {
+                    Tab::new().label(format!("{} {}", filter.label(), count(filter)))
+                }))
+                .on_click(cx.listener(|this, index: &usize, window, cx| {
+                    if let Some(&filter) = Filter::ALL.get(*index) {
+                        this.set_filter(filter, window, cx);
+                    }
+                })),
+        )
     }
 
     fn render_fact(&self, fact: &ListedFact, detail: &Detail, cx: &Context<Self>) -> AnyElement {

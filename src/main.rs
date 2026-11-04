@@ -24,7 +24,7 @@ use dev_overlay::DevOverlay;
 use model::settings::{DeviceSettings, SavedWindow, WindowState};
 use workspace::Workspace;
 
-const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1536.), px(1095.));
+const DEFAULT_WINDOW_SIZE: Size<Pixels> = size(px(1440.), px(900.));
 /// Same as Zed.
 const MIN_WINDOW_SIZE: Size<Pixels> = size(px(360.), px(240.));
 

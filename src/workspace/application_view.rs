@@ -131,7 +131,8 @@ impl Render for ApplicationView {
                                 .child(
                                     v_flex()
                                         .max_w(TIMELINE_MAX_WIDTH)
-                                        .p_4()
+                                        .px_6()
+                                        .py_5()
                                         .gap_5()
                                         .child(self.render_status(job, now, cx))
                                         .when(adding, |this| {
@@ -494,7 +495,7 @@ impl ApplicationView {
             .position(|&kind| kind == form.interview_kind)
             .unwrap_or_default();
         let field = |label: &'static str, child: AnyElement| {
-            v_flex().gap_1().child(caption(label, cx)).child(child)
+            v_flex().gap_2().child(caption(label, cx)).child(child)
         };
 
         let theme = cx.theme();
@@ -502,8 +503,10 @@ impl ApplicationView {
             .key_context(FORM_CONTEXT)
             .on_action(cx.listener(|this, _: &SaveEvent, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &CancelEvent, window, cx| this.cancel(window, cx)))
-            .p_3()
-            .gap_3()
+            .p_4()
+            .gap_4()
+            .rounded_lg()
+            .bg(theme.popover)
             .border_1()
             .border_color(theme.list_active_border)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(title))
@@ -757,9 +760,10 @@ impl ApplicationView {
             .id("job-details")
             .size_full()
             .overflow_y_scrollbar()
-            .p_3()
+            .px_5()
+            .py_4()
             .gap_5()
-            .bg(theme.sidebar)
+            .bg(theme.popover)
             .border_l_1()
             .border_color(theme.border)
             .child(

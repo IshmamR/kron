@@ -5,10 +5,11 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Context, Entity, EventEmitter, FontWeight, IntoElement, SharedString, Subscription, Task,
-    Window, div, prelude::*,
+    Window, div, prelude::*, px,
 };
 use rusqlite::Connection;
 
@@ -155,8 +156,9 @@ impl Onboarding {
                     h_flex()
                         .w_full()
                         .max_w(PAGE_MAX_WIDTH)
-                        .px_4()
+                        .px_6()
                         .pt_8()
+                        .pb_3()
                         .gap_4()
                         .items_start()
                         .justify_between()
@@ -167,7 +169,7 @@ impl Onboarding {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_xl()
+                                        .text_2xl()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child("Welcome to Kron"),
                                 )
@@ -201,52 +203,64 @@ impl Onboarding {
         };
         let description = found.map(Found::description).unwrap_or_default();
         let empty = self.name.read(cx).value().trim().is_empty();
-        h_flex().size_full().items_start().justify_center().child(
-            v_flex()
-                .w_full()
-                .max_w(PAGE_MAX_WIDTH)
-                .px_4()
-                .pt_8()
-                .gap_3()
-                .child(
-                    div()
-                        .text_xl()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
-                )
-                .child(caption(description, cx))
-                .children(
-                    self.problem
-                        .clone()
-                        .map(|problem| notice(problem, cx.theme().danger)),
-                )
-                .child(Input::new(&self.name))
-                .child(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("skip-name")
-                                .label("Skip")
-                                .ghost()
-                                .small()
-                                .on_click(
-                                    cx.listener(|_, _, _, cx| cx.emit(OnboardingEvent::Done)),
-                                ),
-                        )
-                        .child(
-                            Button::new("confirm-name")
-                                .label("Confirm")
-                                .primary()
-                                .small()
-                                .disabled(empty)
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.confirm(window, cx)),
-                                ),
-                        ),
-                ),
-        )
+        h_flex()
+            .id("onboarding-name")
+            .size_full()
+            .p_6()
+            .overflow_y_scrollbar()
+            .items_start()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(480.))
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .shadow_sm()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(caption(description, cx))
+                    .children(
+                        self.problem
+                            .clone()
+                            .map(|problem| notice(problem, cx.theme().danger)),
+                    )
+                    .child(Input::new(&self.name))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("skip-name")
+                                    .label("Skip")
+                                    .ghost()
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|_, _, _, cx| cx.emit(OnboardingEvent::Done)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("confirm-name")
+                                    .label("Confirm")
+                                    .primary()
+                                    .small()
+                                    .disabled(empty)
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.confirm(window, cx)),
+                                    ),
+                            ),
+                    ),
+            )
     }
+
 }
 
 enum Step {

@@ -1,17 +1,21 @@
+mod palette;
+
+pub use palette::{Palette, Palettes};
+
 use std::process::Command;
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, AppContext as _, Global, Window};
+use gpui_kit::{Anchor, App, AppContext as _, Global, Hsla, Window, rgb};
 
 /// gpui's Linux default (IBM Plex Sans) is rarely installed, and the fallback
 /// it lands on often has no bold. Inter is common and has every weight.
+#[cfg(target_os = "linux")]
 const UI_FONT: &str = "Inter";
-const LIGHT_LIST_ACTIVE_OPACITY: f32 = 0.3;
 
 pub fn init(cx: &mut App) {
     cx.set_global(Appearance::default());
-    // Theme files only replace the font when they name one, so this survives
-    // switching between light and dark.
+    cx.set_global(Palettes::default());
+    #[cfg(target_os = "linux")]
     Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
     Motion::default().set(cx);
 }
@@ -48,12 +52,10 @@ impl Appearance {
             Self::Light => Theme::change(ThemeMode::Light, Some(window), cx),
             Self::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
         }
-        // The light theme's selected list row is too faint to find at a
-        // glance; tint it with the selection border's blue instead.
+        let palettes = Palettes::current(cx);
         Theme::update(cx, |theme| {
-            if !theme.is_dark() {
-                theme.list_active = theme.list_active_border.opacity(LIGHT_LIST_ACTIVE_OPACITY);
-            }
+            let palette = palettes.for_mode(theme.is_dark());
+            apply_gallery_palette(theme, palette);
         });
     }
 
@@ -64,6 +66,82 @@ impl Appearance {
             Self::Dark => "Dark",
         }
     }
+}
+
+fn apply_gallery_palette(theme: &mut Theme, palette: Palette) {
+    theme.notification.placement = Anchor::BottomRight;
+    let palette = palette.colors();
+    let color = |value| Hsla::from(rgb(value));
+    let background = color(palette.background);
+    let sidebar = color(palette.sidebar);
+    let surface = color(palette.surface);
+    let muted = color(palette.muted_surface);
+    let hover = color(palette.hover);
+    let border = color(palette.border);
+    let ink = color(palette.ink);
+    let secondary = color(palette.secondary);
+    let accent = color(palette.accent);
+    let selection = color(palette.selection);
+    let accent_text = color(palette.accent_text);
+
+    theme.background = background;
+    theme.foreground = ink;
+    theme.secondary = muted;
+    theme.secondary_foreground = ink;
+    theme.secondary_hover = hover;
+    theme.secondary_active = selection;
+    theme.button_secondary = muted;
+    theme.button_secondary_foreground = ink;
+    theme.button_secondary_hover = hover;
+    theme.button_secondary_active = selection;
+    theme.muted = muted;
+    theme.muted_foreground = secondary;
+    theme.border = border;
+    theme.input = border;
+    theme.ring = accent;
+    theme.caret = accent;
+    theme.selection = selection;
+    theme.link = accent;
+    theme.info = accent;
+    theme.danger = color(palette.danger);
+    theme.warning = color(palette.warning);
+    theme.accent = selection;
+    theme.accent_foreground = ink;
+    theme.popover = surface;
+    theme.popover_foreground = ink;
+    theme.group_box = surface;
+    theme.group_box_foreground = ink;
+
+    theme.title_bar = sidebar;
+    theme.title_bar_border = border;
+    theme.sidebar = sidebar;
+    theme.sidebar_border = border;
+    theme.sidebar_foreground = ink;
+    theme.sidebar_accent = selection;
+    theme.sidebar_accent_foreground = ink;
+    theme.colors.list = background;
+    theme.list_hover = hover;
+    theme.list_active = selection;
+    theme.list_active_border = accent;
+
+    theme.tab_bar = surface;
+    theme.tab = background;
+    theme.tab_bar_segmented = muted;
+    theme.tab_active = surface;
+    theme.tab_active_foreground = ink;
+    theme.tab_foreground = secondary;
+    theme.button = surface;
+    theme.button_foreground = ink;
+    theme.button_hover = muted;
+    theme.button_active = hover;
+    theme.primary = accent;
+    theme.primary_foreground = accent_text;
+    theme.primary_hover = accent.opacity(0.9);
+    theme.primary_active = accent.opacity(0.8);
+    theme.button_primary = theme.primary;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
 }
 
 /// Whether things slide and fade, like the sidebar collapsing. Reduced, they

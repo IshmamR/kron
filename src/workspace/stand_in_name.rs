@@ -39,7 +39,8 @@ impl Render for StandInName {
         let unchanged = typed.trim().is_empty() || typed.trim() == self.stored.as_ref();
         v_flex()
             .w(FIELD_WIDTH)
-            .gap_1()
+            .max_w_full()
+            .gap_2()
             .child(
                 h_flex()
                     .gap_2()

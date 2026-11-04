@@ -124,16 +124,17 @@ impl Render for RedactionCheck {
             .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|_, _: &Confirm, _, cx| cx.emit(RedactionCheckEvent::Confirmed)))
             .size_full()
-            .gap_3()
+            .gap_4()
             .child(
                 h_flex()
+                    .flex_wrap()
                     .justify_between()
-                    .gap_2()
+                    .gap_3()
                     .child(
                         div()
-                            .text_lg()
+                            .text_2xl()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("Hide your details"),
+                            .child("Privacy review"),
                     )
                     .child(
                         h_flex()
@@ -163,7 +164,10 @@ impl Render for RedactionCheck {
                  is hidden. Click one to send it as written; click again to hide it.",
                 cx,
             ))
-            .child(caption(self.summary(), cx))
+            .child(
+                div().p_3().rounded_lg().bg(theme.list_active)
+                    .text_sm().child(self.summary()),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -181,10 +185,11 @@ impl Render for RedactionCheck {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p_3()
-                    .rounded(theme.radius)
+                    .p_5()
+                    .rounded(theme.radius_lg)
                     .border_1()
                     .border_color(theme.border)
+                    .bg(theme.popover)
                     .text_sm()
                     .child(text),
             )

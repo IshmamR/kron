@@ -53,9 +53,11 @@ impl Render for AiSettings {
         };
         v_flex()
             .w(FIELD_WIDTH)
-            .gap_1()
+            .max_w_full()
+            .gap_2()
             .child(
                 h_flex()
+                    .flex_wrap()
                     .gap_2()
                     .child(
                         div()
