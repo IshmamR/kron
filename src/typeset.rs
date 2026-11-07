@@ -360,7 +360,11 @@ pub fn template(key: &str) -> &'static Template {
     TEMPLATES
         .iter()
         .find(|template| template.key == key)
-        .or_else(|| TEMPLATES.iter().find(|template| template.key == DEFAULT_TEMPLATE))
+        .or_else(|| {
+            TEMPLATES
+                .iter()
+                .find(|template| template.key == DEFAULT_TEMPLATE)
+        })
         .unwrap_or(&TEMPLATES[0])
 }
 
@@ -561,7 +565,9 @@ fn contact_link(text: &str) -> Option<String> {
     if text.contains('@') {
         Some(format!("mailto:{text}"))
     } else if text.starts_with('+')
-        || text.chars().all(|character| character.is_ascii_digit() || " -()".contains(character))
+        || text
+            .chars()
+            .all(|character| character.is_ascii_digit() || " -()".contains(character))
     {
         let digits: String = text
             .chars()
@@ -664,13 +670,20 @@ impl BoxCollector {
 /// those. A sidebar's lines don't reach under the main column's, so the two
 /// stay apart.
 fn column(line_box: &LineBox, boxes: &[LineBox]) -> (f32, f32) {
-    let mut span = (run_end(line_box, boxes, false), run_end(line_box, boxes, true));
+    let mut span = (
+        run_end(line_box, boxes, false),
+        run_end(line_box, boxes, true),
+    );
     // Each round only widens, so this settles; the bound is a guard.
     for _ in 0..boxes.len() {
         let wider = boxes
             .iter()
-            .filter(|other| other.page == line_box.page && other.left < span.1 && span.0 < other.right)
-            .fold(span, |(left, right), other| (left.min(other.left), right.max(other.right)));
+            .filter(|other| {
+                other.page == line_box.page && other.left < span.1 && span.0 < other.right
+            })
+            .fold(span, |(left, right), other| {
+                (left.min(other.left), right.max(other.right))
+            });
         if wider == span {
             break;
         }
@@ -882,7 +895,10 @@ mod tests {
             contact_link("alex@example.com").as_deref(),
             Some("mailto:alex@example.com")
         );
-        assert_eq!(contact_link("+880 1711 555 210").as_deref(), Some("tel:+8801711555210"));
+        assert_eq!(
+            contact_link("+880 1711 555 210").as_deref(),
+            Some("tel:+8801711555210")
+        );
         assert_eq!(
             contact_link("github.com/alexr").as_deref(),
             Some("https://github.com/alexr")
@@ -912,7 +928,8 @@ mod tests {
                 let y = (line_box.top + line_box.bottom) / 2.;
                 let found = typeset.layout.line_at(line_box.page, x, y);
                 let text = |id: Option<LineId>| {
-                    id.and_then(|id| resume.line(id)).map(|line| line.text.clone())
+                    id.and_then(|id| resume.line(id))
+                        .map(|line| line.text.clone())
                 };
                 assert_eq!(
                     text(found),
@@ -955,20 +972,38 @@ mod tests {
             if resume.template != "sidebar" {
                 continue;
             }
-            let Some(Block::Header { name, .. }) = resume.sections.first().and_then(|section| section.blocks.first()) else {
+            let Some(Block::Header { name, .. }) = resume
+                .sections
+                .first()
+                .and_then(|section| section.blocks.first())
+            else {
                 panic!("no header");
             };
-            let Some(main_left) = typeset.layout.boxes_of(name.id).next().map(|line_box| line_box.left) else {
+            let Some(main_left) = typeset
+                .layout
+                .boxes_of(name.id)
+                .next()
+                .map(|line_box| line_box.left)
+            else {
                 panic!("the name isn't on the page");
             };
             for line_box in &typeset.layout.boxes {
                 let in_main = line_box.left >= main_left - 1.;
                 let text = resume.line(line_box.line).map(|line| &line.text);
                 if in_main {
-                    assert!(line_box.hit_left >= main_left - 1., "{text:?} reaches into the sidebar");
-                    assert!(line_box.mark_left >= main_left - 1., "{text:?} is marked in the sidebar");
+                    assert!(
+                        line_box.hit_left >= main_left - 1.,
+                        "{text:?} reaches into the sidebar"
+                    );
+                    assert!(
+                        line_box.mark_left >= main_left - 1.,
+                        "{text:?} is marked in the sidebar"
+                    );
                 } else {
-                    assert!(line_box.hit_right < main_left, "{text:?} reaches into the main column");
+                    assert!(
+                        line_box.hit_right < main_left,
+                        "{text:?} reaches into the main column"
+                    );
                 }
             }
         }
@@ -977,17 +1012,25 @@ mod tests {
     #[test]
     fn an_entry_title_is_on_the_page_its_first_bullet_is() {
         for (resume, typeset) in every_sample_in_every_template() {
-            let entries = resume.sections.iter().flat_map(|section| &section.blocks).filter_map(
-                |block| match block {
+            let entries = resume
+                .sections
+                .iter()
+                .flat_map(|section| &section.blocks)
+                .filter_map(|block| match block {
                     Block::Entry(entry) => Some(entry),
                     _ => None,
-                },
-            );
+                });
             for entry in entries {
                 let Some(bullet) = entry.bullets.first() else {
                     continue;
                 };
-                let page = |line: &Line| typeset.layout.boxes_of(line.id).next().map(|line_box| line_box.page);
+                let page = |line: &Line| {
+                    typeset
+                        .layout
+                        .boxes_of(line.id)
+                        .next()
+                        .map(|line_box| line_box.page)
+                };
                 assert_eq!(
                     page(&entry.title),
                     page(bullet),
@@ -1005,19 +1048,31 @@ mod tests {
             let order = typeset.layout.reading_order();
             let position = |line: &Line| order.iter().position(|&id| id == line.id);
             for line in resume.lines() {
-                assert!(position(line).is_some(), "{:?} isn't in the order", line.text);
+                assert!(
+                    position(line).is_some(),
+                    "{:?} isn't in the order",
+                    line.text
+                );
             }
-            let Some(Block::Header { name, contacts }) =
-                resume.sections.first().and_then(|section| section.blocks.first())
+            let Some(Block::Header { name, contacts }) = resume
+                .sections
+                .first()
+                .and_then(|section| section.blocks.first())
             else {
                 panic!("no header");
             };
             if resume.template == "sidebar" {
                 // The contacts are in the sidebar, read before the main column.
-                assert!(contacts.iter().all(|contact| position(contact) < position(name)));
+                assert!(
+                    contacts
+                        .iter()
+                        .all(|contact| position(contact) < position(name))
+                );
             } else {
                 assert!(
-                    contacts.iter().all(|contact| position(name) < position(contact)),
+                    contacts
+                        .iter()
+                        .all(|contact| position(name) < position(contact)),
                     "in {:?}",
                     resume.template
                 );

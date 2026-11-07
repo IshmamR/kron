@@ -114,7 +114,10 @@ impl Writer {
     }
 
     /// `execute`, without touching the history.
-    fn run<R>(&mut self, command: impl FnOnce(&mut Write) -> Result<R, Error>) -> Result<Ran<R>, Error> {
+    fn run<R>(
+        &mut self,
+        command: impl FnOnce(&mut Write) -> Result<R, Error>,
+    ) -> Result<Ran<R>, Error> {
         let now = now();
         let sync_on: bool =
             self.device
@@ -173,7 +176,6 @@ impl Writer {
         })
     }
 }
-
 
 /// What a command writes through. Every write goes through `insert`, `set`,
 /// `update`, `clear` or `delete`, which also note the change for the views,
@@ -612,7 +614,9 @@ fn owned_value(value: &dyn ToSql) -> Result<Value, Error> {
             ValueRef::Blob(bytes) => Value::Blob(bytes.to_vec()),
         }),
         ToSqlOutput::Owned(value) => Ok(value),
-        other => Err(Error::Misuse(format!("a column holds a value, not {other:?}"))),
+        other => Err(Error::Misuse(format!(
+            "a column holds a value, not {other:?}"
+        ))),
     }
 }
 

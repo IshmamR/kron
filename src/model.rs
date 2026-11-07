@@ -14,10 +14,8 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
+pub use application::{Application, InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind};
 pub use section::{citations, fact_changes};
-pub use application::{
-    Application, InterviewKind, JobEvent, JobEventKind, Nudge, Stage, StepKind,
-};
 
 /// Share of the shorter fact's words the longer must contain to be offered as
 /// a duplicate.
@@ -159,11 +157,17 @@ pub enum SectionKind {
 /// same lines can be set in any design.
 #[derive(Clone, Debug)]
 pub enum Block {
-    Header { name: Line, contacts: Vec<Line> },
+    Header {
+        name: Line,
+        contacts: Vec<Line>,
+    },
     /// A role, degree or project.
     Entry(Box<EntryBlock>),
     /// "Languages: Rust, Go, Python".
-    Skills { label: Option<Line>, items: Line },
+    Skills {
+        label: Option<Line>,
+        items: Line,
+    },
     /// A paragraph, like a summary.
     Text(Line),
     /// An item of a list outside any entry, like a talk.
@@ -278,7 +282,11 @@ mod tests {
 
     fn fact_text(connection: &rusqlite::Connection, start: &str) -> Result<String, Error> {
         let fact = sample::fact(connection, start)?;
-        Ok(connection.query_row("SELECT text FROM facts WHERE id = ?1", [fact.0], |row| row.get(0))?)
+        Ok(
+            connection.query_row("SELECT text FROM facts WHERE id = ?1", [fact.0], |row| {
+                row.get(0)
+            })?,
+        )
     }
 
     #[test]
@@ -295,7 +303,9 @@ mod tests {
             !possible_duplicate(&latency)(&latency.replace("95", "120")),
             "a different result"
         );
-        assert!(possible_duplicate(&latency)(&format!("{latency} with caching")));
+        assert!(possible_duplicate(&latency)(&format!(
+            "{latency} with caching"
+        )));
         Ok(())
     }
 }

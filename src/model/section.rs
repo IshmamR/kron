@@ -61,7 +61,7 @@ impl Section {
         // The block being gathered: its section, id, kind and lines so far.
         let mut block: Option<(Uuid, Uuid, String, Vec<RoledLine>)> = None;
         let finish = |block: Option<(Uuid, Uuid, String, Vec<RoledLine>)>,
-                          sections: &mut Vec<(Uuid, Section)>| {
+                      sections: &mut Vec<(Uuid, Section)>| {
             let Some((section, _, kind, lines)) = block else {
                 return;
             };
@@ -181,7 +181,9 @@ pub fn citations(
              JOIN facts AS roots ON roots.id = chains.root_id AND roots.merged_into IS NULL
              ORDER BY cited.line_id, cited.sort_key",
         )?
-        .query_map([generation.0], |row| Ok((LineId(row.get(0)?), FactId(row.get(1)?))))?
+        .query_map([generation.0], |row| {
+            Ok((LineId(row.get(0)?), FactId(row.get(1)?)))
+        })?
         .collect::<Result<_, _>>()?;
     let mut citations: Vec<(LineId, FactId)> = Vec::with_capacity(rows.len());
     for citation in rows {
@@ -195,7 +197,10 @@ pub fn citations(
 /// How each fact the résumé was generated from differs from the version it
 /// was generated from, if it does. A merged fact counts as the one it was
 /// merged into.
-pub fn fact_changes(connection: &Connection, generation: ResumeId) -> Result<Vec<(FactId, FactChange)>, Error> {
+pub fn fact_changes(
+    connection: &Connection,
+    generation: ResumeId,
+) -> Result<Vec<(FactId, FactChange)>, Error> {
     let versions: Vec<(FactId, bool, bool, bool)> = connection
         .prepare_cached(
             "WITH RECURSIVE chains(fact_id, root_id) AS (
@@ -345,7 +350,12 @@ mod tests {
                 let mut unique = line.cites.clone();
                 unique.sort();
                 unique.dedup();
-                assert_eq!(unique.len(), line.cites.len(), "{:?} cites a fact twice", line.text);
+                assert_eq!(
+                    unique.len(),
+                    line.cites.len(),
+                    "{:?} cites a fact twice",
+                    line.text
+                );
                 if citing_merged.contains(&line.id) {
                     assert!(line.cites.contains(&latency), "{:?}", line.text);
                 }

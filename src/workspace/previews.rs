@@ -164,10 +164,9 @@ impl Previews {
                 })
                 .await;
             let render = match typeset {
-                Ok(typeset) => Render::Ready(Arc::new(RenderedPages::new(
-                    typeset.pages,
-                    typeset.layout,
-                ))),
+                Ok(typeset) => {
+                    Render::Ready(Arc::new(RenderedPages::new(typeset.pages, typeset.layout)))
+                }
                 Err(error) => {
                     eprintln!("couldn't render résumé {:?}: {error}", key.resume);
                     Render::Failed(error.into())
@@ -332,9 +331,7 @@ mod tests {
 
     fn current_resumes(connection: &Connection) -> rusqlite::Result<Vec<(JobId, ResumeId)>> {
         connection
-            .prepare(
-                "SELECT job_id, generation_id FROM current_generations WHERE kind = 'resume'",
-            )?
+            .prepare("SELECT job_id, generation_id FROM current_generations WHERE kind = 'resume'")?
             .query_map([], |row| Ok((JobId(row.get(0)?), ResumeId(row.get(1)?))))?
             .collect()
     }
@@ -356,12 +353,11 @@ mod tests {
         let mut app = TestAppContext::single();
         let (database, _directory) = testing::open_sample(&mut app);
         let previews = app.new(|cx| Previews::new(database.clone(), cx));
-        let resumes = match database.read_with(&app, |database, _| {
-            current_resumes(database.connection())
-        }) {
-            Ok(resumes) => resumes,
-            Err(error) => panic!("{error}"),
-        };
+        let resumes =
+            match database.read_with(&app, |database, _| current_resumes(database.connection())) {
+                Ok(resumes) => resumes,
+                Err(error) => panic!("{error}"),
+            };
         let get_all = |app: &mut TestAppContext| {
             for &(_, resume) in &resumes {
                 previews.update(app, |previews, cx| previews.get(resume, 0.25, cx));
@@ -375,7 +371,9 @@ mod tests {
             let render = previews.update(&mut app, |previews, cx| previews.get(resume, 0.25, cx));
             assert!(matches!(render, Some(Render::Ready(_))));
         }
-        let read = |app: &mut TestAppContext| previews.read_with(app, |previews, _| previews.markup_hashes.len());
+        let read = |app: &mut TestAppContext| {
+            previews.read_with(app, |previews, _| previews.markup_hashes.len())
+        };
         assert_eq!(read(&mut app), resumes.len());
 
         let (job, switched) = resumes[0];
@@ -403,13 +401,19 @@ mod tests {
         // The first pass starts nothing until the fonts load.
         for _ in 0..2 {
             for &resume in resumes {
-                previews.update(app, |previews, cx| previews.get(resume, pixels_per_point, cx));
+                previews.update(app, |previews, cx| {
+                    previews.get(resume, pixels_per_point, cx)
+                });
                 app.run_until_parked();
             }
         }
         resumes
             .iter()
-            .map(|&resume| previews.update(app, |previews, cx| previews.get(resume, pixels_per_point, cx)))
+            .map(|&resume| {
+                previews.update(app, |previews, cx| {
+                    previews.get(resume, pixels_per_point, cx)
+                })
+            })
             .collect()
     }
 
@@ -466,11 +470,20 @@ mod tests {
         assert!(matches!(last, Some(Render::Ready(_))));
         drop(last);
         let largest = previews.read_with(&app, |previews, _| {
-            previews.slots.values().map(Slot::bytes).max().unwrap_or_default()
+            previews
+                .slots
+                .values()
+                .map(Slot::bytes)
+                .max()
+                .unwrap_or_default()
         });
         assert!(unheld_bytes(&app, &previews) <= MEMORY_BUDGET + largest);
         let kept = previews.read_with(&app, |previews, _| {
-            previews.slots.values().filter(|slot| slot.bytes() > 0).count()
+            previews
+                .slots
+                .values()
+                .filter(|slot| slot.bytes() > 0)
+                .count()
         });
         assert!(kept < resumes.len(), "some were evicted");
     }
@@ -497,7 +510,10 @@ mod tests {
                 .map(|(_, slot)| slot.bytes())
                 .sum::<usize>()
         });
-        assert_eq!(at_old_scale, 0, "the newer, larger renders fill the budget first");
+        assert_eq!(
+            at_old_scale, 0,
+            "the newer, larger renders fill the budget first"
+        );
     }
 
     #[test]
@@ -510,7 +526,9 @@ mod tests {
             ..
         } = open(&mut app);
         let resumes: Vec<ResumeId> = resumes.into_iter().map(|(_, resume)| resume).collect();
-        let Some(Some(Render::Ready(held))) = render_all(&mut app, &previews, &resumes[..1], 1.).pop() else {
+        let Some(Some(Render::Ready(held))) =
+            render_all(&mut app, &previews, &resumes[..1], 1.).pop()
+        else {
             panic!("no render");
         };
         render_all(&mut app, &previews, &resumes[1..], 1.);
@@ -528,14 +546,24 @@ mod tests {
             _directory,
         } = open(&mut app);
         let (job, resume) = resumes[0];
-        let Some(Some(Render::Ready(before))) = render_all(&mut app, &previews, &[resume], 0.25).pop() else {
+        let Some(Some(Render::Ready(before))) =
+            render_all(&mut app, &previews, &[resume], 0.25).pop()
+        else {
             panic!("no render");
         };
-        run(&mut app, &database, move |write| commands::set_template(write, job, "sidebar"));
-        let Some(Some(Render::Ready(after))) = render_all(&mut app, &previews, &[resume], 0.25).pop() else {
+        run(&mut app, &database, move |write| {
+            commands::set_template(write, job, "sidebar")
+        });
+        let Some(Some(Render::Ready(after))) =
+            render_all(&mut app, &previews, &[resume], 0.25).pop()
+        else {
             panic!("no render");
         };
         assert!(!Arc::ptr_eq(&before, &after));
-        assert_eq!(Arc::strong_count(&before), 1, "only this test still has the old one");
+        assert_eq!(
+            Arc::strong_count(&before),
+            1,
+            "only this test still has the old one"
+        );
     }
 }

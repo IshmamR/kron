@@ -59,7 +59,10 @@ pub fn written() -> Result<database::Writer, database::Error> {
 
 /// The sample fact whose text starts with `start`.
 #[cfg(test)]
-pub fn fact(connection: &rusqlite::Connection, start: &str) -> Result<super::FactId, database::Error> {
+pub fn fact(
+    connection: &rusqlite::Connection,
+    start: &str,
+) -> Result<super::FactId, database::Error> {
     Ok(super::FactId(connection.query_row(
         "SELECT id FROM facts WHERE text LIKE ?1 || '%' AND merged_into IS NULL
          ORDER BY id LIMIT 1",
@@ -70,7 +73,10 @@ pub fn fact(connection: &rusqlite::Connection, start: &str) -> Result<super::Fac
 
 /// The sample job at `company`.
 #[cfg(test)]
-pub fn job(connection: &rusqlite::Connection, company: &str) -> Result<super::JobId, database::Error> {
+pub fn job(
+    connection: &rusqlite::Connection,
+    company: &str,
+) -> Result<super::JobId, database::Error> {
     Ok(super::JobId(connection.query_row(
         "SELECT id FROM jobs WHERE company = ?1",
         [company],
@@ -106,7 +112,10 @@ mod tests {
         let kron = writer.kron();
         assert_eq!(count(kron, "documents")?, 4);
         assert_eq!(
-            count(kron, "files JOIN documents ON documents.file_hash = files.hash")?,
+            count(
+                kron,
+                "files JOIN documents ON documents.file_hash = files.hash"
+            )?,
             2,
             "one for each imported document"
         );

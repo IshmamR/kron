@@ -40,9 +40,14 @@ impl JobEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobEventKind {
     /// `resume` is the version sent, which regenerating doesn't change.
-    Applied { resume: Option<ResumeId> },
+    Applied {
+        resume: Option<ResumeId>,
+    },
     RecruiterReplied,
-    Interview { kind: InterviewKind, with: String },
+    Interview {
+        kind: InterviewKind,
+        with: String,
+    },
     Offer,
     Rejected,
     Withdrawn,
@@ -77,7 +82,10 @@ pub enum Stage {
     Applied,
     Replied,
     /// An interview, held or to come.
-    Interview { at: DateTime<Utc>, kind: InterviewKind },
+    Interview {
+        at: DateTime<Utc>,
+        kind: InterviewKind,
+    },
     Offer,
     Rejected,
     Withdrawn,
@@ -98,10 +106,17 @@ impl Stage {
 /// from its dates rather than stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Nudge {
-    InterviewSoon { at: DateTime<Utc> },
+    InterviewSoon {
+        at: DateTime<Utc>,
+    },
     /// Applied or heard back, then nothing for a while.
-    NoReply { days: i64 },
-    NoNewsSinceInterview { at: DateTime<Utc>, days: i64 },
+    NoReply {
+        days: i64,
+    },
+    NoNewsSinceInterview {
+        at: DateTime<Utc>,
+        days: i64,
+    },
 }
 
 /// A job, and the events of its application.
@@ -209,9 +224,7 @@ impl Application {
         }
         self.events
             .iter()
-            .filter(|event| {
-                matches!(event.kind, JobEventKind::Interview { .. }) && event.at > now
-            })
+            .filter(|event| matches!(event.kind, JobEventKind::Interview { .. }) && event.at > now)
             .min_by_key(|event| event.at)
     }
 
@@ -231,8 +244,13 @@ impl Application {
         if so_far.is_closed() || so_far == Stage::Offer {
             return so_far;
         }
-        match self.next_interview(now).map(|event| (event.at, &event.kind)) {
-            Some((at, JobEventKind::Interview { kind, .. })) => Stage::Interview { at, kind: *kind },
+        match self
+            .next_interview(now)
+            .map(|event| (event.at, &event.kind))
+        {
+            Some((at, JobEventKind::Interview { kind, .. })) => {
+                Stage::Interview { at, kind: *kind }
+            }
             _ => so_far,
         }
     }
@@ -243,7 +261,9 @@ impl Application {
             None | Some((_, JobEventKind::Note)) => Stage::NotApplied,
             Some((_, JobEventKind::Applied { .. })) => Stage::Applied,
             Some((_, JobEventKind::RecruiterReplied)) => Stage::Replied,
-            Some((at, JobEventKind::Interview { kind, .. })) => Stage::Interview { at, kind: *kind },
+            Some((at, JobEventKind::Interview { kind, .. })) => {
+                Stage::Interview { at, kind: *kind }
+            }
             Some((_, JobEventKind::Offer)) => Stage::Offer,
             Some((_, JobEventKind::Rejected)) => Stage::Rejected,
             Some((_, JobEventKind::Withdrawn)) => Stage::Withdrawn,
@@ -424,7 +444,10 @@ mod tests {
             (30, JobEventKind::Applied { resume: None }),
             (-3, interview()),
         ]);
-        assert!(matches!(application.nudge(now), Some(Nudge::InterviewSoon { .. })));
+        assert!(matches!(
+            application.nudge(now),
+            Some(Nudge::InterviewSoon { .. })
+        ));
         assert!(application.stage(now).is_interviewing());
     }
 
@@ -462,8 +485,10 @@ mod tests {
 
     #[test]
     fn of_two_steps_at_the_same_moment_the_one_logged_last_counts() {
-        let (mut application, now) =
-            application_with(vec![(1, JobEventKind::NoResponse), (1, JobEventKind::Offer)]);
+        let (mut application, now) = application_with(vec![
+            (1, JobEventKind::NoResponse),
+            (1, JobEventKind::Offer),
+        ]);
         let at = application.events[0].at;
         application.events[1].at = at;
         assert_eq!(application.stage(now), Stage::Offer);

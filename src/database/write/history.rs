@@ -108,7 +108,8 @@ impl Write<'_> {
         for step in steps.iter().rev() {
             match step {
                 Step::Fields { shape, key, fields } => {
-                    let key: Vec<&dyn ToSql> = key.iter().map(|value| value as &dyn ToSql).collect();
+                    let key: Vec<&dyn ToSql> =
+                        key.iter().map(|value| value as &dyn ToSql).collect();
                     let current =
                         self.read_fields(*shape, &key, fields.iter().map(|(field, _, _)| *field))?;
                     let unchanged = current.is_some_and(|current| {
@@ -124,7 +125,8 @@ impl Write<'_> {
                     self.update_row(*shape, &key, &before)?;
                 }
                 Step::Inserted { shape, key } => {
-                    let key: Vec<&dyn ToSql> = key.iter().map(|value| value as &dyn ToSql).collect();
+                    let key: Vec<&dyn ToSql> =
+                        key.iter().map(|value| value as &dyn ToSql).collect();
                     let deleted_at = self.read_fields(*shape, &key, ["deleted_at"].into_iter())?;
                     if deleted_at.as_deref() == Some(&[Value::Null]) {
                         let now = self.now;
@@ -166,9 +168,11 @@ mod tests {
     fn fact(writer: &Writer, id: Uuid) -> Result<Option<(String, Option<i64>)>, Error> {
         Ok(writer
             .kron()
-            .query_row("SELECT text, deleted_at FROM facts WHERE id = ?1", [id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT text, deleted_at FROM facts WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()?)
     }
 
@@ -183,7 +187,10 @@ mod tests {
         writer.execute(|write| write.set(facts::TEXT, id, &"Led the Go rewrite"))?;
 
         let changes = writer.undo()?;
-        assert!(changes.is_some_and(|changes| !changes.is_empty()), "views hear of it");
+        assert!(
+            changes.is_some_and(|changes| !changes.is_empty()),
+            "views hear of it"
+        );
         assert_eq!(text(&writer, id)?.as_deref(), Some("Led the Rust rewrite"));
         assert!(writer.redo()?.is_some());
         assert_eq!(text(&writer, id)?.as_deref(), Some("Led the Go rewrite"));
@@ -198,7 +205,10 @@ mod tests {
         assert!(writer.undo()?.is_some());
         assert!(fact(&writer, id)?.is_some_and(|(_, deleted_at)| deleted_at.is_some()));
         assert!(writer.redo()?.is_some());
-        assert_eq!(fact(&writer, id)?, Some(("Led the Rust rewrite".into(), None)));
+        assert_eq!(
+            fact(&writer, id)?,
+            Some(("Led the Rust rewrite".into(), None))
+        );
         Ok(())
     }
 
@@ -208,7 +218,10 @@ mod tests {
         let id = add_fact(&mut writer, "Led the Rust rewrite")?;
         writer.execute(|write| write.delete(Facts, id))?;
         assert!(writer.undo()?.is_some());
-        assert_eq!(fact(&writer, id)?, Some(("Led the Rust rewrite".into(), None)));
+        assert_eq!(
+            fact(&writer, id)?,
+            Some(("Led the Rust rewrite".into(), None))
+        );
         Ok(())
     }
 
@@ -246,9 +259,10 @@ mod tests {
         let id = add_fact(&mut writer, "one")?;
         writer.execute(|write| write.set(facts::TEXT, id, &"two"))?;
         // As a sync from another device would write it.
-        writer
-            .kron()
-            .execute("UPDATE facts SET text = 'from the laptop' WHERE id = ?1", [id])?;
+        writer.kron().execute(
+            "UPDATE facts SET text = 'from the laptop' WHERE id = ?1",
+            [id],
+        )?;
         assert!(writer.undo()?.is_some_and(|changes| changes.is_empty()));
         assert_eq!(text(&writer, id)?.as_deref(), Some("from the laptop"));
         Ok(())
@@ -265,7 +279,11 @@ mod tests {
             assert!(writer.undo()?.is_some());
         }
         assert!(writer.undo()?.is_none());
-        assert_eq!(text(&writer, id)?.as_deref(), Some("5"), "the first five are forgotten");
+        assert_eq!(
+            text(&writer, id)?.as_deref(),
+            Some("5"),
+            "the first five are forgotten"
+        );
         Ok(())
     }
 
@@ -289,7 +307,10 @@ mod tests {
             write.set(facts::TEXT, id, &"two")
         })?;
         writer.undo()?;
-        assert!(fact(&writer, id)?.is_some_and(|(_, deleted_at)| deleted_at.is_some()), "undid the insert before it");
+        assert!(
+            fact(&writer, id)?.is_some_and(|(_, deleted_at)| deleted_at.is_some()),
+            "undid the insert before it"
+        );
         Ok(())
     }
 
