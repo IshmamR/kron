@@ -1,6 +1,7 @@
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::list::{List, ListEvent, ListState};
 use gpui_kit::component::radio::Radio;
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
@@ -9,14 +10,16 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyBinding, Keystroke, Pixels, ScrollStrategy, SharedString, Subscription, Window, actions, div, prelude::*, px,
+    KeyBinding, Keystroke, Pixels, ScrollStrategy, SharedString, Subscription, Window, actions,
+    div, prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 use super::OpenLine;
 use super::fact_list::{FactList, Filter, ListedFact};
 use super::parts::{
-    Source, caption, card, fact_kind_label, fact_status, heading, notice, source_excerpt, sources,
+    Source, caption, card, fact_kind_label, fact_status, heading, notice, page_title,
+    search_suffix, source_excerpt, sources, text_field,
 };
 use crate::database::schema::{
     Blocks, Documents, Entries, FactSources, FactVersions, Facts, Generations, Jobs, LineCitations,
@@ -33,9 +36,9 @@ const LIST_KEY_CONTEXT: &str = "FactsPage > List";
 const SEARCH_CONTEXT: &str = "FactSearch";
 const FACT_EDITOR_CONTEXT: &str = "FactEditor";
 const NOTE_EDITOR_CONTEXT: &str = "NoteEditor";
-const LIST_WIDTH: Pixels = px(480.);
+const LIST_WIDTH: Pixels = px(600.);
 const LIST_MIN_WIDTH: Pixels = px(320.);
-const LIST_MAX_WIDTH: Pixels = px(760.);
+const LIST_MAX_WIDTH: Pixels = px(880.);
 /// Past this, lines of fact text get too long to read comfortably.
 const DETAIL_MAX_WIDTH: Pixels = px(760.);
 
@@ -46,6 +49,8 @@ actions!(
         ToggleHidden,
         Dismiss,
         FocusSearch,
+        /// In the search: clears it, then leaves it for the list.
+        ClearSearch,
         FocusList,
         CancelEdit,
         AddFacts
@@ -64,7 +69,11 @@ const WORDING_KEYS: usize = 9;
 
 pub fn init(cx: &mut App) {
     cx.bind_keys((0..WORDING_KEYS).map(|index| {
-        KeyBinding::new(&(index + 1).to_string(), KeepWording { index }, Some(LIST_KEY_CONTEXT))
+        KeyBinding::new(
+            &(index + 1).to_string(),
+            KeepWording { index },
+            Some(LIST_KEY_CONTEXT),
+        )
     }));
     let input_in = |context: &str| format!("{context} > Input");
     // These replace the list's and the text boxes' own keys, which run after
@@ -77,10 +86,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("delete", ToggleHidden, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("escape", Dismiss, Some(LIST_KEY_CONTEXT)),
         KeyBinding::new("down", FocusList, Some(&input_in(SEARCH_CONTEXT))),
-        KeyBinding::new("escape", FocusList, Some(&input_in(SEARCH_CONTEXT))),
+        KeyBinding::new("escape", ClearSearch, Some(&input_in(SEARCH_CONTEXT))),
         KeyBinding::new("escape", CancelEdit, Some(&input_in(FACT_EDITOR_CONTEXT))),
         KeyBinding::new("escape", Dismiss, Some(&input_in(NOTE_EDITOR_CONTEXT))),
-        KeyBinding::new("secondary-enter", AddFacts, Some(&input_in(NOTE_EDITOR_CONTEXT))),
+        KeyBinding::new(
+            "secondary-enter",
+            AddFacts,
+            Some(&input_in(NOTE_EDITOR_CONTEXT)),
+        ),
     ]);
 }
 
@@ -114,6 +127,21 @@ pub struct FactsPage {
 impl Render for FactsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_fact_editor(window, cx);
+        let page = cx.entity();
+        let suffix = search_suffix(
+            &self.search,
+            &FocusSearch,
+            KEY_CONTEXT,
+            move |window, cx| {
+                page.update(cx, |page, cx| {
+                    page.clear_search(window, cx);
+                    page.search
+                        .update(cx, |search, cx| search.focus(window, cx));
+                })
+            },
+            window,
+            cx,
+        );
         let marked = self.marked(cx);
         if !self.adding && marked.len() > 1 {
             self.read_merging(marked, cx);
@@ -122,26 +150,21 @@ impl Render for FactsPage {
         }
         let theme = cx.theme();
 
+        // None while no fact is picked.
         let detail = if self.adding {
-            self.render_add(cx).into_any_element()
+            Some(self.render_add(cx).into_any_element())
         } else if let Some(merging) = &self.merging
             && merging.facts == self.marked(cx)
         {
-            self.render_merge(merging, cx)
+            Some(self.render_merge(merging, cx))
         } else {
             let list = self.list.read(cx).delegate();
             let fact = self.selected.and_then(|id| list.fact(id));
             match (fact, &self.detail) {
                 (Some(fact), Some(detail)) if detail.fact == fact.id => {
-                    self.render_fact(fact, detail, cx)
+                    Some(self.render_fact(fact, detail, cx))
                 }
-                _ => div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(caption("Select a fact to review it.", cx))
-                    .into_any_element(),
+                _ => None,
             }
         };
 
@@ -155,6 +178,13 @@ impl Render for FactsPage {
                     .update(cx, |search, cx| search.focus(window, cx))
             }))
             .on_action(cx.listener(|this, _: &FocusList, window, cx| this.focus_list(window, cx)))
+            .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                if this.search.read(cx).value().is_empty() {
+                    this.focus_list(window, cx);
+                } else {
+                    this.clear_search(window, cx);
+                }
+            }))
             .on_action(cx.listener(Self::cancel_edit))
             .on_action(cx.listener(|this, action: &KeepWording, _, cx| {
                 if let Some(&fact) = this.marked(cx).get(action.index) {
@@ -187,29 +217,45 @@ impl Render for FactsPage {
                                                 .border_b_1()
                                                 .border_color(theme.border)
                                                 .key_context(SEARCH_CONTEXT)
-                                                .child(
+                                                .child(text_field(
                                                     Input::new(&self.search)
+                                                        .id("fact-search")
                                                         .prefix(
                                                             Icon::new(IconName::Search)
                                                                 .text_color(theme.muted_foreground),
                                                         )
                                                         .small()
-                                                        .cleanable(true),
-                                                ),
+                                                        .when_some(suffix, |this, suffix| {
+                                                            this.suffix(suffix)
+                                                        }),
+                                                    &self.search,
+                                                    cx,
+                                                )),
                                         )
                                         .child(List::new(&self.list).flex_1().min_h_0()),
                                 ),
                         )
                         .child(
-                            resizable_panel().child(
-                                div()
+                            resizable_panel().child(match detail {
+                                Some(detail) => div()
                                     .id("fact-detail")
                                     .size_full()
                                     .overflow_y_scrollbar()
                                     .child(
                                         div().max_w(DETAIL_MAX_WIDTH).px_6().py_5().child(detail),
-                                    ),
-                            ),
+                                    )
+                                    .into_any_element(),
+                                // In the middle of the panel, as the grid's empty state is.
+                                None => div()
+                                    .id("no-fact")
+                                    .test_support()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(caption("Select a fact to review it.", cx))
+                                    .into_any_element(),
+                            }),
                         ),
                 ),
             )
@@ -229,8 +275,7 @@ impl FactsPage {
             eprintln!("facts page: couldn't read the facts: {error}");
         }
         let list = cx.new(|cx| ListState::new(facts, window, cx));
-        let search =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search facts (Ctrl+F)"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search facts"));
         let fact_editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -244,11 +289,15 @@ impl FactsPage {
         });
 
         let subscriptions = vec![
-            cx.subscribe_in(&database, window, |this, _, changed: &Changed, window, cx| {
-                if shows(changed) {
-                    this.reload(window, cx);
-                }
-            }),
+            cx.subscribe_in(
+                &database,
+                window,
+                |this, _, changed: &Changed, window, cx| {
+                    if shows(changed) {
+                        this.reload(window, cx);
+                    }
+                },
+            ),
             cx.subscribe_in(&list, window, |this, list, event, _, cx| match event {
                 ListEvent::Select(index) | ListEvent::Confirm(index) => {
                     let fact = list.read(cx).delegate().fact_at(*index);
@@ -263,26 +312,32 @@ impl FactsPage {
                 ListEvent::Cancel => {}
             }),
             cx.observe(&list, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&search, window, |this, search, event, window, cx| match event {
-                InputEvent::Change => {
-                    let query = search.read(cx).value();
-                    this.list
-                        .update(cx, |list, _| list.delegate_mut().set_query(&query));
-                    this.rebuild_list(window, cx);
-                }
-                InputEvent::PressEnter { .. } => this.focus_list(window, cx),
-                InputEvent::Focus | InputEvent::Blur => {}
-            }),
-            cx.subscribe_in(&fact_editor, window, |this, _, event, window, cx| {
-                match event {
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, search, event, window, cx| match event {
+                    InputEvent::Change => {
+                        let query = search.read(cx).value();
+                        this.list
+                            .update(cx, |list, _| list.delegate_mut().set_query(&query));
+                        this.rebuild_list(window, cx);
+                    }
+                    InputEvent::PressEnter { .. } => this.focus_list(window, cx),
+                    InputEvent::Focus | InputEvent::Blur => {}
+                },
+            ),
+            cx.subscribe_in(
+                &fact_editor,
+                window,
+                |this, _, event, window, cx| match event {
                     InputEvent::PressEnter { .. } => {
                         this.save_fact_text(cx);
                         this.list.focus_handle(cx).focus(window, cx);
                     }
                     InputEvent::Blur => this.save_fact_text(cx),
                     InputEvent::Change | InputEvent::Focus => {}
-                }
-            }),
+                },
+            ),
         ];
 
         Self {
@@ -381,6 +436,15 @@ impl FactsPage {
     }
 
     /// Moves to the list, selecting the first fact if none is.
+    /// Empties the search, and the list shows everything again.
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.list
+            .update(cx, |list, _| list.delegate_mut().set_query(""));
+        self.rebuild_list(window, cx);
+    }
+
     fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let first = self.list.read(cx).delegate().facts().next();
         if self.selected.is_none()
@@ -432,7 +496,13 @@ impl FactsPage {
         let Some(fact) = self.selected else {
             return;
         };
-        let Some(hidden) = self.list.read(cx).delegate().fact(fact).map(|fact| fact.hidden) else {
+        let Some(hidden) = self
+            .list
+            .read(cx)
+            .delegate()
+            .fact(fact)
+            .map(|fact| fact.hidden)
+        else {
             return;
         };
         self.database
@@ -608,15 +678,21 @@ impl FactsPage {
         let Some(fact) = self.selected else {
             return;
         };
-        if self.detail.as_ref().is_some_and(|detail| detail.fact == fact) {
+        if self
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail.fact == fact)
+        {
             return;
         }
         let connection = self.database.read(cx).connection();
         let facts = self.list.read(cx).delegate().all();
-        self.detail = Some(Detail::read(connection, fact, facts).unwrap_or_else(|error| {
-            eprintln!("facts page: couldn't read the fact: {error}");
-            Detail::empty(fact)
-        }));
+        self.detail = Some(
+            Detail::read(connection, fact, facts).unwrap_or_else(|error| {
+                eprintln!("facts page: couldn't read the fact: {error}");
+                Detail::empty(fact)
+            }),
+        );
     }
 
     /// Reads what's shown of the facts marked to merge, unless it's read
@@ -641,35 +717,16 @@ impl FactsPage {
     }
 
     fn render_header(&self, cx: &Context<Self>) -> impl IntoElement {
-        let count = self.list.read(cx).delegate().all().len();
         h_flex()
             .flex_none()
             .flex_wrap()
             .justify_between()
             .gap_3()
             .px_6()
-            .py_4()
+            .py_5()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(
-                h_flex()
-                    .items_baseline()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Career facts"),
-                    )
-                    .child(caption(
-                        if count == 1 {
-                            "1 fact".to_string()
-                        } else {
-                            format!("{count} facts")
-                        },
-                        cx,
-                    )),
-            )
+            .child(page_title("Career facts"))
             .child(
                 Button::new("add-facts")
                     .label("Add facts")
@@ -681,7 +738,12 @@ impl FactsPage {
 
     fn render_toolbar(&self, cx: &Context<Self>) -> impl IntoElement {
         let list = self.list.read(cx).delegate();
-        let count = |filter: Filter| list.all().iter().filter(|fact| filter.includes(fact)).count();
+        let count = |filter: Filter| {
+            list.all()
+                .iter()
+                .filter(|fact| filter.includes(fact))
+                .count()
+        };
         let filter = list.filter();
         let selected_index = Filter::ALL
             .iter()
@@ -726,11 +788,7 @@ impl FactsPage {
             })
             .child(
                 Button::new("toggle-hidden")
-                    .label(if fact.hidden {
-                        "Show"
-                    } else {
-                        "Hide"
-                    })
+                    .label(if fact.hidden { "Show" } else { "Hide" })
                     .icon(if fact.hidden {
                         IconName::Eye
                     } else {
@@ -776,23 +834,21 @@ impl FactsPage {
                                 },
                             ),
                     )
-                    .child(
-                        div()
-                            .key_context(FACT_EDITOR_CONTEXT)
-                            .child(Textarea::new(&self.fact_editor)),
-                    )
+                    .child(div().key_context(FACT_EDITOR_CONTEXT).child(text_field(
+                        Textarea::new(&self.fact_editor),
+                        &self.fact_editor,
+                        cx,
+                    )))
                     .child(caption("↩ saves, ⇧↩ adds a line break, Esc cancels.", cx))
                     .when(fact.text != detail.extracted, |this| {
                         this.child(
                             h_flex()
                                 .gap_2()
                                 .items_start()
-                                .child(
-                                    div().flex_1().min_w_0().child(caption(
-                                        format!("Extracted as “{}”", detail.extracted),
-                                        cx,
-                                    )),
-                                )
+                                .child(div().flex_1().min_w_0().child(caption(
+                                    format!("Extracted as “{}”", detail.extracted),
+                                    cx,
+                                )))
                                 .child(
                                     Button::new("revert")
                                         .label("Revert")
@@ -840,73 +896,84 @@ impl FactsPage {
                     .when(detail.uses.is_empty(), |this| {
                         this.child(caption("No résumé uses this fact yet.", cx))
                     })
-                    .child(v_flex().gap_1().children(detail.uses.iter().enumerate().map(
-                        |(index, used)| {
-                            let (job_id, line_id) = (used.job, used.line);
-                            card(cx)
-                                .id(("use", index))
-                                .gap_0p5()
-                                .cursor_pointer()
-                                .hover(|this| this.bg(theme.secondary_hover))
-                                .on_click(move |_, window, cx| {
-                                    window.dispatch_action(
-                                        Box::new(OpenLine {
-                                            job: job_id,
-                                            line: line_id,
-                                        }),
-                                        cx,
-                                    )
-                                })
-                                .child(div().text_sm().child(used.job_title.clone()))
-                                .child(caption(used.text.clone(), cx))
-                                .when(used.outdated, |this| {
-                                    this.child(
-                                        h_flex()
-                                            .gap_1()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(
-                                                Icon::new(IconName::TriangleAlert)
-                                                    .xsmall()
-                                                    .text_color(theme.warning),
-                                            )
-                                            .child("Generated before this change"),
-                                    )
-                                })
-                        },
-                    ))),
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .children(detail.uses.iter().enumerate().map(|(index, used)| {
+                                let (job_id, line_id) = (used.job, used.line);
+                                card(cx)
+                                    .id(("use", index))
+                                    .gap_0p5()
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(theme.secondary_hover))
+                                    .on_click(move |_, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(OpenLine {
+                                                job: job_id,
+                                                line: line_id,
+                                            }),
+                                            cx,
+                                        )
+                                    })
+                                    .child(div().text_sm().child(used.job_title.clone()))
+                                    .child(caption(used.text.clone(), cx))
+                                    .when(used.outdated, |this| {
+                                        this.child(
+                                            h_flex()
+                                                .gap_1()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(
+                                                    Icon::new(IconName::TriangleAlert)
+                                                        .xsmall()
+                                                        .text_color(theme.warning),
+                                                )
+                                                .child("Generated before this change"),
+                                        )
+                                    })
+                            })),
+                    ),
             )
             .when(!detail.duplicates.is_empty(), |this| {
                 this.child(
                     v_flex()
-                        .child(heading("Possible duplicates", Some(detail.duplicates.len()), cx))
-                        .child(v_flex().gap_1().children(detail.duplicates.iter().enumerate().filter_map(
-                            |(index, duplicate)| {
-                                let other = duplicate.fact;
-                                let other_fact = list.fact(other)?;
-                                Some(
-                                    card(cx)
-                                        .gap_1()
-                                        .child(div().text_sm().child(other_fact.text.clone()))
-                                        .children(duplicate.source.clone().map(|source| {
-                                            caption(source, cx)
-                                        }))
-                                        .child(
-                                            h_flex().child(
-                                                Button::new(("merge-with", index))
-                                                    .label("Merge…")
-                                                    .outline()
-                                                    .xsmall()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.merge_with(id, other, cx)
-                                                        },
-                                                    )),
+                        .child(heading(
+                            "Possible duplicates",
+                            Some(detail.duplicates.len()),
+                            cx,
+                        ))
+                        .child(v_flex().gap_1().children(
+                            detail.duplicates.iter().enumerate().filter_map(
+                                |(index, duplicate)| {
+                                    let other = duplicate.fact;
+                                    let other_fact = list.fact(other)?;
+                                    Some(
+                                        card(cx)
+                                            .gap_1()
+                                            .child(div().text_sm().child(other_fact.text.clone()))
+                                            .children(
+                                                duplicate
+                                                    .source
+                                                    .clone()
+                                                    .map(|source| caption(source, cx)),
+                                            )
+                                            .child(
+                                                h_flex().child(
+                                                    Button::new(("merge-with", index))
+                                                        .label("Merge…")
+                                                        .outline()
+                                                        .xsmall()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.merge_with(id, other, cx)
+                                                            },
+                                                        )),
+                                                ),
                                             ),
-                                        ),
-                                )
-                            },
-                        ))),
+                                    )
+                                },
+                            ),
+                        )),
                 )
             })
             .into_any_element()
@@ -936,75 +1003,79 @@ impl FactsPage {
                         cx,
                     )),
             )
-            .child(v_flex().gap_2().children(marked.iter().enumerate().filter_map(
-                |(index, &id)| {
-                    let fact = list.fact(id)?;
-                    let sources = merging.sources.get(index)?;
-                    let kept = keep == Some(id);
-                    // On the page background, as in a form: on a card's grey
-                    // an empty radio barely shows.
-                    Some(
-                        v_flex()
-                            .id(("merge-option", index))
-                            .p_2()
-                            .gap_1()
-                            .rounded(theme.radius)
-                            .border_1()
-                            .border_color(if kept {
-                                theme.list_active_border
-                            } else {
-                                theme.border
-                            })
-                            .when(kept, |this| this.bg(theme.list_active))
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.keep = Some(id);
-                                cx.notify();
-                            }))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_start()
-                                    .child(Radio::new(("keep", index)).checked(kept).on_click(
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.keep = Some(id);
-                                            cx.notify();
-                                        }),
-                                    ))
-                                    .children(
-                                        (index < WORDING_KEYS)
-                                            .then(|| Keystroke::parse(&(index + 1).to_string()).ok())
-                                            .flatten()
-                                            .map(Kbd::new),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_0p5()
-                                            .child(div().text_sm().child(fact.text.clone()))
-                                            .child(
-                                                h_flex()
-                                                    .gap_1()
-                                                    .text_xs()
-                                                    .when(
-                                                        fact.review.is_some() || fact.hidden,
-                                                        |this| {
-                                                            this.child(fact_status(
-                                                                fact.review.is_some(),
-                                                                fact.hidden,
-                                                                cx,
-                                                            ))
-                                                            .child(caption("·", cx))
-                                                        },
-                                                    )
-                                                    .child(caption(sources.join(", "), cx)),
-                                            ),
-                                    ),
-                            ),
-                    )
-                },
-            )))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .children(marked.iter().enumerate().filter_map(|(index, &id)| {
+                        let fact = list.fact(id)?;
+                        let sources = merging.sources.get(index)?;
+                        let kept = keep == Some(id);
+                        // On the page background, as in a form: on a card's grey
+                        // an empty radio barely shows.
+                        Some(
+                            v_flex()
+                                .id(("merge-option", index))
+                                .p_2()
+                                .gap_1()
+                                .rounded(theme.radius)
+                                .border_1()
+                                .border_color(if kept {
+                                    theme.list_active_border
+                                } else {
+                                    theme.border
+                                })
+                                .when(kept, |this| this.bg(theme.list_active))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.keep = Some(id);
+                                    cx.notify();
+                                }))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_start()
+                                        .child(Radio::new(("keep", index)).checked(kept).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.keep = Some(id);
+                                                cx.notify();
+                                            }),
+                                        ))
+                                        .children(
+                                            (index < WORDING_KEYS)
+                                                .then(|| {
+                                                    Keystroke::parse(&(index + 1).to_string()).ok()
+                                                })
+                                                .flatten()
+                                                .map(Kbd::new),
+                                        )
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap_0p5()
+                                                .child(div().text_sm().child(fact.text.clone()))
+                                                .child(
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .text_xs()
+                                                        .when(
+                                                            fact.review.is_some() || fact.hidden,
+                                                            |this| {
+                                                                this.child(fact_status(
+                                                                    fact.review.is_some(),
+                                                                    fact.hidden,
+                                                                    cx,
+                                                                ))
+                                                                .child(caption("·", cx))
+                                                            },
+                                                        )
+                                                        .child(caption(sources.join(", "), cx)),
+                                                ),
+                                        ),
+                                ),
+                        )
+                    })),
+            )
             .child(caption(
                 match uses {
                     0 => "No résumé uses these facts.".to_string(),
@@ -1058,11 +1129,11 @@ impl FactsPage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("Add facts"),
             )
-            .child(
-                div()
-                    .key_context(NOTE_EDITOR_CONTEXT)
-                    .child(Textarea::new(&self.note_editor)),
-            )
+            .child(div().key_context(NOTE_EDITOR_CONTEXT).child(text_field(
+                Textarea::new(&self.note_editor),
+                &self.note_editor,
+                cx,
+            )))
             .child(caption(
                 SharedString::from(
                     "Each line becomes a fact, and lines written together are grouped. The note \
@@ -1085,9 +1156,9 @@ impl FactsPage {
                             .label("Cancel")
                             .ghost()
                             .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.close_add_form(window, cx)
-                            })),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_add_form(window, cx)),
+                            ),
                     ),
             )
     }
@@ -1291,7 +1362,11 @@ mod tests {
             .and_then(|listed| listed.entry)
             .and_then(|entry| list.entry_label(entry));
         let detail = Detail::read(connection, fact, list.all())?;
-        let sources = detail.sources.iter().map(|source| source.label.clone()).collect();
+        let sources = detail
+            .sources
+            .iter()
+            .map(|source| source.label.clone())
+            .collect();
         let outdated = detail.uses.iter().filter(|used| used.outdated).count();
         Ok((entry, sources, detail.uses.len(), outdated))
     }
@@ -1302,7 +1377,14 @@ mod tests {
         let connection = writer.kron();
         let mut list = FactList::new();
         list.load(connection)?;
-        type Row = (FactId, FactKind, String, Option<EntryId>, bool, Option<Review>);
+        type Row = (
+            FactId,
+            FactKind,
+            String,
+            Option<EntryId>,
+            bool,
+            Option<Review>,
+        );
         let mut stored: Vec<Row> = connection
             .prepare(
                 "SELECT id, kind, text, entry_id, hidden, review, review_note FROM facts
@@ -1327,7 +1409,14 @@ mod tests {
             .all()
             .iter()
             .map(|fact| {
-                (fact.id, fact.kind, fact.text.clone(), fact.entry, fact.hidden, fact.review.clone())
+                (
+                    fact.id,
+                    fact.kind,
+                    fact.text.clone(),
+                    fact.entry,
+                    fact.hidden,
+                    fact.review.clone(),
+                )
             })
             .collect();
         stored.sort_by_key(|row| row.0);
@@ -1350,8 +1439,14 @@ mod tests {
             shown(connection, &list, "Tracing async Rust")?,
             (None, vec![cv(), "From linkedin_profile.pdf".into()], 1, 0)
         );
-        assert_eq!(shown(connection, &list, "Cut p99 latency")?, (northwind.clone(), vec![cv()], 5, 0));
-        assert_eq!(shown(connection, &list, "Led the migration")?, (northwind.clone(), vec![cv()], 6, 0));
+        assert_eq!(
+            shown(connection, &list, "Cut p99 latency")?,
+            (northwind.clone(), vec![cv()], 5, 0)
+        );
+        assert_eq!(
+            shown(connection, &list, "Led the migration")?,
+            (northwind.clone(), vec![cv()], 6, 0)
+        );
         // The likely duplicate, which no résumé uses.
         assert_eq!(
             shown(connection, &list, "Migrated 12 backend")?,
@@ -1399,24 +1494,25 @@ mod tests {
         let migration = sample::fact(writer.kron(), "Led the migration")?;
         let linkedin = sample::fact(writer.kron(), "Migrated 12 backend")?;
         let latency = sample::fact(writer.kron(), "Cut p99 latency")?;
-        let used_by = |connection: &Connection, facts: [FactId; 3]| -> Result<BTreeSet<LineId>, Error> {
-            let mut lines = BTreeSet::new();
-            for fact in facts {
-                let mut statement = connection.prepare(
-                    "SELECT line_citations.line_id FROM line_citations
+        let used_by =
+            |connection: &Connection, facts: [FactId; 3]| -> Result<BTreeSet<LineId>, Error> {
+                let mut lines = BTreeSet::new();
+                for fact in facts {
+                    let mut statement = connection.prepare(
+                        "SELECT line_citations.line_id FROM line_citations
                      JOIN lines ON lines.id = line_citations.line_id
                      JOIN blocks ON blocks.id = lines.block_id
                      JOIN sections ON sections.id = blocks.section_id
                      JOIN current_generations
                        ON current_generations.generation_id = sections.generation_id
                      WHERE line_citations.fact_id = ?1",
-                )?;
-                for line in statement.query_map([fact.0], |row| Ok(LineId(row.get(0)?)))? {
-                    lines.insert(line?);
+                    )?;
+                    for line in statement.query_map([fact.0], |row| Ok(LineId(row.get(0)?)))? {
+                        lines.insert(line?);
+                    }
                 }
-            }
-            Ok(lines)
-        };
+                Ok(lines)
+            };
         let expected = used_by(writer.kron(), [migration, linkedin, latency])?;
         let mut list = FactList::new();
         list.load(writer.kron())?;
@@ -1633,7 +1729,11 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(titles.first().map(String::as_str), Some("Profile"));
-        assert!(titles.iter().any(|title| title.ends_with(", Northwind Logistics")));
+        assert!(
+            titles
+                .iter()
+                .any(|title| title.ends_with(", Northwind Logistics"))
+        );
         assert_eq!(page.selected(), None, "nothing until the user picks");
     }
 
@@ -1745,13 +1845,22 @@ mod tests {
             Some("Cut p99 latency by 80%.".into())
         );
         page.settle();
-        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
-        assert_eq!(page.stored::<Option<String>>("review", latency), None, "rewording reviews");
+        assert_eq!(
+            page.stored::<String>("text", latency),
+            "Cut p99 latency by 80%."
+        );
+        assert_eq!(
+            page.stored::<Option<String>>("review", latency),
+            None,
+            "rewording reviews"
+        );
         assert!(
             page.detail(|detail| detail.uses.iter().all(|used| used.outdated)) == Some(true),
             "the résumés using it were generated before"
         );
-        assert!(page.detail(|detail| detail.extracted.starts_with("Cut p99 latency")) == Some(true));
+        assert!(
+            page.detail(|detail| detail.extracted.starts_with("Cut p99 latency")) == Some(true)
+        );
 
         page.update(|page, _, cx| page.revert_fact(latency, cx));
         let extracted: String = page.stored("extracted", latency);
@@ -1803,7 +1912,10 @@ mod tests {
         page.show(latency);
         page.type_fact_text("Cut p99 latency by 80%.");
         page.show(other);
-        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
+        assert_eq!(
+            page.stored::<String>("text", latency),
+            "Cut p99 latency by 80%."
+        );
         assert_eq!(page.editor_text(), page.stored::<String>("text", other));
     }
 
@@ -1820,7 +1932,10 @@ mod tests {
         page.settle();
         assert!(!page.read(|page, _| page.adding), "the form closed");
         assert_eq!(page.count(Filter::All), 85);
-        assert_eq!(page.read(|page, cx| page.list.read(cx).delegate().filter()), Filter::All);
+        assert_eq!(
+            page.read(|page, cx| page.list.read(cx).delegate().filter()),
+            Filter::All
+        );
         let first = page.fact("Organized Code Fest 2019.");
         let second = page.fact("Ran a team of 15.");
         assert_eq!(page.selected(), Some(first));
@@ -1872,7 +1987,11 @@ mod tests {
             page.read(|page, _| page.merging.as_ref().map(|merging| merging.facts.clone())),
             Some(vec![migration, linkedin])
         );
-        assert!(page.read(|page, _| page.merging.as_ref().is_some_and(|merging| merging.uses > 0)));
+        assert!(page.read(|page, _| {
+            page.merging
+                .as_ref()
+                .is_some_and(|merging| merging.uses > 0)
+        }));
         page.keys("1");
         assert_eq!(page.read(|page, _| page.keep), Some(migration));
         page.keys("enter");
@@ -1961,6 +2080,74 @@ mod tests {
     }
 
     #[test]
+    fn with_no_fact_picked_the_prompt_fills_the_detail_panel() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let page = open(&mut app);
+        page.cx.update(|window, cx| {
+            window.render_frame(cx);
+            let prompt = window.find("no-fact").bounds();
+            // Centred in the whole panel, not sitting at its top.
+            assert!(prompt.size.height > px(300.), "{prompt:?}");
+        });
+    }
+
+    #[test]
+    fn escape_in_the_search_clears_it_then_goes_to_the_list() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.search("p99");
+        assert_eq!(page.listed().len(), 1);
+        page.keys("escape");
+        assert_eq!(page.listed().len(), 83, "the first Esc clears the search");
+        let (search, list) = page.read(|page, _| (page.search.clone(), page.list.clone()));
+        page.cx.update(|window, cx| {
+            assert!(
+                search.read(cx).focus_handle(cx).is_focused(window),
+                "and stays in it"
+            )
+        });
+        page.keys("escape");
+        page.cx
+            .update(|window, cx| assert!(list.focus_handle(cx).is_focused(window)));
+    }
+
+    #[test]
+    fn the_clear_button_shows_every_fact_again() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        page.search("p99");
+        page.cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.click("clear-search", cx);
+        });
+        page.settle();
+        assert_eq!(page.listed().len(), 83);
+    }
+
+    #[test]
+    fn the_search_shows_its_shortcut_only_while_empty_and_elsewhere() {
+        let mut app = TestAppContext::single();
+        let mut page = open(&mut app);
+        assert!(page.cx.debug_bounds("kbd:ctrl-f").is_some());
+        page.keys("ctrl-f");
+        assert!(
+            page.cx.debug_bounds("kbd:ctrl-f").is_none(),
+            "not while typing in it"
+        );
+        page.keys("escape");
+        page.search("p99");
+        page.keys("down");
+        assert!(
+            page.cx.debug_bounds("kbd:ctrl-f").is_none(),
+            "not over a search"
+        );
+    }
+
+    #[test]
     fn a_search_narrows_the_list_and_showing_a_fact_clears_it() {
         let mut app = TestAppContext::single();
         let mut page = open(&mut app);
@@ -2008,13 +2195,7 @@ mod tests {
         page.show(latency);
         assert!(page.read(|page, _| page.detail.is_some()));
         // Settings: nothing the page shows.
-        page.run(|write| {
-            write.set(
-                crate::database::schema::settings::APPEARANCE,
-                1,
-                &"dark",
-            )
-        });
+        page.run(|write| write.set(crate::database::schema::settings::APPEARANCE, 1, &"dark"));
         assert!(page.read(|page, _| page.detail.is_some()));
     }
 
@@ -2082,7 +2263,10 @@ mod tests {
         page.show(latency);
         page.type_fact_text("Cut p99 latency by 80%.");
         page.update(|page, window, cx| page.open_add_form(window, cx));
-        assert_eq!(page.stored::<String>("text", latency), "Cut p99 latency by 80%.");
+        assert_eq!(
+            page.stored::<String>("text", latency),
+            "Cut p99 latency by 80%."
+        );
     }
 
     #[test]
@@ -2092,7 +2276,10 @@ mod tests {
         page.filter(Filter::Hidden);
         let latency = page.fact("Cut p99 latency");
         page.show(latency);
-        assert_eq!(page.read(|page, cx| page.list.read(cx).delegate().filter()), Filter::All);
+        assert_eq!(
+            page.read(|page, cx| page.list.read(cx).delegate().filter()),
+            Filter::All
+        );
         assert_eq!(page.selected(), Some(latency));
     }
 
@@ -2105,7 +2292,27 @@ mod tests {
         page.keys("down");
         assert_eq!(page.selected(), Some(latency));
         page.keys("backspace");
-        assert!(page.stored::<bool>("hidden", latency), "the list has the keys again");
+        assert!(
+            page.stored::<bool>("hidden", latency),
+            "the list has the keys again"
+        );
+    }
+
+    #[test]
+    fn clicking_the_search_box_past_its_text_puts_the_cursor_in_it() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let page = open(&mut app);
+        let search = page.page.read_with(page.cx, |page, _| page.search.clone());
+        page.cx.update(|window, cx| {
+            window.render_frame(cx);
+            // On the border, outside the text and its icon.
+            window.click_at("fact-search", gpui_kit::point(px(1.), px(1.)), cx);
+        });
+        page.cx.run_until_parked();
+        page.cx
+            .update(|window, cx| assert!(search.read(cx).focus_handle(cx).is_focused(window)));
     }
 
     #[test]

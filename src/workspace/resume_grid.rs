@@ -18,12 +18,14 @@ use gpui_kit::{
 use rusqlite::Connection;
 
 use super::application_view;
+use super::parts::{page_title, search_suffix, text_field};
 use super::previews::{self, Previews, Render as PageRender};
 use crate::database::schema::{Events, FactVersions, Facts, Generations, Jobs, UnsupportedClaims};
 use crate::database::{Changed, Database, Error};
 use crate::model::{Application, JobId, Nudge, ResumeId, Stage};
 
 const KEY_CONTEXT: &str = "ResumeGrid";
+const SEARCH_CONTEXT: &str = "JobSearch";
 const CARD_WIDTH: Pixels = px(248.);
 const THUMBNAIL_WIDTH: Pixels = px(218.);
 /// US Letter proportions (8.5 × 11), so the page fills the box.
@@ -42,7 +44,16 @@ const PAPER: Hsla = Hsla {
 
 actions!(
     resume_grid,
-    [SelectLeft, SelectRight, SelectUp, SelectDown, OpenSelected]
+    [
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        OpenSelected,
+        FocusSearch,
+        /// In the search: clears it, then leaves it for the grid.
+        ClearSearch
+    ]
 );
 
 /// Shows the `index`th filter: All, Active and so on.
@@ -65,6 +76,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("up", SelectUp, Some(KEY_CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", OpenSelected, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-f", FocusSearch, Some(KEY_CONTEXT)),
+        KeyBinding::new(
+            "escape",
+            ClearSearch,
+            Some(&format!("{SEARCH_CONTEXT} > Input")),
+        ),
     ]);
     cx.bind_keys((0..JobFilter::ALL.len()).map(|index| {
         KeyBinding::new(
@@ -107,6 +124,21 @@ impl EventEmitter<ResumeGridEvent> for ResumeGrid {}
 impl Render for ResumeGrid {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read(cx);
+        let grid = cx.entity();
+        let suffix = search_suffix(
+            &self.search,
+            &FocusSearch,
+            KEY_CONTEXT,
+            move |window, cx| {
+                grid.update(cx, |grid, cx| {
+                    grid.clear_search(window, cx);
+                    grid.search
+                        .update(cx, |search, cx| search.focus(window, cx));
+                })
+            },
+            window,
+            cx,
+        );
         let current_resumes = self.current_resumes.clone().unwrap_or_default();
         let pixels_per_point = previews::pixels_per_point(THUMBNAIL_WIDTH, window);
         let now = Utc::now();
@@ -161,6 +193,17 @@ impl Render for ResumeGrid {
                 this.sort = action.sort;
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.search
+                    .update(cx, |search, cx| search.focus(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &ClearSearch, window, cx| {
+                if this.search.read(cx).value().is_empty() {
+                    this.focus_handle.focus(window, cx);
+                } else {
+                    this.clear_search(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenSelected, window, cx| {
                 if this.search.focus_handle(cx).is_focused(window) {
                     return;
@@ -181,37 +224,22 @@ impl Render for ResumeGrid {
                     .gap_3()
                     .px(padding)
                     .py_5()
-                    .child(
-                        h_flex()
-                            .items_baseline()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .text_2xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Résumés"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if jobs.len() == job_count {
-                                        job_count.to_string()
-                                    } else {
-                                        format!("{} of {job_count}", jobs.len())
-                                    }),
-                            ),
-                    )
+                    .child(page_title("Résumés"))
                     .child(
                         h_flex()
                             .flex_wrap()
                             .gap_2()
                             .child(
-                                Input::new(&self.search)
-                                    .w(px(176.))
-                                    .small()
-                                    .prefix(Icon::new(IconName::Search).small())
-                                    .cleanable(true),
+                                text_field(
+                                    Input::new(&self.search)
+                                        .small()
+                                        .prefix(Icon::new(IconName::Search).small())
+                                        .when_some(suffix, |this, suffix| this.suffix(suffix)),
+                                    &self.search,
+                                    cx,
+                                )
+                                .key_context(SEARCH_CONTEXT)
+                                .w(px(176.)),
                             )
                             .child(sort_menu(self.sort))
                             .child(
@@ -236,22 +264,39 @@ impl Render for ResumeGrid {
                                 .gap_3()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .when_else(job_count == 0, |this| {
-                                    this.child(Icon::new(IconName::FileText))
-                                        .child(div().text_lg().font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(cx.theme().foreground)
-                                            .child("Add your first job"))
-                                        .child("Each job has its own résumé and application history.")
-                                        .child(Button::new("first-job")
-                                            .label("New job").icon(IconName::Plus).primary()
-                                            .on_click(cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob))))
-                                }, |this| {
-                                    this.child(if self.query.is_empty() {
-                                        self.filter.empty_text()
-                                    } else {
-                                        "No jobs match your search."
-                                    })
-                                }),
+                                .when_else(
+                                    job_count == 0,
+                                    |this| {
+                                        this.child(Icon::new(IconName::FileText))
+                                            .child(
+                                                div()
+                                                    .text_lg()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(cx.theme().foreground)
+                                                    .child("Add your first job"),
+                                            )
+                                            .child(
+                                                "Each job has its own résumé and application \
+                                                 history.",
+                                            )
+                                            .child(
+                                                Button::new("first-job")
+                                                    .label("New job")
+                                                    .icon(IconName::Plus)
+                                                    .primary()
+                                                    .on_click(cx.listener(|_, _, _, cx| {
+                                                        cx.emit(ResumeGridEvent::NewJob)
+                                                    })),
+                                            )
+                                    },
+                                    |this| {
+                                        this.child(if self.query.is_empty() {
+                                            self.filter.empty_text()
+                                        } else {
+                                            "No jobs match your search."
+                                        })
+                                    },
+                                ),
                         )
                         .flex_1(),
                     )
@@ -326,7 +371,7 @@ impl ResumeGrid {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search jobs"));
         let applications = read_applications(&database, cx);
         Self {
             _subscriptions: vec![
@@ -410,6 +455,14 @@ impl ResumeGrid {
         })
     }
 
+    /// Empties the search, and the grid shows every job in the filter again.
+    fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search
+            .update(cx, |search, cx| search.set_value("", window, cx));
+        self.query.clear();
+        cx.notify();
+    }
+
     /// Jobs matching both the application filter and the search.
     fn visible_jobs(&self, now: DateTime<Utc>) -> Vec<JobId> {
         let mut jobs: Vec<&Application> = self
@@ -465,11 +518,7 @@ impl ResumeGrid {
             _ => 0,
         };
         let stage = job.stage(now);
-        let nudge = application_view::nudge_label(job, now);
-        let nudge_icon = match job.nudge(now) {
-            Some(Nudge::InterviewSoon { .. }) => IconName::Calendar,
-            _ => IconName::Info,
-        };
+        let (status, nudge) = card_status(job, now);
         let stage_color = match stage {
             Stage::Interview { .. } => theme.warning,
             Stage::Offer => theme.primary,
@@ -595,11 +644,7 @@ impl ResumeGrid {
                                     .rounded_full()
                                     .bg(stage_color),
                             )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .child(application_view::stage_label(stage, now)),
-                            ),
+                            .child(div().truncate().child(status)),
                     )
                     .when(unsupported > 0 || outdated || nudge.is_some(), |this| {
                         this.child(
@@ -635,7 +680,7 @@ impl ResumeGrid {
                                     this.child(
                                         h_flex()
                                             .gap_1()
-                                            .child(Icon::new(nudge_icon).xsmall())
+                                            .child(Icon::new(IconName::Info).xsmall())
                                             .child(nudge),
                                     )
                                 }),
@@ -797,6 +842,16 @@ impl JobFilter {
     }
 }
 
+/// The card's stage line, and the nudge under it. An interview coming up is
+/// both, so it's said once, on the stage line.
+fn card_status(job: &Application, now: DateTime<Utc>) -> (String, Option<String>) {
+    let nudge = application_view::nudge_label(job, now);
+    match job.nudge(now) {
+        Some(Nudge::InterviewSoon { .. }) => (nudge.unwrap_or_default(), None),
+        _ => (application_view::stage_label(job.stage(now), now), nudge),
+    }
+}
+
 /// "9 jobs", or with a filter, "3 of 9 jobs".
 fn job_count_label(shown: usize, total: usize) -> String {
     let jobs = if total == 1 { "job" } else { "jobs" };
@@ -853,7 +908,9 @@ mod tests {
         Ok(jobs
             .into_iter()
             .map(|(job, company)| {
-                let resume = current.get(&job).map(|resume| (resume.unsupported, resume.outdated));
+                let resume = current
+                    .get(&job)
+                    .map(|resume| (resume.unsupported, resume.outdated));
                 (company, resume)
             })
             .collect())
@@ -909,7 +966,10 @@ mod tests {
 
         writer.execute(|write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."))?;
         writer.execute(|write| commands::set_hidden(write, property_tests, false))?;
-        assert_eq!(summary(writer.kron())?, outdated(&["Ledgerly", "Tidewater Systems"]));
+        assert_eq!(
+            summary(writer.kron())?,
+            outdated(&["Ledgerly", "Tidewater Systems"])
+        );
 
         // Back as they were generated from.
         writer.execute(|write| commands::revert_fact(write, latency))?;
@@ -1011,9 +1071,9 @@ mod tests {
         }
 
         fn fact(&mut self, start: &str) -> FactId {
-            let fact = self
-                .database
-                .read_with(self.cx, |database, _| sample::fact(database.connection(), start));
+            let fact = self.database.read_with(self.cx, |database, _| {
+                sample::fact(database.connection(), start)
+            });
             match fact {
                 Ok(fact) => fact,
                 Err(error) => panic!("{start}: {error}"),
@@ -1025,7 +1085,9 @@ mod tests {
             let previews = self.previews.clone();
             let thumbnail = self.cx.update(|window, cx| {
                 let pixels_per_point = previews::pixels_per_point(THUMBNAIL_WIDTH, window);
-                previews.update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
+                previews.update(cx, |previews, cx| {
+                    previews.get(resume, pixels_per_point, cx)
+                })
             });
             self.settle();
             thumbnail
@@ -1114,16 +1176,62 @@ mod tests {
     }
 
     #[test]
+    fn an_interview_coming_up_is_one_line_on_its_card() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let ledgerly = grid.job("Ledgerly");
+        let status = grid.cx.update(|_, cx| {
+            let grid = grid.grid.read(cx);
+            let job = grid.applications.iter().find(|job| job.job == ledgerly);
+            job.map(|job| card_status(job, Utc::now()))
+        });
+        let Some((status, nudge)) = status else {
+            panic!("no Ledgerly application");
+        };
+        assert_eq!(status, "Interview in 3 days");
+        assert_eq!(nudge, None, "not said again under it");
+    }
+
+    #[test]
+    fn ctrl_f_searches_and_escape_clears_then_returns_to_the_grid() {
+        let mut app = TestAppContext::single();
+        let mut grid = open(&mut app);
+        let ledgerly = grid.job("Ledgerly");
+        let all = grid.visible().len();
+        grid.keys("ctrl-f");
+        grid.cx.simulate_input("ledger");
+        assert_eq!(grid.visible(), vec![ledgerly]);
+        grid.keys("escape");
+        assert_eq!(grid.visible().len(), all, "the first Esc clears the search");
+        let search = grid.cx.update(|_, cx| grid.grid.read(cx).search.clone());
+        grid.cx.update(|window, cx| {
+            assert!(
+                search.read(cx).focus_handle(cx).is_focused(window),
+                "and stays in it"
+            )
+        });
+        grid.keys("escape");
+        grid.cx
+            .update(|window, cx| assert!(grid.grid.focus_handle(cx).is_focused(window)));
+    }
+
+    #[test]
     fn a_changed_fact_tags_the_cards_using_it_and_reverting_clears_it() {
         let mut app = TestAppContext::single();
         let mut grid = open(&mut app);
         let ledgerly = grid.job("Ledgerly");
-        assert!(grid.current(ledgerly).is_some_and(|resume| !resume.outdated));
+        assert!(
+            grid.current(ledgerly)
+                .is_some_and(|resume| !resume.outdated)
+        );
         let latency = grid.fact("Cut p99 latency");
         grid.run(move |write| commands::edit_fact(write, latency, "Cut p99 latency by 80%."));
         assert!(grid.current(ledgerly).is_some_and(|resume| resume.outdated));
         grid.run(move |write| commands::revert_fact(write, latency));
-        assert!(grid.current(ledgerly).is_some_and(|resume| !resume.outdated));
+        assert!(
+            grid.current(ledgerly)
+                .is_some_and(|resume| !resume.outdated)
+        );
     }
 
     #[test]

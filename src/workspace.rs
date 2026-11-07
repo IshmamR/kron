@@ -8,11 +8,12 @@ mod instructions_form;
 mod job_form;
 mod job_view;
 mod onboarding;
-mod parts;
 mod palette_picker;
+mod parts;
 mod previews;
 mod redaction_check;
 mod resume_grid;
+mod settings_page;
 mod shortcuts;
 mod stand_in_name;
 #[cfg(test)]
@@ -21,55 +22,43 @@ mod testing;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::setting::{
-    SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
-};
 use gpui_kit::component::sidebar::{
-    Sidebar, SidebarCollapsible, SidebarGroup, SidebarMenu, SidebarMenuItem,
+    Sidebar, SidebarCollapsible, SidebarGroup, SidebarItem, SidebarMenu, SidebarMenuItem,
 };
 use gpui_kit::component::tag::Tag;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName, Root, Selectable, Sizable, WindowExt, h_flex, v_flex,
+    ActiveTheme, Collapsible, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    Action, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, IntoElement,
-    KeyBinding, Pixels, SharedString, Subscription, Task, Window, WindowBounds, actions, div,
-    prelude::*, px,
+    Action, App, Bounds, Context, Entity, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
+    Subscription, Task, Window, WindowBounds, actions, div, prelude::*, px,
 };
 
 use crate::appearance::{Appearance, Motion, Palettes};
 use crate::database::schema::{self, Documents, FactSources, Facts, LlmRuns};
 use crate::database::{Changed, Database};
 use crate::llm::{self, Purpose};
-use crate::model::settings::{self, DeviceSettings, LastPage};
 use crate::model::extraction;
+use crate::model::settings::{self, DeviceSettings, LastPage};
 use crate::model::{Application, DocumentId, FactId, JobId, LineId};
 use crate::window;
-use ai_settings::AiSettings;
 use facts_page::FactsPage;
 use import_page::ImportPage;
 use job_form::{JobForm, JobFormEvent};
-use stand_in_name::StandInName;
 use job_view::{JobView, JobViewEvent};
 use onboarding::{Onboarding, OnboardingEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
+use settings_page::{SettingsPage, SettingsSection};
 
 const SIDEBAR_WIDTH: Pixels = px(204.);
-/// The collapse toggle's width: a collapsed menu item's, the strip's 48px
-/// less its padding.
-const TOGGLE_WIDTH: Pixels = px(32.);
 /// How long the window has to stay put before where it is gets saved, so a
 /// drag saves once, not on every step.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
 /// Wide enough for a description's lines to read as they were written.
 const JOB_FORM_WIDTH: f32 = 640.;
-
-/// Settings' page for the AI provider, after "General".
-const AI_SETTINGS_PAGE: usize = 1;
 
 actions!(
     workspace,
@@ -80,6 +69,8 @@ actions!(
         Redo,
         /// Opens Settings on the AI provider.
         SetUpAi,
+        ShowSettings,
+        LeaveSettings,
         ShowFacts
     ]
 );
@@ -91,7 +82,9 @@ pub fn init(cx: &mut App) {
         // A text field's own undo comes first: its key context is deeper.
         KeyBinding::new("secondary-z", Undo, None),
         KeyBinding::new("secondary-y", Redo, None),
+        KeyBinding::new("secondary-,", ShowSettings, None),
     ]);
+    settings_page::init(cx);
     facts_page::init(cx);
     import_page::init(cx);
     redaction_check::init(cx);
@@ -123,9 +116,6 @@ pub struct Workspace {
     /// Documents whose facts haven't been found, as saved with no AI set up,
     /// with their file names: read on start, and again after they change.
     unread: Vec<(DocumentId, Option<String>)>,
-    /// Settings keeps the page picked under its id; each "Set up AI" gives
-    /// it a new one, opening on `AI_SETTINGS_PAGE`.
-    settings_id: usize,
     page: Page,
     /// Down to its icons, which give their names as tooltips.
     sidebar_collapsed: bool,
@@ -136,15 +126,12 @@ pub struct Workspace {
     /// The window's bounds when it was last neither maximized nor full
     /// screen: what it restores to.
     windowed_bounds: Bounds<Pixels>,
-    /// Focused on pages with nothing focusable of their own, so app-wide keys
-    /// still arrive.
-    focus_handle: FocusHandle,
     resume_grid: Entity<ResumeGrid>,
     job_view: Entity<JobView>,
     facts_page: Entity<FactsPage>,
     import_page: Entity<ImportPage>,
-    ai_settings: Entity<AiSettings>,
-    stand_in_name: Entity<StandInName>,
+    /// Over everything else, onboarding too, until it's closed.
+    settings_page: Option<Entity<SettingsPage>>,
     /// Shown in place of everything else while the user has nothing yet.
     onboarding: Option<Entity<Onboarding>>,
     /// The "New job" form's, while it's open.
@@ -153,38 +140,12 @@ pub struct Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let page = match self.page {
             Page::Resumes => self.resume_grid.clone().into_any_element(),
             Page::Job => self.job_view.clone().into_any_element(),
             Page::Facts => self.facts_page.clone().into_any_element(),
             Page::Import => self.import_page.clone().into_any_element(),
-            Page::Settings => div()
-                .track_focus(&self.focus_handle)
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(
-                    div()
-                        .px_6()
-                        .py_4()
-                        .border_b_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            div()
-                                .text_2xl()
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child("Settings"),
-                        ),
-                )
-                .child(div().flex_1().min_h_0().child(settings_page(
-                    self.settings_id,
-                    self.database.clone(),
-                    self.ai_settings.clone(),
-                    self.stand_in_name.clone(),
-                    cx,
-                )))
-                .into_any_element(),
         };
 
         div()
@@ -194,6 +155,7 @@ impl Render for Workspace {
                     .update(cx, |job_view, cx| job_view.select_line(action.line, cx));
             }))
             .on_action(cx.listener(|this, action: &ShowFact, window, cx| {
+                this.settings_page = None;
                 this.page = Page::Facts;
                 this.facts_page.update(cx, |facts_page, cx| {
                     facts_page.show_fact(action.fact, window, cx)
@@ -202,8 +164,13 @@ impl Render for Workspace {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SetUpAi, window, cx| {
-                this.settings_id += 1;
-                this.open_page(Page::Settings, window, cx)
+                this.show_settings(Some(SettingsSection::Ai), window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowSettings, window, cx| {
+                this.show_settings(None, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &LeaveSettings, window, cx| {
+                this.leave_settings(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ShowFacts, window, cx| {
                 this.open_page(Page::Facts, window, cx)
@@ -217,11 +184,12 @@ impl Render for Workspace {
                 cx.listener(|this, _: &Redo, window, cx| this.undo_or_redo(true, window, cx)),
             )
             .size_full()
-            .child(match &self.onboarding {
-                Some(onboarding) => onboarding.clone().into_any_element(),
-                None => h_flex()
+            .child(match (&self.settings_page, &self.onboarding) {
+                (Some(settings), _) => settings.clone().into_any_element(),
+                (_, Some(onboarding)) => onboarding.clone().into_any_element(),
+                (None, None) => h_flex()
                     .size_full()
-                    .child(self.render_sidebar(cx))
+                    .child(self.render_sidebar(window, cx))
                     .child(
                         v_flex()
                             .flex_1()
@@ -236,11 +204,7 @@ impl Render for Workspace {
 }
 
 impl Workspace {
-    pub fn new(
-        database: Entity<Database>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(database: Entity<Database>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (stored, device) = {
             let database = database.read(cx);
             let stored = settings::Settings::read(database.connection());
@@ -263,8 +227,6 @@ impl Workspace {
         let job_view = cx.new(|cx| JobView::new(database.clone(), previews, window, cx));
         let facts_page = cx.new(|cx| FactsPage::new(database.clone(), window, cx));
         let import_page = cx.new(|cx| ImportPage::new(database.clone(), window, cx));
-        let ai_settings = cx.new(|cx| AiSettings::new(database.clone(), window, cx));
-        let stand_in_name = cx.new(|cx| StandInName::new(database.clone(), window, cx));
         resume_grid.focus_handle(cx).focus(window, cx);
 
         let mut subscriptions = vec![
@@ -320,21 +282,15 @@ impl Workspace {
 
         let onboarding = match onboarding::is_new(database.read(cx).connection()) {
             Ok(true) => {
-                let onboarding = cx.new(|cx| {
-                    Onboarding::new(database.clone(), import_page.clone(), window, cx)
-                });
+                let onboarding =
+                    cx.new(|cx| Onboarding::new(database.clone(), import_page.clone(), window, cx));
                 subscriptions.push(cx.subscribe_in(
                     &onboarding,
                     window,
                     |this, _, event, window, cx| match event {
                         OnboardingEvent::Done => {
                             this.onboarding = None;
-                            // "Set up AI" may have been asked for on the way.
-                            if this.page == Page::Settings {
-                                this.open_page(Page::Settings, window, cx);
-                            } else {
-                                this.open_resumes(window, cx);
-                            }
+                            this.open_resumes(window, cx);
                         }
                     },
                 ));
@@ -350,7 +306,6 @@ impl Workspace {
         let mut workspace = Self {
             needs_review: 0,
             unread: Vec::new(),
-            settings_id: 0,
             database,
             page: Page::Resumes,
             sidebar_collapsed: device.sidebar_collapsed,
@@ -358,13 +313,11 @@ impl Workspace {
             saving_window: Task::ready(()),
             // Always opened windowed, then maximized once mapped.
             windowed_bounds: window.bounds(),
-            focus_handle: cx.focus_handle(),
             resume_grid,
             job_view,
             facts_page,
             import_page,
-            ai_settings,
-            stand_in_name,
+            settings_page: None,
             onboarding,
             _job_form: None,
             _subscriptions: subscriptions,
@@ -391,7 +344,6 @@ impl Workspace {
                 }
             }
             LastPage::Facts => self.open_page(Page::Facts, window, cx),
-            LastPage::Settings => self.open_page(Page::Settings, window, cx),
         }
     }
 
@@ -405,7 +357,6 @@ impl Workspace {
                 .job()
                 .map_or(LastPage::Resumes, LastPage::Job),
             Page::Facts => LastPage::Facts,
-            Page::Settings => LastPage::Settings,
             // Not opened on start: an import half done isn't kept.
             Page::Import => return,
         };
@@ -550,7 +501,11 @@ impl Workspace {
     /// made, and says so: it may be on another page.
     fn undo_or_redo(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
         let database = self.database.read(cx);
-        let undone = if redo { database.redo(cx) } else { database.undo(cx) };
+        let undone = if redo {
+            database.redo(cx)
+        } else {
+            database.undo(cx)
+        };
         cx.spawn_in(window, async move |_, cx| {
             let message = match (undone.await, redo) {
                 (Ok(true), false) => "Undone",
@@ -559,7 +514,11 @@ impl Workspace {
                 (Ok(false), true) => "Nothing to redo",
                 (Err(error), _) => {
                     eprintln!("couldn't undo or redo: {error}");
-                    if redo { "Couldn't redo" } else { "Couldn't undo" }
+                    if redo {
+                        "Couldn't redo"
+                    } else {
+                        "Couldn't undo"
+                    }
                 }
             };
             if let Err(error) = cx.update(|window, cx| {
@@ -576,6 +535,7 @@ impl Workspace {
     }
 
     fn open_job(&mut self, job: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_page = None;
         self.page = Page::Job;
         self.job_view
             .update(cx, |job_view, cx| job_view.set_job(job, cx));
@@ -587,17 +547,15 @@ impl Workspace {
     /// Opens the form a job is added with; the job opens once it's added.
     fn open_job_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let form = cx.new(|cx| JobForm::new(self.database.clone(), window, cx));
-        self._job_form = Some(cx.subscribe_in(
-            &form,
-            window,
-            |this, _, event, window, cx| {
+        self._job_form = Some(
+            cx.subscribe_in(&form, window, |this, _, event, window, cx| {
                 window.close_dialog(cx);
                 this._job_form = None;
                 if let JobFormEvent::Added(job) = event {
                     this.open_job(*job, window, cx);
                 }
-            },
-        ));
+            }),
+        );
         window.open_dialog(cx, {
             let form = form.clone();
             move |dialog, _, cx| {
@@ -609,7 +567,9 @@ impl Workspace {
                     .content(move |content, _, _| content.child(form.clone()))
             }
         });
-        window.defer(cx, move |window, cx| form.update(cx, |form, cx| form.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            form.update(cx, |form, cx| form.focus(window, cx))
+        });
     }
 
     /// Back to the grid, with the job that was open still selected.
@@ -618,6 +578,7 @@ impl Workspace {
             self.resume_grid
                 .update(cx, |resume_grid, cx| resume_grid.select(job, cx));
         }
+        self.settings_page = None;
         self.page = Page::Resumes;
         self.resume_grid.focus_handle(cx).focus(window, cx);
         self.save_page(cx);
@@ -625,23 +586,63 @@ impl Workspace {
     }
 
     fn open_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_page = None;
         self.page = page;
         // The page being left may have had focus; without focus, keys like
         // Ctrl+B have nowhere to go.
         match page {
             Page::Facts => self.facts_page.focus_handle(cx).focus(window, cx),
             Page::Import => self.import_page.focus_handle(cx).focus(window, cx),
-            Page::Settings => self.focus_handle.focus(window, cx),
             Page::Resumes | Page::Job => {}
         }
         self.save_page(cx);
         cx.notify();
     }
 
-    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn show_settings(
+        &mut self,
+        section: Option<SettingsSection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (&self.settings_page, section) {
+            (Some(settings), Some(section)) => {
+                settings.update(cx, |settings, cx| settings.show(section, cx))
+            }
+            (Some(_), None) => {}
+            (None, section) => {
+                let section = section.unwrap_or(SettingsSection::Appearance);
+                let database = self.database.clone();
+                self.settings_page =
+                    Some(cx.new(|cx| SettingsPage::new(database, section, window, cx)));
+            }
+        }
+        if let Some(settings) = &self.settings_page {
+            settings.focus_handle(cx).focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_page.take().is_none() {
+            return;
+        }
+        let focus = match self.page {
+            _ if self.onboarding.is_some() => self.import_page.focus_handle(cx),
+            Page::Resumes => self.resume_grid.focus_handle(cx),
+            Page::Job => self.job_view.focus_handle(cx),
+            Page::Facts => self.facts_page.focus_handle(cx),
+            Page::Import => self.import_page.focus_handle(cx),
+        };
+        focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn render_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let needs_review = self.needs_review;
-        let theme = cx.theme();
-        let nav_icon = |icon| Icon::new(icon).small().text_color(theme.primary);
+        let primary = cx.theme().primary;
+        let sidebar_border = cx.theme().sidebar_border;
+        let nav_icon = |icon| Icon::new(icon).small().text_color(primary);
         let mut facts = SidebarMenuItem::new("Career facts")
             .icon(nav_icon(IconName::BookOpen))
             .active(self.page == Page::Facts)
@@ -662,28 +663,53 @@ impl Workspace {
         }
 
         let collapsed = self.sidebar_collapsed;
-        let settings = Button::new("settings-navigation")
+        let toggle = Button::new("toggle-sidebar")
             .ghost()
             .small()
-            .h_7()
-            .icon(nav_icon(IconName::Settings))
-            .selected(self.page == Page::Settings)
-            .when_else(collapsed, |this| this.w_full(), |this| this.label("Settings"))
-            .tooltip("Settings")
-            .on_click(
-                cx.listener(|this, _, window, cx| this.open_page(Page::Settings, window, cx)),
+            .icon(if collapsed {
+                IconName::PanelLeftOpen
+            } else {
+                IconName::PanelLeftClose
+            })
+            .tooltip_with_action(
+                if collapsed {
+                    "Expand sidebar"
+                } else {
+                    "Collapse sidebar"
+                },
+                &ToggleSidebar,
+                None,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+        // The footer isn't one of the sidebar's groups, so it's told it's
+        // collapsed and rendered here.
+        let footer_menu = SidebarMenu::new()
+            .gap_1()
+            .collapsed(collapsed)
+            .child(
+                SidebarMenuItem::new("Keyboard shortcuts")
+                    .h_7()
+                    .icon(
+                        Icon::new(gpui_kit::assets::IconName::Keyboard)
+                            .small()
+                            .text_color(primary),
+                    )
+                    .on_click(|_, window, cx| shortcuts::open(window, cx)),
+            )
+            .child(
+                SidebarMenuItem::new("Settings")
+                    .h_7()
+                    .icon(nav_icon(IconName::Settings))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.show_settings(None, window, cx)),
+                    ),
             );
-        let keyboard = Button::new("keyboard-shortcuts")
-            .ghost()
-            .small()
-            .label(if collapsed { "?" } else { "Shortcuts" })
-            .tooltip_with_action("Keyboard shortcuts", &ShowShortcuts, None)
-            .on_click(|_, window, cx| shortcuts::open(window, cx));
-        let footer = v_flex().w_full().items_start().gap_1().child(settings).child(
+        let footer_menu = footer_menu.render("footer-menu", window, cx);
+        let footer = v_flex().w_full().gap_1().child(footer_menu).child(
             h_flex()
                 .w_full()
                 .border_t_1()
-                .border_color(theme.sidebar_border)
+                .border_color(sidebar_border)
                 .pt_1()
                 .when_else(
                     collapsed,
@@ -713,7 +739,7 @@ impl Workspace {
                             .child(div().flex_1())
                     },
                 )
-                .child(keyboard),
+                .child(toggle),
         );
 
         let library = SidebarMenu::new()
@@ -722,7 +748,7 @@ impl Workspace {
                 SidebarMenuItem::new("Résumés")
                     .h_7()
                     .icon(nav_icon(IconName::FileText))
-                    .active(matches!(self.page, Page::Resumes | Page::Job))
+                    .active(resumes_highlighted(self.page, collapsed))
                     .on_click(cx.listener(|this, _, window, cx| this.open_resumes(window, cx))),
             )
             .child(facts.h_7())
@@ -756,32 +782,10 @@ impl Workspace {
                 },
             ),
         );
-        let toggle = Button::new("toggle-sidebar")
-            .ghost()
-            .w(TOGGLE_WIDTH)
-            .h_7()
-            .when(!collapsed, |this| this.ml_auto())
-            .icon(if collapsed {
-                IconName::PanelLeftOpen
-            } else {
-                IconName::PanelLeftClose
-            })
-            .tooltip_with_action(
-                if collapsed {
-                    "Expand sidebar"
-                } else {
-                    "Collapse sidebar"
-                },
-                &ToggleSidebar,
-                None,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
-
         Sidebar::new("sidebar")
             .collapsible(SidebarCollapsible::Icon)
             .collapsed(collapsed)
             .w(SIDEBAR_WIDTH)
-            .header(toggle)
             .child(SidebarGroup::new("Library").child(library))
             .when(!collapsed && self.page == Page::Resumes, |this| {
                 this.child(SidebarGroup::new("Applications").child(applications.mt_0p5()))
@@ -796,7 +800,16 @@ enum Page {
     Job,
     Facts,
     Import,
-    Settings,
+}
+
+/// Whether the sidebar's "Résumés" is highlighted. On the grid the filter
+/// under it carries the highlight; collapsed, the filters aren't there to.
+fn resumes_highlighted(page: Page, sidebar_collapsed: bool) -> bool {
+    match page {
+        Page::Job => true,
+        Page::Resumes => sidebar_collapsed,
+        Page::Facts | Page::Import => false,
+    }
 }
 
 /// Sets the theme and motion to the stored settings, where they differ.
@@ -810,217 +823,6 @@ fn apply_settings(stored: settings::Settings, cx: &mut App) {
     if Motion::current(cx) != stored.motion {
         stored.motion.set(cx);
     }
-}
-
-/// Each choice is written to `settings`; the workspace applies it once the
-/// write commits. The AI provider and model are this device's.
-fn settings_page(
-    id: usize,
-    database: Entity<Database>,
-    ai_settings: Entity<AiSettings>,
-    stand_in_name: Entity<StandInName>,
-    cx: &App,
-) -> AnyElement {
-    let ai = ai_page(database.clone(), ai_settings, stand_in_name, cx);
-    let options = Appearance::ALL
-        .into_iter()
-        .map(|appearance| {
-            (
-                SharedString::from(appearance.stored()),
-                SharedString::from(appearance.label()),
-            )
-        })
-        .collect();
-
-    // Used only as the id's state is made: Settings first opens on its first
-    // page, and on AI from "Set up AI".
-    let start = if id == 0 { 0 } else { AI_SETTINGS_PAGE };
-    Settings::new(("settings", id))
-        .sidebar_width(px(168.))
-        .sidebar_size_range(px(144.)..px(240.))
-        .with_group_variant(GroupBoxVariant::Outline)
-        .default_selected_index(SelectIndex {
-            page_ix: start,
-            group_ix: None,
-        })
-        .page(
-            SettingPage::new("General")
-            .description("Make Kron feel at home on your desktop.")
-            .group(
-                SettingGroup::new().title("Appearance").item(
-                    SettingItem::new(
-                        "Theme",
-                        SettingField::dropdown(
-                            options,
-                            |cx| Appearance::current(cx).stored().into(),
-                            {
-                                let database = database.clone();
-                                move |key, cx| {
-                                    if let Some(appearance) = Appearance::from_stored(&key) {
-                                        database.read(cx).queue(move |write| {
-                                            settings::set_appearance(write, appearance)
-                                        });
-                                    }
-                                }
-                            },
-                        ),
-                    )
-                    .description("Match system follows your desktop's light or dark setting."),
-                )
-                .item(
-                    SettingItem::render({
-                        let database = database.clone();
-                        move |_, _, cx| palette_picker::palette_picker(database.clone(), cx)
-                    }).keywords(["color", "palette", "moss", "midnight", "copper", "orchid", "olive", "porcelain", "linen", "glacier"]),
-                )
-                .item(
-                    SettingItem::new(
-                        "Motion",
-                        SettingField::dropdown(
-                            Motion::ALL
-                                .into_iter()
-                                .map(|motion| {
-                                    (
-                                        SharedString::from(motion.stored()),
-                                        SharedString::from(motion.label()),
-                                    )
-                                })
-                                .collect(),
-                            |cx| Motion::current(cx).stored().into(),
-                            move |key, cx| {
-                                if let Some(motion) = Motion::from_stored(&key) {
-                                    database
-                                        .read(cx)
-                                        .queue(move |write| settings::set_motion(write, motion));
-                                }
-                            },
-                        ),
-                    )
-                    .description(
-                        "Reduced stops things sliding, like the sidebar collapsing. Match system \
-                         follows your desktop's reduce-animation setting.",
-                    ),
-                ),
-            ),
-        )
-        .page(ai)
-        .into_any_element()
-}
-
-/// The provider and model facts are found with, the provider's key, and the
-/// name sent in place of the user's.
-fn ai_page(
-    database: Entity<Database>,
-    ai_settings: Entity<AiSettings>,
-    stand_in_name: Entity<StandInName>,
-    cx: &App,
-) -> SettingPage {
-    let assigned = {
-        let database = database.clone();
-        move |cx: &App| {
-            llm::assigned(database.read(cx).device_connection(), Purpose::ExtractFacts)
-                .unwrap_or_else(|error| {
-                    eprintln!("workspace: couldn't read the AI provider: {error}");
-                    None
-                })
-        }
-    };
-    let vendors = llm::VENDORS
-        .iter()
-        .map(|(id, name)| (SharedString::from(*id), SharedString::from(*name)))
-        .collect();
-    let vendor = assigned(cx).map_or(llm::VENDORS[0].0.to_owned(), |provider| provider.vendor);
-    let models = llm::models(&vendor)
-        .into_iter()
-        .map(|(id, name)| (SharedString::from(id), SharedString::from(name)))
-        .collect();
-    SettingPage::new("AI").group(
-        SettingGroup::new()
-            .title("Finding facts")
-            .item(
-                SettingItem::new(
-                    "Provider",
-                    SettingField::dropdown(
-                        vendors,
-                        {
-                            let assigned = assigned.clone();
-                            move |cx| {
-                                assigned(cx)
-                                    .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
-                                        provider.vendor
-                                    })
-                                    .into()
-                            }
-                        },
-                        {
-                            let assigned = assigned.clone();
-                            let database = database.clone();
-                            move |vendor, cx| {
-                                let model = assigned(cx)
-                                    .filter(|provider| provider.vendor == vendor.as_ref())
-                                    .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
-                                        provider.model
-                                    });
-                                database.read(cx).queue(move |write| {
-                                    llm::set_default(write, &vendor, &model).map(|_| ())
-                                });
-                            }
-                        },
-                    ),
-                )
-                .description(
-                    "Your CV is sent here to find its facts, with your name and contact details \
-                     hidden first.",
-                ),
-            )
-            .item(
-                SettingItem::new(
-                    "Model",
-                    SettingField::dropdown(
-                        models,
-                        {
-                            let assigned = assigned.clone();
-                            move |cx| {
-                                assigned(cx)
-                                    .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
-                                        provider.model
-                                    })
-                                    .into()
-                            }
-                        },
-                        move |model, cx| {
-                            let vendor = assigned(cx)
-                                .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
-                                    provider.vendor
-                                });
-                            database.read(cx).queue(move |write| {
-                                llm::set_default(write, &vendor, &model).map(|_| ())
-                            });
-                        },
-                    ),
-                )
-                .description("Flash is fast and costs well under a cent per CV."),
-            )
-            .item(
-                SettingItem::new(
-                    "API key",
-                    SettingField::render(move |_, _, _| ai_settings.clone()),
-                )
-                .layout(gpui_kit::Axis::Vertical)
-                .description("Kept in your system keyring, never in Kron's data."),
-            )
-            .item(
-                SettingItem::new(
-                    "Your name is sent as",
-                    SettingField::render(move |_, _, _| stand_in_name.clone()),
-                )
-                .layout(gpui_kit::Axis::Vertical)
-                .description(
-                    "A made-up name the AI sees in place of yours, so it reads your CV as \
-                     written. Yours is put back in what comes back.",
-                ),
-            ),
-    )
 }
 
 #[cfg(test)]
@@ -1149,9 +951,15 @@ mod tests {
         open.cx.dispatch_action(SetUpAi);
         open.cx.run_until_parked();
         assert_eq!(
-            open.read(|workspace, _| (workspace.page, workspace.settings_id)),
-            (Page::Settings, 1),
-            "a new id, so it opens on AI"
+            open.read(|workspace, cx| {
+                let section = workspace
+                    .settings_page
+                    .as_ref()
+                    .map(|settings| settings.read(cx).opened_on());
+                (workspace.page, section)
+            }),
+            (Page::Resumes, Some(SettingsSection::Ai)),
+            "Settings opens on AI without replacing the library"
         );
         open.cx.dispatch_action(ShowFacts);
         open.cx.run_until_parked();
@@ -1159,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn set_up_ai_asked_for_while_starting_out_opens_settings_after() {
+    fn set_up_ai_while_starting_out_opens_settings_over_onboarding() {
         let mut app = TestAppContext::single();
         let (database, _directory) = testing::open_empty(&mut app);
         let (workspace, cx) =
@@ -1167,13 +975,73 @@ mod tests {
         cx.run_until_parked();
         cx.dispatch_action(SetUpAi);
         cx.run_until_parked();
-        testing::run(cx, &database, |write| {
-            commands::import_document(write, None, "Rust\n").map(|_| ())
+        let shown = workspace.read_with(cx, |workspace, cx| {
+            (
+                workspace.onboarding.is_some(),
+                workspace
+                    .settings_page
+                    .as_ref()
+                    .map(|settings| settings.read(cx).opened_on()),
+            )
         });
+        assert_eq!(shown, (true, Some(SettingsSection::Ai)));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
         let shown = workspace.read_with(cx, |workspace, _| {
-            (workspace.onboarding.is_some(), workspace.page)
+            (
+                workspace.onboarding.is_some(),
+                workspace.settings_page.is_some(),
+            )
         });
-        assert_eq!(shown, (false, Page::Settings));
+        assert_eq!(
+            shown,
+            (true, false),
+            "closing Settings goes back to onboarding"
+        );
+    }
+
+    #[test]
+    fn settings_closes_back_to_the_page_it_was_opened_over() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.cx.dispatch_action(ShowFacts);
+        open.cx.simulate_keystrokes("ctrl-,");
+        open.cx.run_until_parked();
+        assert!(open.read(|workspace, _| workspace.settings_page.is_some()));
+        open.cx
+            .update(|window, cx| window.click("close-settings", cx));
+        open.cx.run_until_parked();
+        assert_eq!(
+            open.read(|workspace, cx| (
+                workspace.settings_page.is_none(),
+                workspace.page,
+                cx.windows().len()
+            )),
+            (true, Page::Facts, 1)
+        );
+
+        open.cx.simulate_keystrokes("ctrl-,");
+        open.cx.run_until_parked();
+        open.cx.simulate_keystrokes("escape");
+        open.cx.run_until_parked();
+        assert_eq!(
+            open.read(|workspace, _| (workspace.settings_page.is_none(), workspace.page)),
+            (true, Page::Facts),
+            "Esc closes it too"
+        );
+    }
+
+    #[test]
+    fn on_the_grid_only_the_filter_is_highlighted_in_the_sidebar() {
+        assert!(!resumes_highlighted(Page::Resumes, false), "the filter is");
+        assert!(
+            resumes_highlighted(Page::Resumes, true),
+            "no filters when collapsed"
+        );
+        assert!(resumes_highlighted(Page::Job, false), "no filters in a job");
+        assert!(!resumes_highlighted(Page::Facts, false));
     }
 
     #[test]
@@ -1181,15 +1049,13 @@ mod tests {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
         let job = JobId(open.id("SELECT id FROM jobs WHERE company = 'Ledgerly'"));
-        let line = LineId(open.id(
-            "SELECT lines.id FROM lines
+        let line = LineId(open.id("SELECT lines.id FROM lines
              JOIN blocks ON blocks.id = lines.block_id
              JOIN sections ON sections.id = blocks.section_id
              JOIN current_generations ON current_generations.generation_id = sections.generation_id
              JOIN jobs ON jobs.id = current_generations.job_id
              WHERE jobs.company = 'Ledgerly' AND current_generations.kind = 'resume'
-             LIMIT 1",
-        ));
+             LIMIT 1"));
         open.cx.dispatch_action(OpenLine { job, line });
         open.cx.run_until_parked();
         assert!(open.read(|workspace, _| workspace.page == Page::Job));
@@ -1250,18 +1116,23 @@ mod tests {
         let job = {
             let mut open = reopen(&mut app, &database);
             let job = JobId(open.id("SELECT id FROM jobs WHERE company = 'Ledgerly'"));
-            open.workspace
-                .update_in(open.cx, |workspace, window, cx| workspace.open_job(job, window, cx));
+            open.workspace.update_in(open.cx, |workspace, window, cx| {
+                workspace.open_job(job, window, cx)
+            });
             testing::settle(open.cx, &database);
             assert_eq!(device_settings(&mut open).last_page, LastPage::Job(job));
             job
         };
         let mut open = reopen(&mut app, &database);
         assert!(open.read(|workspace, _| workspace.page == Page::Job));
-        assert_eq!(open.read(|workspace, cx| workspace.job_view.read(cx).job()), Some(job));
+        assert_eq!(
+            open.read(|workspace, cx| workspace.job_view.read(cx).job()),
+            Some(job)
+        );
 
-        open.workspace
-            .update_in(open.cx, |workspace, window, cx| workspace.open_resumes(window, cx));
+        open.workspace.update_in(open.cx, |workspace, window, cx| {
+            workspace.open_resumes(window, cx)
+        });
         testing::settle(open.cx, &database);
         assert_eq!(device_settings(&mut open).last_page, LastPage::Resumes);
     }
@@ -1297,7 +1168,10 @@ mod tests {
             gpui_kit::Hsla::from(gpui_kit::rgb(0x93c4ac)),
         );
         open.run(|write| settings::set_appearance(write, Appearance::Light));
-        assert_eq!(open.read(|_, cx| Appearance::current(cx)), Appearance::Light);
+        assert_eq!(
+            open.read(|_, cx| Appearance::current(cx)),
+            Appearance::Light
+        );
         assert_eq!(
             open.read(|_, cx| cx.theme().primary),
             gpui_kit::Hsla::from(gpui_kit::rgb(0x376dbb)),

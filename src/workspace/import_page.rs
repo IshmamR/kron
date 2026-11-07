@@ -28,7 +28,7 @@ use gpui_kit::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
-use super::parts::{caption, notice, notify};
+use super::parts::{caption, notice, notify, page_title, text_field};
 use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
 use super::{SetUpAi, ShowFacts};
 use crate::database::{Database, Error};
@@ -109,7 +109,14 @@ impl Render for ImportPage {
             .size_full()
             .flex()
             .justify_center()
-            .child(div().size_full().max_w(PAGE_MAX_WIDTH).px_6().py_5().child(content))
+            .child(
+                div()
+                    .size_full()
+                    .max_w(PAGE_MAX_WIDTH)
+                    .px_6()
+                    .py_5()
+                    .child(content),
+            )
     }
 }
 
@@ -690,10 +697,12 @@ impl ImportPage {
                 this.import(paths.paths().to_vec(), window, cx)
             }))
             .child(
-                v_flex().gap_2()
-                    .child(title("Import".into()))
-                    .child(div().text_sm().text_color(theme.muted_foreground)
-                        .child("Bring your experience into Kron.")),
+                v_flex().gap_2().child(page_title("Import")).child(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Bring your experience into Kron."),
+                ),
             )
             .children(self.render_problem(cx))
             .child(
@@ -721,7 +730,11 @@ impl ImportPage {
                         v_flex()
                             .items_center()
                             .gap_2()
-                            .child(div().font_weight(FontWeight::MEDIUM).child("Drop your CV here"))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Drop your CV here"),
+                            )
                             .child(caption("PDF, Markdown or plain text.", cx)),
                     )
                     .child(
@@ -777,8 +790,17 @@ impl ImportPage {
                     .gap_2()
                     .px_1()
                     .pt_2()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("You're in control of what is shared"))
-                    .child(caption("Files are read on this device. Review the text, then choose which personal details to hide before an AI model receives it.", cx)),
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("You're in control of what is shared"),
+                    )
+                    .child(caption(
+                        "Files are read on this device. Review the text, then choose which \
+                         personal details to hide before an AI model receives it.",
+                        cx,
+                    )),
             )
     }
 
@@ -798,7 +820,7 @@ impl ImportPage {
         v_flex()
             .gap_3()
             .children(self.position().map(|position| caption(position, cx)))
-            .child(title(format!("Import {}?", file.file_name).into()))
+            .child(page_title(format!("Import {}?", file.file_name)))
             .children(self.render_problem(cx))
             .when(self.added > 1, |this| {
                 this.child(caption(
@@ -883,7 +905,7 @@ impl ImportPage {
                     .flex_wrap()
                     .justify_between()
                     .gap_3()
-                    .child(title(heading.into()))
+                    .child(page_title(heading))
                     .child(
                         h_flex()
                             .gap_2()
@@ -923,7 +945,7 @@ impl ImportPage {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(Textarea::new(&self.text).h_full()),
+                    .child(text_field(Textarea::new(&self.text).h_full(), &self.text, cx).h_full()),
             )
     }
 }
@@ -967,13 +989,6 @@ struct Read {
     name: Option<String>,
     warnings: Vec<Warning>,
     saving: bool,
-}
-
-fn title(text: SharedString) -> impl IntoElement {
-    div()
-        .text_2xl()
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(text)
 }
 
 /// The latest import of the file with this hash that's still there.

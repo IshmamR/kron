@@ -15,7 +15,7 @@ use super::ShowFact;
 use super::job_view::{ShownLine, ShownResume};
 use super::parts::{
     Source, caption, card, entry_label, fact_kind_label, fact_status, heading, notice,
-    source_excerpt, sources,
+    source_excerpt, sources, text_field,
 };
 use crate::database::{Database, Error};
 use crate::model::verifier::GivenFact;
@@ -150,12 +150,17 @@ impl Inspector {
             })
             .children(edited)
             .children(self.new_words(line, cx))
-            .children(self.inspection.facts.iter().map(|cited| match &cited.fact {
-                Some(fact) => {
-                    fact_card(fact, self.resume.change(cited.id), cx).into_any_element()
-                }
-                None => notice("This line cites a fact that no longer exists.", theme.danger)
+            .children(self.inspection.facts.iter().map(|cited| {
+                match &cited.fact {
+                    Some(fact) => {
+                        fact_card(fact, self.resume.change(cited.id), cx).into_any_element()
+                    }
+                    None => notice(
+                        "This line cites a fact that no longer exists.",
+                        theme.danger,
+                    )
                     .into_any_element(),
+                }
             }))
     }
 
@@ -171,11 +176,11 @@ impl Inspector {
         let id = line.id;
         v_flex()
             .gap_1()
-            .child(
-                div()
-                    .key_context(LINE_EDITOR_CONTEXT)
-                    .child(Textarea::new(editor)),
-            )
+            .child(div().key_context(LINE_EDITOR_CONTEXT).child(text_field(
+                Textarea::new(editor),
+                editor,
+                cx,
+            )))
             .when(line.is_edited(), |this| {
                 this.child(
                     h_flex()
@@ -437,7 +442,10 @@ fn inspected_fact(connection: &Connection, fact: FactId) -> Result<Option<Inspec
         return Ok(None);
     };
     let review = match review {
-        Some((reason, note)) => Some(Review { reason, note: note? }),
+        Some((reason, note)) => Some(Review {
+            reason,
+            note: note?,
+        }),
         None => None,
     };
     let entry = match entry {
@@ -457,7 +465,15 @@ fn inspected_fact(connection: &Connection, fact: FactId) -> Result<Option<Inspec
 
 /// The claims the generator left out of the résumé, in order.
 fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error> {
-    type Row = (Uuid, String, String, Option<String>, Option<u16>, Option<Uuid>, Option<Uuid>);
+    type Row = (
+        Uuid,
+        String,
+        String,
+        Option<String>,
+        Option<u16>,
+        Option<Uuid>,
+        Option<Uuid>,
+    );
     let rows: Vec<Row> = connection
         .prepare_cached(
             "SELECT id, text, reason, figure, year, hidden_fact_id, added_as
@@ -487,14 +503,18 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
             ("uses_hidden_fact", _, _, Some(fact)) => {
                 let fact = root(connection, fact)?;
                 hidden_fact_shown = connection
-                    .prepare_cached("SELECT hidden FROM facts WHERE id = ?1 AND deleted_at IS NULL")?
+                    .prepare_cached(
+                        "SELECT hidden FROM facts WHERE id = ?1 AND deleted_at IS NULL",
+                    )?
                     .query_row([fact.0], |row| row.get::<_, bool>(0))
                     .optional()?
                     == Some(false);
                 UnsupportedReason::UsesHiddenFact(fact)
             }
             (reason, ..) => {
-                return Err(Error::Misuse(format!("unsupported_claims.reason: {reason}")));
+                return Err(Error::Misuse(format!(
+                    "unsupported_claims.reason: {reason}"
+                )));
             }
         };
         let added_as = match added_as {
@@ -515,8 +535,7 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
 /// The fact at the end of `fact`'s chain of merges: itself, unless it was
 /// merged into another.
 fn root(connection: &Connection, fact: Uuid) -> Result<FactId, Error> {
-    let mut statement =
-        connection.prepare_cached("SELECT merged_into FROM facts WHERE id = ?1")?;
+    let mut statement = connection.prepare_cached("SELECT merged_into FROM facts WHERE id = ?1")?;
     let mut fact = fact;
     for _ in 0..MERGE_DEPTH {
         let merged_into: Option<Uuid> = statement
@@ -557,7 +576,9 @@ fn fact_card(fact: &InspectedFact, change: Option<FactChange>, cx: &App) -> impl
                 .child(fact_status(fact.review.is_some(), fact.hidden, cx)),
         )
         .child(div().text_sm().child(fact.text.clone()))
-        .when_some(fact.entry.clone(), |this, entry| this.child(caption(entry, cx)))
+        .when_some(fact.entry.clone(), |this, entry| {
+            this.child(caption(entry, cx))
+        })
         .when_some(changed, |this, changed| {
             this.child(notice(changed, theme.warning))
         })

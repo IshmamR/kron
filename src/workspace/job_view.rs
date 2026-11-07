@@ -3,26 +3,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::{DateTime, Local, Utc};
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{InputEvent, TextareaState};
-use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::notification::Notification;
-use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
-use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab as KitTab, TabBar};
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt, h_flex, v_flex,
-};
-use gpui_kit::{
-    Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter, FocusHandle, Focusable, FontWeight,
-    Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    Point, RenderImage, ScrollHandle, Stateful, Subscription, Task, Window, actions, canvas, div, img, point,
-    prelude::*, px, rgb,
-};
-use rusqlite::{Connection, OptionalExtension};
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
@@ -39,6 +19,27 @@ use crate::model::redaction::{self, Redaction};
 use crate::model::settings;
 use crate::model::{self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands};
 use crate::typeset::{self, LineBox, PageSize, Paper, Template};
+use chrono::{DateTime, Local, Utc};
+use gpui_kit::TestSupportExt as _;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{InputEvent, TextareaState};
+use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel};
+use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tab::{Tab as KitTab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt, h_flex, v_flex,
+};
+use gpui_kit::{
+    Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, RenderImage, ScrollHandle, Stateful, Subscription, Task, Window,
+    actions, canvas, div, img, point, prelude::*, px, rgb,
+};
+use rusqlite::{Connection, OptionalExtension};
 
 const KEY_CONTEXT: &str = "JobView";
 /// Pages are shown this wide: a bit over US Letter at 96 dpi.
@@ -161,8 +162,9 @@ impl Render for JobView {
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
         let shown = self.shown_id();
         let render = shown.and_then(|resume| {
-            self.previews
-                .update(cx, |previews, cx| previews.get(resume, pixels_per_point, cx))
+            self.previews.update(cx, |previews, cx| {
+                previews.get(resume, pixels_per_point, cx)
+            })
         });
         self.pages = match &render {
             Some(PageRender::Ready(pages)) => Some(pages.clone()),
@@ -235,9 +237,7 @@ impl JobView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let application = cx.new(|cx| {
-            ApplicationView::new(database.clone(), window, cx)
-        });
+        let application = cx.new(|cx| ApplicationView::new(database.clone(), window, cx));
         let line_editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
@@ -268,14 +268,16 @@ impl JobView {
                 }),
                 cx.observe(&previews, |_, _, cx| cx.notify()),
                 cx.observe(&application, |_, _, cx| cx.notify()),
-                cx.subscribe_in(&application, window, |this, _, event, window, cx| {
-                    match event {
+                cx.subscribe_in(
+                    &application,
+                    window,
+                    |this, _, event, window, cx| match event {
                         ApplicationViewEvent::ShowResume(resume) => {
                             this.show_version(*resume, cx);
                             this.set_tab(Tab::Resume, window, cx);
                         }
-                    }
-                }),
+                    },
+                ),
             ],
             database,
             previews,
@@ -549,13 +551,21 @@ impl JobView {
             return;
         };
         let connection = self.database.read(cx).connection();
-        if self.summary.as_ref().is_none_or(|summary| summary.job != job) {
+        if self
+            .summary
+            .as_ref()
+            .is_none_or(|summary| summary.job != job)
+        {
             self.summary = Application::read(connection, job).unwrap_or_else(|error| {
                 eprintln!("job view: couldn't read the job: {error}");
                 None
             });
         }
-        if self.versions.as_ref().is_none_or(|versions| versions.job != job) {
+        if self
+            .versions
+            .as_ref()
+            .is_none_or(|versions| versions.job != job)
+        {
             self.versions = Some(Versions::read(connection, job).unwrap_or_else(|error| {
                 eprintln!("job view: couldn't read the job's résumés: {error}");
                 Versions {
@@ -586,8 +596,8 @@ impl JobView {
             .as_ref()
             .is_some_and(|inspection| inspection.is_of(shown, self.selected));
         if !read && let Some(resume) = &self.shown {
-            let inspection = Inspection::read(connection, resume, self.selected)
-                .unwrap_or_else(|error| {
+            let inspection =
+                Inspection::read(connection, resume, self.selected).unwrap_or_else(|error| {
                     eprintln!("job view: couldn't read the inspector's facts: {error}");
                     Inspection::empty(shown, self.selected)
                 });
@@ -745,6 +755,66 @@ impl JobView {
             .on_click(cx.listener(|this, _, window, cx| this.ask_to_generate(window, cx)))
     }
 
+    /// Shown when facts the résumé was generated from changed since, with the
+    /// way to bring it up to date beside it.
+    fn outdated_notice(
+        &self,
+        resume: &ShownResume,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let changed = resume.changes.len();
+        if changed == 0 {
+            return None;
+        }
+        let mut text = if changed == 1 {
+            "A fact this résumé used has changed.".to_string()
+        } else {
+            format!("{changed} facts this résumé used have changed.")
+        };
+        // A fact it left out, like a hidden one shown again, is on no line.
+        if resume.lines.iter().any(|line| resume.is_outdated(line)) {
+            text.push_str(" Marked lines may be out of date.");
+        }
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .id("outdated-notice")
+                .test_support()
+                .flex_none()
+                .gap_3()
+                .px_4()
+                .py_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.warning.opacity(0.08))
+                .text_sm()
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .small()
+                        .text_color(theme.warning),
+                )
+                // Wraps rather than running under the inspector.
+                .child(
+                    div()
+                        .id("outdated-text")
+                        .test_support()
+                        .flex_1()
+                        .min_w_0()
+                        .child(text),
+                )
+                .child(
+                    Button::new("regenerate-outdated")
+                        .label("Regenerate")
+                        .outline()
+                        .small()
+                        .disabled(self.generating)
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.ask_to_generate(window, cx)),
+                        ),
+                ),
+        )
+    }
+
     /// Asks for anything to steer the résumé, starting from what the last was
     /// asked, then writes it.
     fn ask_to_generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -757,17 +827,16 @@ impl JobView {
                 None
             });
         let form = cx.new(|cx| InstructionsForm::new(last, window, cx));
-        self._instructions_form = Some(cx.subscribe_in(
-            &form,
-            window,
-            |this, _, event, window, cx| {
-                window.close_dialog(cx);
-                this._instructions_form = None;
-                if let InstructionsFormEvent::Generate(instructions) = event {
-                    this.generate(instructions.clone(), window, cx);
-                }
-            },
-        ));
+        self._instructions_form =
+            Some(
+                cx.subscribe_in(&form, window, |this, _, event, window, cx| {
+                    window.close_dialog(cx);
+                    this._instructions_form = None;
+                    if let InstructionsFormEvent::Generate(instructions) = event {
+                        this.generate(instructions.clone(), window, cx);
+                    }
+                }),
+            );
         let title = match self.shown_id() {
             Some(_) => "Regenerate the résumé",
             None => "Generate a résumé",
@@ -783,7 +852,9 @@ impl JobView {
                     .content(move |content, _, _| content.child(form.clone()))
             }
         });
-        window.defer(cx, move |window, cx| form.update(cx, |form, cx| form.focus(window, cx)));
+        window.defer(cx, move |window, cx| {
+            form.update(cx, |form, cx| form.focus(window, cx))
+        });
     }
 
     /// Writes a résumé for the job from the user's facts and `instructions`
@@ -886,15 +957,13 @@ impl JobView {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
                     let resume = match &draft {
-                        Ok(draft) => {
-                            Some(generation::save(
-                                write,
-                                job,
-                                draft,
-                                paper,
-                                instructions.as_deref(),
-                            )?)
-                        }
+                        Ok(draft) => Some(generation::save(
+                            write,
+                            job,
+                            draft,
+                            paper,
+                            instructions.as_deref(),
+                        )?),
                         Err(_) => None,
                     };
                     llm::record(
@@ -951,26 +1020,33 @@ impl JobView {
         if self.shown_id().is_none() {
             return self.render_resume(None, render, cx);
         }
-        let shown = self.shown.as_ref().filter(|resume| Some(resume.id) == self.shown_id());
+        let shown = self
+            .shown
+            .as_ref()
+            .filter(|resume| Some(resume.id) == self.shown_id());
         let version = self.shown_version();
         let showing_current = self.showing_sent.is_none();
-        let sent = self.versions.as_ref().and_then(|versions| versions.sent.as_ref());
+        let sent = self
+            .versions
+            .as_ref()
+            .and_then(|versions| versions.sent.as_ref());
         h_resizable("job-view")
             .with_state(&self.layout)
             .child(
                 resizable_panel().child(
                     v_flex()
                         .size_full()
-                        .children(version.map(|version| {
-                            template_bar(version, !showing_current, cx)
-                        }))
+                        .children(
+                            version.map(|version| template_bar(version, !showing_current, cx)),
+                        )
                         .when_some(sent_notice(sent, self.showing_sent, cx), |this, notice| {
                             this.child(notice)
                         })
                         .when(showing_current, |this| {
-                            this.when_some(shown.and_then(|resume| outdated_notice(resume, cx)), |this, notice| {
-                                this.child(notice)
-                            })
+                            this.when_some(
+                                shown.and_then(|resume| self.outdated_notice(resume, cx)),
+                                |this, notice| this.child(notice),
+                            )
                         })
                         .child(self.render_resume(shown.map(Rc::as_ref), render, cx)),
                 ),
@@ -979,14 +1055,18 @@ impl JobView {
                 resizable_panel()
                     .size(INSPECTOR_WIDTH)
                     .size_range(INSPECTOR_MIN_WIDTH..INSPECTOR_MAX_WIDTH)
-                    .children(shown.zip(self.inspection.as_ref()).map(|(resume, inspection)| {
-                        Inspector::new(
-                            self.database.clone(),
-                            resume.clone(),
-                            inspection.clone(),
-                            showing_current.then(|| self.line_editor.clone()),
-                        )
-                    })),
+                    .children(
+                        shown
+                            .zip(self.inspection.as_ref())
+                            .map(|(resume, inspection)| {
+                                Inspector::new(
+                                    self.database.clone(),
+                                    resume.clone(),
+                                    inspection.clone(),
+                                    showing_current.then(|| self.line_editor.clone()),
+                                )
+                            }),
+                    ),
             )
             .into_any_element()
     }
@@ -1408,7 +1488,11 @@ fn sent_notice(
             .border_color(theme.border)
             .bg(theme.secondary)
             .text_sm()
-            .child(Icon::new(IconName::Info).small().text_color(theme.muted_foreground))
+            .child(
+                Icon::new(IconName::Info)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
             .child(div().flex_1().min_w_0().child(text))
             .child(
                 Button::new("toggle-sent")
@@ -1427,39 +1511,6 @@ fn sent_notice(
                         }
                     })),
             ),
-    )
-}
-
-/// Shown when facts the résumé was generated from changed since.
-fn outdated_notice(resume: &ShownResume, cx: &App) -> Option<impl IntoElement> {
-    let changed = resume.changes.len();
-    if changed == 0 {
-        return None;
-    }
-    // A fact it left out, like a hidden one shown again, is on no line.
-    let marked = resume.lines.iter().any(|line| resume.is_outdated(line));
-    let mut text = if changed == 1 {
-        "A fact this résumé was generated from has changed since.".to_string()
-    } else {
-        format!("{changed} facts this résumé was generated from have changed since.")
-    };
-    if marked {
-        text.push_str(" Lines that use them are marked in the margin.");
-    }
-    text.push_str(" Regenerate to write it from them as they are now.");
-    let theme = cx.theme();
-    Some(
-        h_flex()
-            .flex_none()
-            .gap_3()
-            .px_4()
-            .py_2()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.warning.opacity(0.08))
-            .text_sm()
-            .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
-            .child(div().flex_1().child(text)),
     )
 }
 
@@ -1692,11 +1743,13 @@ mod tests {
         connection: &Connection,
         company: &str,
     ) -> Result<(Vec<FactChange>, Vec<ClaimState>), Error> {
-        let Some(version) = Versions::read(connection, sample::job(connection, company)?)?.current else {
+        let Some(version) = Versions::read(connection, sample::job(connection, company)?)?.current
+        else {
             return Ok(Default::default());
         };
         let shown = ShownResume::read(connection, version.id)?;
-        let mut changes: Vec<FactChange> = shown.changes.iter().map(|(_, change)| *change).collect();
+        let mut changes: Vec<FactChange> =
+            shown.changes.iter().map(|(_, change)| *change).collect();
         changes.sort_by_key(|change| format!("{change:?}"));
         let claims = Inspection::read(connection, &shown, None)?
             .claims
@@ -1750,7 +1803,9 @@ mod tests {
                      JOIN sections ON sections.id = blocks.section_id
                      WHERE sections.generation_id = ?1",
                 )?
-                .query_map([resume.0], |row| Ok((LineId(row.get(0)?), row.get(1)?, row.get(2)?)))?
+                .query_map([resume.0], |row| {
+                    Ok((LineId(row.get(0)?), row.get(1)?, row.get(2)?))
+                })?
                 .collect::<Result<_, _>>()?;
             lines.sort();
             stored.sort();
@@ -1758,13 +1813,19 @@ mod tests {
 
             for line in &shown.lines {
                 let cited: Vec<FactId> = connection
-                    .prepare("SELECT fact_id FROM line_citations WHERE line_id = ?1 ORDER BY sort_key")?
+                    .prepare(
+                        "SELECT fact_id FROM line_citations WHERE line_id = ?1 ORDER BY sort_key",
+                    )?
                     .query_map([line.id.0], |row| Ok(FactId(row.get(0)?)))?
                     .collect::<Result<_, _>>()?;
                 assert_eq!(line.cites, cited, "{:?}", line.text);
                 let inspection = Inspection::read(connection, &shown, Some(line.id))?;
                 assert_eq!(
-                    inspection.facts.iter().map(|cited| cited.id).collect::<Vec<_>>(),
+                    inspection
+                        .facts
+                        .iter()
+                        .map(|cited| cited.id)
+                        .collect::<Vec<_>>(),
                     cited
                 );
                 for cited in &inspection.facts {
@@ -1805,7 +1866,11 @@ mod tests {
             (
                 vec![],
                 vec![
-                    (UnsupportedReason::UsesHiddenFact(property_tests), None, false),
+                    (
+                        UnsupportedReason::UsesHiddenFact(property_tests),
+                        None,
+                        false
+                    ),
                     (UnsupportedReason::InventedFigure("$2M".into()), None, false),
                 ]
             )
@@ -1817,8 +1882,17 @@ mod tests {
                 vec![(UnsupportedReason::InventedFigure("12%".into()), None, false)]
             )
         );
-        assert_eq!(current(connection, "Brightwave")?, (vec![FactChange::Reworded], vec![]));
-        for company in ["Tidewater Systems", "Quillpay", "Northstar Metrics", "Kestrel Labs", "Halcyon Cloud"] {
+        assert_eq!(
+            current(connection, "Brightwave")?,
+            (vec![FactChange::Reworded], vec![])
+        );
+        for company in [
+            "Tidewater Systems",
+            "Quillpay",
+            "Northstar Metrics",
+            "Kestrel Labs",
+            "Halcyon Cloud",
+        ] {
             assert_eq!(current(connection, company)?, (vec![], vec![]), "{company}");
         }
         Ok(())
@@ -1849,7 +1923,11 @@ mod tests {
             (
                 vec![FactChange::Hidden, FactChange::Reworded],
                 vec![
-                    (UnsupportedReason::InventedFigure("30%".into()), added.first().copied(), false),
+                    (
+                        UnsupportedReason::InventedFigure("30%".into()),
+                        added.first().copied(),
+                        false
+                    ),
                     (UnsupportedReason::InventedYear(2016), None, false),
                     (UnsupportedReason::NoSupportingFact, None, false),
                 ]
@@ -1861,12 +1939,19 @@ mod tests {
             (
                 vec![FactChange::Hidden, FactChange::Shown],
                 vec![
-                    (UnsupportedReason::UsesHiddenFact(property_tests), None, true),
+                    (
+                        UnsupportedReason::UsesHiddenFact(property_tests),
+                        None,
+                        true
+                    ),
                     (UnsupportedReason::InventedFigure("$2M".into()), None, false),
                 ]
             )
         );
-        assert_eq!(current(connection, "Tidewater Systems")?, (vec![FactChange::Hidden], vec![]));
+        assert_eq!(
+            current(connection, "Tidewater Systems")?,
+            (vec![FactChange::Hidden], vec![])
+        );
         assert_eq!(current(connection, "Quillpay")?, (vec![], vec![]));
         Ok(())
     }
@@ -1917,8 +2002,10 @@ mod tests {
         cx.update(|window, cx| {
             view.focus_handle(cx).focus(window, cx);
             let closed = closed.clone();
-            cx.subscribe(&view, move |_, _: &JobViewEvent, _| *closed.borrow_mut() += 1)
-                .detach();
+            cx.subscribe(&view, move |_, _: &JobViewEvent, _| {
+                *closed.borrow_mut() += 1
+            })
+            .detach();
         });
         cx.run_until_parked();
         View {
@@ -2009,7 +2096,10 @@ mod tests {
         assert_eq!(Some(shown.id), view.current());
         assert!(!shown.lines.is_empty());
         assert!(view.read(|view| view.pages.is_some()), "typeset");
-        assert!(view.inspection().claims.len() == 2, "Ledgerly's two unsupported claims");
+        assert!(
+            view.inspection().claims.len() == 2,
+            "Ledgerly's two unsupported claims"
+        );
     }
 
     #[test]
@@ -2033,7 +2123,10 @@ mod tests {
         assert_eq!(view.selected(), Some(order[0]), "stays at the first");
         let inspection = view.inspection();
         assert_eq!(inspection.line, Some(order[0]));
-        assert!(!inspection.facts.is_empty(), "the inspector shows its facts");
+        assert!(
+            !inspection.facts.is_empty(),
+            "the inspector shows its facts"
+        );
     }
 
     #[test]
@@ -2068,7 +2161,12 @@ mod tests {
         view.run(move |write| commands::set_hidden(write, latency, true));
         let shown = view.shown();
         assert_eq!(shown.change(latency), Some(FactChange::Hidden));
-        assert!(shown.lines.iter().any(|each| each.id == line && shown.is_outdated(each)));
+        assert!(
+            shown
+                .lines
+                .iter()
+                .any(|each| each.id == line && shown.is_outdated(each))
+        );
         let inspection = view.inspection();
         let hidden = inspection
             .facts
@@ -2079,7 +2177,35 @@ mod tests {
         assert_eq!(hidden, Some(true));
 
         view.run(move |write| commands::set_hidden(write, latency, false));
-        assert!(view.shown().changes.is_empty(), "showing it again undoes it");
+        assert!(
+            view.shown().changes.is_empty(),
+            "showing it again undoes it"
+        );
+    }
+
+    #[test]
+    fn the_changed_facts_notice_wraps_inside_the_page_and_offers_regenerating() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Cinder Labs");
+        assert!(
+            !view.shown().changes.is_empty(),
+            "Cinder Labs has a changed fact"
+        );
+        // Narrow enough that the text can't fit on one line beside the button.
+        view.cx.simulate_resize(gpui_kit::size(px(720.), px(720.)));
+        view.cx.run_until_parked();
+        view.cx.update(|window, cx| {
+            window.render_frame(cx);
+            let notice = window.find("outdated-notice").bounds();
+            let text = window.find("outdated-text").bounds();
+            assert!(
+                text.right() <= notice.right(),
+                "the text runs past its notice: {text:?} in {notice:?}"
+            );
+            assert!(window.find("regenerate-outdated").visible());
+        });
     }
 
     /// Ledgerly's line citing the latency fact, selected.
@@ -2240,7 +2366,10 @@ mod tests {
             .inspection()
             .claims
             .iter()
-            .find(|claim| claim.added_as.is_none() && !matches!(claim.reason, UnsupportedReason::UsesHiddenFact(_)))
+            .find(|claim| {
+                claim.added_as.is_none()
+                    && !matches!(claim.reason, UnsupportedReason::UsesHiddenFact(_))
+            })
             .map(|claim| claim.id);
         let Some(claim) = claim else {
             panic!("no claim to add");
@@ -2259,10 +2388,14 @@ mod tests {
     fn a_claim_needing_a_hidden_fact_is_resolved_once_its_shown() {
         let mut app = TestAppContext::single();
         let mut view = open(&mut app, "Ledgerly");
-        let hidden = view.inspection().claims.iter().find_map(|claim| match claim.reason {
-            UnsupportedReason::UsesHiddenFact(fact) => Some((claim.id, fact)),
-            _ => None,
-        });
+        let hidden = view
+            .inspection()
+            .claims
+            .iter()
+            .find_map(|claim| match claim.reason {
+                UnsupportedReason::UsesHiddenFact(fact) => Some((claim.id, fact)),
+                _ => None,
+            });
         let Some((claim, fact)) = hidden else {
             panic!("Ledgerly has no claim needing a hidden fact");
         };
@@ -2292,7 +2425,11 @@ mod tests {
         view.keys("down");
         view.update(|view, cx| view.show_version(sent, cx));
         assert_eq!(view.shown().id, sent);
-        assert_eq!(view.selected(), None, "a new version starts with no selection");
+        assert_eq!(
+            view.selected(),
+            None,
+            "a new version starts with no selection"
+        );
         assert!(view.read(|view| view.pages.is_some()), "typeset");
         let current = view.current();
         if let Some(current) = current {

@@ -14,7 +14,7 @@ use gpui_kit::{
 use rusqlite::Connection;
 
 use super::import_page::{ImportPage, ImportPageEvent, PAGE_MAX_WIDTH};
-use super::parts::{caption, notice};
+use super::parts::{caption, notice, text_field};
 use crate::database::{Changed, Database};
 use crate::model::DocumentId;
 use crate::model::commands;
@@ -233,7 +233,7 @@ impl Onboarding {
                             .clone()
                             .map(|problem| notice(problem, cx.theme().danger)),
                     )
-                    .child(Input::new(&self.name))
+                    .child(text_field(Input::new(&self.name), &self.name, cx))
                     .child(
                         h_flex()
                             .justify_end()
@@ -260,7 +260,6 @@ impl Onboarding {
                     ),
             )
     }
-
 }
 
 enum Step {

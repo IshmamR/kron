@@ -10,6 +10,7 @@ use gpui_kit::{
     prelude::*, px,
 };
 
+use super::parts::text_field;
 use crate::database::{Changed, Database, schema};
 use crate::model::settings::{self, Refused};
 
@@ -44,7 +45,7 @@ impl Render for StandInName {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.name).small()))
+                    .child(text_field(Input::new(&self.name).small(), &self.name, cx).flex_1())
                     .child(
                         Button::new("save-stand-in")
                             .label("Save")

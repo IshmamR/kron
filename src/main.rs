@@ -109,7 +109,7 @@ fn main() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     return_freed_memory();
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(gpui_kit::assets::AllAssets)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
             appearance::init(cx);

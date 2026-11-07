@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::list::{ListDelegate, ListItem, ListState};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, IndexPath, Sizable, h_flex};
-use gpui_kit::{
-    App, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
-};
+use gpui_kit::{App, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px};
 use rusqlite::Connection;
 
 use super::parts::{EntryLabel, fact_kind_label};
@@ -82,7 +80,9 @@ impl ListDelegate for FactList {
     }
 
     fn items_count(&self, section: usize, _cx: &App) -> usize {
-        self.groups.get(section).map_or(0, |group| group.facts.len())
+        self.groups
+            .get(section)
+            .map_or(0, |group| group.facts.len())
     }
 
     fn render_section_header(
@@ -118,58 +118,54 @@ impl ListDelegate for FactList {
         let hidden = fact.hidden;
 
         Some(
-            ListItem::new(index)
-                .px_3()
-                .child(
-                    h_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_2()
-                        .text_sm()
-                        // A check when marked to merge; otherwise, like an unread
-                        // mail, a dot when it's left to review.
-                        .child(
+            ListItem::new(index).px_3().child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_2()
+                    .text_sm()
+                    // A check when marked to merge; otherwise, like an unread
+                    // mail, a dot when it's left to review.
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(12.))
+                            .flex()
+                            .justify_center()
+                            .map(|this| {
+                                if marked {
+                                    this.child(
+                                        Icon::new(IconName::Check)
+                                            .xsmall()
+                                            .text_color(theme.foreground),
+                                    )
+                                } else if fact.review.is_some() {
+                                    this.child(div().size(px(7.)).rounded_full().bg(theme.warning))
+                                } else {
+                                    this
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .when(hidden, |this| {
+                                this.line_through().text_color(theme.muted_foreground)
+                            })
+                            .child(fact.text.clone()),
+                    )
+                    .when(fact.kind != FactKind::Bullet, |this| {
+                        this.child(
                             div()
                                 .flex_none()
-                                .w(px(12.))
-                                .flex()
-                                .justify_center()
-                                .map(|this| {
-                                    if marked {
-                                        this.child(
-                                            Icon::new(IconName::Check)
-                                                .xsmall()
-                                                .text_color(theme.foreground),
-                                        )
-                                    } else if fact.review.is_some() {
-                                        this.child(
-                                            div().size(px(7.)).rounded_full().bg(theme.blue),
-                                        )
-                                    } else {
-                                        this
-                                    }
-                                }),
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(fact_kind_label(fact.kind)),
                         )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .when(hidden, |this| {
-                                    this.line_through().text_color(theme.muted_foreground)
-                                })
-                                .child(fact.text.clone()),
-                        )
-                        .when(fact.kind != FactKind::Bullet, |this| {
-                            this.child(
-                                div()
-                                    .flex_none()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(fact_kind_label(fact.kind)),
-                            )
-                        }),
-                ),
+                    }),
+            ),
         )
     }
 
@@ -211,14 +207,21 @@ impl ListDelegate for FactList {
 
     /// Clicks land here. A ctrl-click marks the fact for merging; a plain
     /// click drops the marks, like selection in a file manager.
-    fn confirm(&mut self, secondary: bool, _window: &mut Window, cx: &mut Context<ListState<Self>>) {
+    fn confirm(
+        &mut self,
+        secondary: bool,
+        _window: &mut Window,
+        cx: &mut Context<ListState<Self>>,
+    ) {
         if !secondary {
             self.marked.clear();
             cx.notify();
             return;
         }
         if self.marked.is_empty()
-            && let Some(previous) = self.previously_selected.and_then(|index| self.fact_at(index))
+            && let Some(previous) = self
+                .previously_selected
+                .and_then(|index| self.fact_at(index))
         {
             self.marked.push(previous);
         }
@@ -303,18 +306,17 @@ impl FactList {
     }
 
     pub fn index_of(&self, fact: FactId) -> Option<IndexPath> {
-        self.groups
-            .iter()
-            .enumerate()
-            .find_map(|(section, group)| {
-                let row = group.facts.iter().position(|&id| id == fact)?;
-                Some(IndexPath::new(row).section(section))
-            })
+        self.groups.iter().enumerate().find_map(|(section, group)| {
+            let row = group.facts.iter().position(|&id| id == fact)?;
+            Some(IndexPath::new(row).section(section))
+        })
     }
 
     /// The listed facts, top to bottom.
     pub fn facts(&self) -> impl Iterator<Item = FactId> + '_ {
-        self.groups.iter().flat_map(|group| group.facts.iter().copied())
+        self.groups
+            .iter()
+            .flat_map(|group| group.facts.iter().copied())
     }
 
     pub fn marked(&self) -> &[FactId] {

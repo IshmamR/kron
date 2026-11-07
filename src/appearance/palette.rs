@@ -8,21 +8,29 @@ pub enum Palette {
     Copper,
     Orchid,
     Olive,
+    Graphite,
     Porcelain,
     Linen,
     Glacier,
+    Clay,
+    Paper,
+    Lilac,
 }
 
 impl Palette {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 12] = [
         Self::Moss,
         Self::Midnight,
         Self::Copper,
         Self::Orchid,
         Self::Olive,
+        Self::Graphite,
         Self::Porcelain,
         Self::Linen,
         Self::Glacier,
+        Self::Clay,
+        Self::Paper,
+        Self::Lilac,
     ];
 
     pub fn label(self) -> &'static str {
@@ -35,22 +43,26 @@ impl Palette {
             Self::Porcelain => "Porcelain",
             Self::Linen => "Linen & Sage",
             Self::Glacier => "Glacier",
+            Self::Graphite => "Graphite",
+            Self::Clay => "Clay",
+            Self::Paper => "Paper",
+            Self::Lilac => "Lilac",
         }
     }
 
     pub fn is_dark(self) -> bool {
         matches!(
             self,
-            Self::Moss | Self::Midnight | Self::Copper | Self::Orchid | Self::Olive
+            Self::Moss
+                | Self::Midnight
+                | Self::Copper
+                | Self::Orchid
+                | Self::Olive
+                | Self::Graphite
         )
     }
 
-    pub fn preview(self) -> [u32; 4] {
-        let colors = self.colors();
-        [colors.background, colors.sidebar, colors.accent, colors.ink]
-    }
-
-    pub(super) fn colors(self) -> PaletteColors {
+    pub fn colors(self) -> PaletteColors {
         match self {
             Self::Moss => PaletteColors {
                 background: 0x141719,
@@ -135,11 +147,11 @@ impl Palette {
                 hover: 0xe3e2dc,
                 border: 0xd8d7d1,
                 ink: 0x22272a,
-                secondary: 0x6b7276,
+                secondary: 0x656c70,
                 accent: 0x476878,
                 selection: 0xdbe7eb,
                 accent_text: 0xffffff,
-                danger: 0xb85d58,
+                danger: 0xa8524d,
                 warning: 0x9e752d,
             },
             Self::Linen => PaletteColors {
@@ -165,12 +177,74 @@ impl Palette {
                 hover: 0xdde7f1,
                 border: 0xd4dee9,
                 ink: 0x192b3b,
-                secondary: 0x667c91,
+                secondary: 0x5b7086,
                 accent: 0x376dbb,
                 selection: 0xdbeafd,
                 accent_text: 0xffffff,
                 danger: 0xb54e62,
                 warning: 0xa37534,
+            },
+            // Grays with no hue; the accent is off-white rather than a color.
+            Self::Graphite => PaletteColors {
+                background: 0x1b1b1d,
+                sidebar: 0x202022,
+                surface: 0x242426,
+                muted_surface: 0x2b2b2e,
+                hover: 0x323235,
+                border: 0x3a3a3d,
+                ink: 0xe4e4e2,
+                secondary: 0xa0a0a3,
+                accent: 0xd8d8d5,
+                selection: 0x38383b,
+                accent_text: 0x1b1b1d,
+                danger: 0xe8a09a,
+                warning: 0xdcbc84,
+            },
+            Self::Clay => PaletteColors {
+                background: 0xf3f0e8,
+                sidebar: 0xebe7dc,
+                surface: 0xfaf8f3,
+                muted_surface: 0xeee9de,
+                hover: 0xe5dfd1,
+                border: 0xddd5c5,
+                ink: 0x2f2a24,
+                secondary: 0x6b6256,
+                accent: 0xb35733,
+                selection: 0xf1dccf,
+                accent_text: 0xffffff,
+                danger: 0xa83a4a,
+                warning: 0x8d6a1f,
+            },
+            // Graphite turned over: an off-white page with a near-black accent.
+            Self::Paper => PaletteColors {
+                background: 0xefefec,
+                sidebar: 0xe7e7e4,
+                surface: 0xf7f7f5,
+                muted_surface: 0xe9e9e6,
+                hover: 0xdfdfdb,
+                border: 0xd2d2ce,
+                ink: 0x232325,
+                secondary: 0x626266,
+                accent: 0x2b2b2d,
+                selection: 0xdcdcd8,
+                accent_text: 0xf2f2ef,
+                danger: 0xa8463f,
+                warning: 0x8f6a22,
+            },
+            Self::Lilac => PaletteColors {
+                background: 0xf4f2f7,
+                sidebar: 0xebe8f1,
+                surface: 0xfbfafd,
+                muted_surface: 0xeeebf3,
+                hover: 0xe3dfeb,
+                border: 0xd9d4e3,
+                ink: 0x2a2534,
+                secondary: 0x675f74,
+                accent: 0x7350a6,
+                selection: 0xe6dcf5,
+                accent_text: 0xffffff,
+                danger: 0xb04a5a,
+                warning: 0x93702a,
             },
         }
     }
@@ -204,7 +278,7 @@ impl Palettes {
     }
 }
 
-pub(super) struct PaletteColors {
+pub struct PaletteColors {
     pub background: u32,
     pub sidebar: u32,
     pub surface: u32,
@@ -218,4 +292,61 @@ pub(super) struct PaletteColors {
     pub accent_text: u32,
     pub danger: u32,
     pub warning: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// WCAG relative luminance of a 0xRRGGBB color.
+    fn luminance(color: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff) as f32 / 255.;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+
+    fn contrast(first: u32, second: u32) -> f32 {
+        let (first, second) = (luminance(first), luminance(second));
+        (first.max(second) + 0.05) / (first.min(second) + 0.05)
+    }
+
+    /// The picker's swatch is the background beside the accent: both halves
+    /// must be told apart, which WCAG puts at 3:1 for non-text marks.
+    #[test]
+    fn every_accent_stands_out_from_its_background() {
+        for palette in Palette::ALL {
+            let colors = palette.colors();
+            let ratio = contrast(colors.accent, colors.background);
+            assert!(ratio >= 3., "{}: accent at {ratio:.2}:1", palette.label());
+        }
+    }
+
+    /// WCAG AA's 4.5:1 for small text: captions, error text and primary
+    /// buttons' labels are all small.
+    #[test]
+    fn every_text_color_is_readable_on_what_it_sits_on() {
+        for palette in Palette::ALL {
+            let colors = palette.colors();
+            for (name, text, behind) in [
+                ("ink", colors.ink, colors.background),
+                ("ink on a selection", colors.ink, colors.selection),
+                ("secondary", colors.secondary, colors.background),
+                ("danger", colors.danger, colors.background),
+                (
+                    "a primary button's label",
+                    colors.accent_text,
+                    colors.accent,
+                ),
+            ] {
+                let ratio = contrast(text, behind);
+                assert!(ratio >= 4.5, "{}: {name} at {ratio:.2}:1", palette.label());
+            }
+        }
+    }
 }

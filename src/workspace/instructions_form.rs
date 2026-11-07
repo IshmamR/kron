@@ -10,7 +10,7 @@ use gpui_kit::{
     prelude::*,
 };
 
-use super::parts::caption;
+use super::parts::{caption, text_field};
 
 /// The longest instructions may be, in characters, as the database keeps them.
 const INSTRUCTIONS_LENGTH: usize = 2048;
@@ -39,7 +39,11 @@ impl Render for InstructionsForm {
                  what's shown and in what order, never make a line say more than your facts.",
                 cx,
             ))
-            .child(Textarea::new(&self.instructions))
+            .child(text_field(
+                Textarea::new(&self.instructions),
+                &self.instructions,
+                cx,
+            ))
             .children(
                 self.problem
                     .clone()

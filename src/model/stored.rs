@@ -106,9 +106,13 @@ stored!(Palette {
     Copper => "copper",
     Orchid => "orchid",
     Olive => "olive",
+    Graphite => "graphite",
     Porcelain => "porcelain",
     Linen => "linen",
     Glacier => "glacier",
+    Clay => "clay",
+    Paper => "paper",
+    Lilac => "lilac",
 });
 
 stored!(WindowState {

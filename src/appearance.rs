@@ -55,7 +55,9 @@ impl Appearance {
         let palettes = Palettes::current(cx);
         Theme::update(cx, |theme| {
             let palette = palettes.for_mode(theme.is_dark());
-            apply_gallery_palette(theme, palette);
+            apply_palette(theme, palette);
+            // Changing the theme resets this too, so it's set again each time.
+            theme.notification.placement = Anchor::BottomRight;
         });
     }
 
@@ -68,8 +70,7 @@ impl Appearance {
     }
 }
 
-fn apply_gallery_palette(theme: &mut Theme, palette: Palette) {
-    theme.notification.placement = Anchor::BottomRight;
+fn apply_palette(theme: &mut Theme, palette: Palette) {
     let palette = palette.colors();
     let color = |value| Hsla::from(rgb(value));
     let background = color(palette.background);
@@ -98,7 +99,9 @@ fn apply_gallery_palette(theme: &mut Theme, palette: Palette) {
     theme.muted_foreground = secondary;
     theme.border = border;
     theme.input = border;
-    theme.ring = accent;
+    // A quiet edge, not a glow: the caret carries the accent.
+    theme.focus_ring = false;
+    theme.ring = ink.opacity(0.3);
     theme.caret = accent;
     theme.selection = selection;
     theme.link = accent;
@@ -206,18 +209,24 @@ impl Motion {
 /// macOS.
 fn system_reduces_motion() -> Option<bool> {
     if cfg!(target_os = "macos") {
-        let output = command_output("defaults", &["read", "com.apple.universalaccess", "reduceMotion"])?;
+        let output = command_output(
+            "defaults",
+            &["read", "com.apple.universalaccess", "reduceMotion"],
+        )?;
         return Some(output.trim() == "1");
     }
     if cfg!(target_os = "linux") {
-        if let Some(output) =
-            command_output("gsettings", &["get", "org.gnome.desktop.interface", "enable-animations"])
-        {
+        if let Some(output) = command_output(
+            "gsettings",
+            &["get", "org.gnome.desktop.interface", "enable-animations"],
+        ) {
             return Some(output.trim() == "false");
         }
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".config")))?;
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".config"))
+            })?;
         let kdeglobals = std::fs::read_to_string(config.join("kdeglobals")).ok()?;
         return kdeglobals
             .lines()

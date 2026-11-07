@@ -86,7 +86,6 @@ impl DeviceSettings {
         let last_page = match (last_page.as_str(), last_job) {
             ("job", Some(job)) => LastPage::Job(JobId(job)),
             ("facts", _) => LastPage::Facts,
-            ("settings", _) => LastPage::Settings,
             _ => LastPage::Resumes,
         };
         Ok(Self {
@@ -122,7 +121,6 @@ pub enum LastPage {
     Resumes,
     Job(JobId),
     Facts,
-    Settings,
 }
 
 pub fn set_appearance(write: &mut Write, appearance: Appearance) -> Result<(), Error> {
@@ -184,7 +182,6 @@ pub fn set_last_page(write: &mut Write, page: LastPage) -> Result<(), Error> {
         LastPage::Resumes => ("resumes", None),
         LastPage::Job(job) => ("job", Some(job.0)),
         LastPage::Facts => ("facts", None),
-        LastPage::Settings => ("settings", None),
     };
     write.update(
         schema::DeviceSettings,
@@ -220,7 +217,10 @@ mod tests {
     fn settings_start_at_their_defaults() -> Result<(), Error> {
         let writer = Writer::open_in_memory()?;
         assert_eq!(Settings::read(writer.kron())?, Settings::default());
-        assert_eq!(DeviceSettings::read(writer.device())?, DeviceSettings::default());
+        assert_eq!(
+            DeviceSettings::read(writer.device())?,
+            DeviceSettings::default()
+        );
         Ok(())
     }
 
@@ -261,7 +261,10 @@ mod tests {
 
         // Leaving the job page forgets the job, as the schema's CHECK asks.
         writer.execute(|write| set_last_page(write, LastPage::Facts))?;
-        assert_eq!(DeviceSettings::read(writer.device())?.last_page, LastPage::Facts);
+        assert_eq!(
+            DeviceSettings::read(writer.device())?.last_page,
+            LastPage::Facts
+        );
         Ok(())
     }
 
@@ -283,6 +286,22 @@ mod tests {
         );
         writer.execute(|write| set_appearance(write, Appearance::Dark))?;
         assert_eq!(Settings::read(writer.kron())?.palettes, stored.palettes);
+        Ok(())
+    }
+
+    /// The schema lists the palettes it accepts; one missing there can't be saved.
+    #[test]
+    fn every_palette_can_be_saved() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        for palette in Palette::ALL {
+            writer.execute(|write| set_palette(write, palette))?;
+            assert_eq!(
+                Settings::read(writer.kron())?
+                    .palettes
+                    .for_mode(palette.is_dark()),
+                palette
+            );
+        }
         Ok(())
     }
 

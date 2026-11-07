@@ -8,17 +8,17 @@ use gpui_kit::{
 };
 
 use super::ToggleSidebar;
+use super::application_view::{CancelEvent, SaveEvent};
 use super::facts_page::{
     AddFacts, CancelEdit, ConfirmFact, Dismiss, FocusList, FocusSearch, ToggleHidden,
 };
-use super::application_view::{CancelEvent, SaveEvent};
 use super::import_page::{Cancel, Paste, Save, Write};
 use super::job_view::{
     Back, SelectNextLine, SelectPreviousLine, ShowApplicationTab, ShowResumeTab,
 };
 use super::redaction_check::Confirm as ConfirmHidden;
 use super::resume_grid::{OpenSelected, SelectLeft, SelectRight, ShowFilter};
-use super::{Redo, ShowShortcuts, Undo, resume_grid};
+use super::{Redo, ShowSettings, ShowShortcuts, Undo, facts_page, resume_grid};
 
 /// Two columns, so every shortcut fits without scrolling on most screens.
 const WIDTH: f32 = 900.;
@@ -46,17 +46,13 @@ pub fn open(window: &mut Window, cx: &mut App) {
                         .id("shortcuts")
                         .max_h(window.viewport_size().height - px(VERTICAL_MARGIN))
                         .overflow_y_scrollbar()
-                        .child(
-                            h_flex()
-                                .items_start()
-                                .gap_8()
-                                .pr_3()
-                                .children(columns(groups()).into_iter().map(|column| {
-                                    v_flex().flex_1().min_w_0().gap_5().children(
-                                        column.into_iter().map(|group| group.render(window, cx)),
-                                    )
-                                })),
-                        ),
+                        .child(h_flex().items_start().gap_8().pr_3().children(
+                            columns(groups()).into_iter().map(|column| {
+                                v_flex().flex_1().min_w_0().gap_5().children(
+                                    column.into_iter().map(|group| group.render(window, cx)),
+                                )
+                            }),
+                        )),
                 )
             })
     });
@@ -66,7 +62,10 @@ pub fn open(window: &mut Window, cx: &mut App) {
 /// can be.
 fn columns(mut groups: Vec<Group>) -> [Vec<Group>; 2] {
     // A group's title takes about a row.
-    let rows: Vec<usize> = groups.iter().map(|group| group.shortcuts.len() + 1).collect();
+    let rows: Vec<usize> = groups
+        .iter()
+        .map(|group| group.shortcuts.len() + 1)
+        .collect();
     let total: usize = rows.iter().sum();
     let split = (0..=rows.len())
         .min_by_key(|&split| {
@@ -107,8 +106,15 @@ fn groups() -> Vec<Group> {
         Group {
             title: "General",
             shortcuts: vec![
-                shortcut("Show or hide the sidebar", vec![Action(Box::new(ToggleSidebar))]),
-                shortcut("Show keyboard shortcuts", vec![Action(Box::new(ShowShortcuts))]),
+                shortcut(
+                    "Show or hide the sidebar",
+                    vec![Action(Box::new(ToggleSidebar))],
+                ),
+                shortcut(
+                    "Show keyboard shortcuts",
+                    vec![Action(Box::new(ShowShortcuts))],
+                ),
+                shortcut("Open Settings", vec![Action(Box::new(ShowSettings))]),
                 shortcut("Undo the last change", vec![Action(Box::new(Undo))]),
                 shortcut("Redo the change undone", vec![Action(Box::new(Redo))]),
             ],
@@ -137,6 +143,14 @@ fn groups() -> Vec<Group> {
                         Action(Box::new(ShowFilter { index: 4 })),
                     ],
                 ),
+                shortcut(
+                    "Search jobs",
+                    vec![Action(Box::new(resume_grid::FocusSearch))],
+                ),
+                shortcut(
+                    "Clear the search, then leave it",
+                    vec![Action(Box::new(resume_grid::ClearSearch))],
+                ),
             ],
         },
         Group {
@@ -154,7 +168,10 @@ fn groups() -> Vec<Group> {
                     vec![Action(Box::new(Back))],
                 ),
                 shortcut("Show the résumé", vec![Action(Box::new(ShowResumeTab))]),
-                shortcut("Show the application", vec![Action(Box::new(ShowApplicationTab))]),
+                shortcut(
+                    "Show the application",
+                    vec![Action(Box::new(ShowApplicationTab))],
+                ),
             ],
         },
         Group {
@@ -178,11 +195,18 @@ fn groups() -> Vec<Group> {
                     "Confirm, and go to the next fact to review",
                     vec![Action(Box::new(ConfirmFact))],
                 ),
-                shortcut("Hide or show the fact", vec![Action(Box::new(ToggleHidden))]),
+                shortcut(
+                    "Hide or show the fact",
+                    vec![Action(Box::new(ToggleHidden))],
+                ),
                 shortcut("Search facts", vec![Action(Box::new(FocusSearch))]),
                 shortcut(
                     "Go from the search to the results",
                     vec![Action(Box::new(FocusList))],
+                ),
+                shortcut(
+                    "Clear the search, then leave it",
+                    vec![Action(Box::new(facts_page::ClearSearch))],
                 ),
                 shortcut("Mark facts to merge", vec![Gesture(SECONDARY_CLICK)]),
                 shortcut(
@@ -191,8 +215,14 @@ fn groups() -> Vec<Group> {
                 ),
                 shortcut("Merge, while merging", vec![Action(Box::new(ConfirmFact))]),
                 shortcut("Clear merge marks", vec![Action(Box::new(Dismiss))]),
-                shortcut("Save the fact's text, while editing it", vec![Keystroke("enter")]),
-                shortcut("Add a line break, while editing", vec![Keystroke("shift-enter")]),
+                shortcut(
+                    "Save the fact's text, while editing it",
+                    vec![Keystroke("enter")],
+                ),
+                shortcut(
+                    "Add a line break, while editing",
+                    vec![Keystroke("shift-enter")],
+                ),
                 shortcut("Cancel editing", vec![Action(Box::new(CancelEdit))]),
                 shortcut("Add the facts you wrote", vec![Action(Box::new(AddFacts))]),
                 shortcut("Close the add form", vec![Action(Box::new(Dismiss))]),

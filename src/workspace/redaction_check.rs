@@ -17,7 +17,7 @@ use gpui_kit::{
     UnderlineStyle, Window, actions, div, prelude::*, px,
 };
 
-use super::parts::caption;
+use super::parts::{caption, text_field};
 use crate::model::redaction::{self, Found, Identifier, Redaction};
 
 const KEY_CONTEXT: &str = "RedactionCheck";
@@ -165,13 +165,17 @@ impl Render for RedactionCheck {
                 cx,
             ))
             .child(
-                div().p_3().rounded_lg().bg(theme.list_active)
-                    .text_sm().child(self.summary()),
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(theme.list_active)
+                    .text_sm()
+                    .child(self.summary()),
             )
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.also).small()))
+                    .child(text_field(Input::new(&self.also).small(), &self.also, cx).flex_1())
                     .child(
                         Button::new("hide")
                             .label("Hide")

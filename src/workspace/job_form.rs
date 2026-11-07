@@ -10,10 +10,10 @@ use gpui_kit::{
     Window, div, prelude::*,
 };
 
+use super::parts::{caption, text_field};
 use crate::database::Database;
 use crate::model::JobId;
 use crate::model::commands::{self, NewJob};
-use super::parts::caption;
 
 /// The longest each field may be, in characters, as the database keeps them.
 const TITLE_LENGTH: usize = 256;
@@ -55,7 +55,10 @@ impl Render for JobForm {
         };
         v_flex()
             .gap_4()
-            .child(caption("Add the role you're interested in and the posting it belongs to.", cx))
+            .child(caption(
+                "Add the role you're interested in and the posting it belongs to.",
+                cx,
+            ))
             .child(
                 h_flex()
                     .gap_3()
@@ -65,7 +68,7 @@ impl Render for JobForm {
                             .gap_1()
                             .min_w_0()
                             .child(label("Role"))
-                            .child(Input::new(&self.title)),
+                            .child(text_field(Input::new(&self.title), &self.title, cx)),
                     )
                     .child(
                         v_flex()
@@ -73,20 +76,24 @@ impl Render for JobForm {
                             .min_w_0()
                             .gap_1()
                             .child(label("Company"))
-                            .child(Input::new(&self.company)),
+                            .child(text_field(Input::new(&self.company), &self.company, cx)),
                     ),
             )
             .child(
                 v_flex()
                     .gap_1()
                     .child(label("Posting link (optional)"))
-                    .child(Input::new(&self.link)),
+                    .child(text_field(Input::new(&self.link), &self.link, cx)),
             )
             .child(
                 v_flex()
                     .gap_1()
                     .child(label("Job description"))
-                    .child(Textarea::new(&self.description)),
+                    .child(text_field(
+                        Textarea::new(&self.description),
+                        &self.description,
+                        cx,
+                    )),
             )
             .children(
                 self.problem

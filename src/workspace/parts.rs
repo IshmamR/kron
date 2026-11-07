@@ -3,11 +3,14 @@
 use std::ops::Range;
 
 use chrono::{DateTime, Local, Utc};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::InputState;
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, Root, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, IconName, Root, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::{
-    App, Div, FontWeight, HighlightStyle, Hsla, IntoElement, SharedString, StyledText, Window, div,
-    prelude::*, px,
+    Action, AnyElement, App, Div, Entity, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
+    MouseButton, SharedString, StyledText, Window, div, prelude::*, px,
 };
 
 use rusqlite::Connection;
@@ -55,6 +58,67 @@ pub fn notice(text: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
         .bg(color.opacity(0.1))
         .text_xs()
         .child(text.into())
+}
+
+/// A page's name at its top, the same size on every page.
+pub fn page_title(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_2xl()
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text.into())
+}
+
+/// A text field drawn the quiet way, like Linear's: a soft fill and no border
+/// at rest, a faint edge (the theme's ring) while typing in it.
+///
+/// A click anywhere in it, border included, puts the cursor in the text. The
+/// kit's frame otherwise takes focus itself on a click past the text, lighting
+/// up with nowhere to type.
+pub fn text_field<F, S>(field: F, state: &Entity<S>, cx: &App) -> Div
+where
+    F: IntoElement + Styled,
+    S: Focusable,
+{
+    let theme = cx.theme();
+    let focus = state.focus_handle(cx);
+    v_flex()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            focus.focus(window, cx)
+        })
+        .child(
+            field
+                .border_color(theme.transparent)
+                .bg(theme.foreground.opacity(0.06)),
+        )
+}
+
+/// The end of a search field: the shortcut to it while it's empty and the
+/// cursor is elsewhere, and a button that clears it once there's text.
+pub fn search_suffix(
+    search: &Entity<InputState>,
+    shortcut: &dyn Action,
+    context: &str,
+    clear: impl Fn(&mut Window, &mut App) + 'static,
+    window: &Window,
+    cx: &App,
+) -> Option<AnyElement> {
+    let search = search.read(cx);
+    if !search.value().is_empty() {
+        return Some(
+            Button::new("clear-search")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Close)
+                .tooltip("Clear search")
+                .on_click(move |_, window, cx| clear(window, cx))
+                .into_any_element(),
+        );
+    }
+    if search.focus_handle(cx).is_focused(window) {
+        return None;
+    }
+    Kbd::binding_for_action(shortcut, Some(context), window)
+        .map(|kbd| kbd.outline().into_any_element())
 }
 
 pub fn fact_kind_label(kind: FactKind) -> &'static str {

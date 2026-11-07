@@ -19,7 +19,7 @@ use gpui_kit::{
 
 use rusqlite::{Connection, OptionalExtension};
 
-use super::parts::{caption, card, heading};
+use super::parts::{caption, card, heading, text_field};
 use crate::database::schema::{Events, Generations, JobDescriptions, Jobs};
 use crate::database::{Changed, Database, Error};
 use crate::model::commands;
@@ -108,7 +108,10 @@ impl Render for ApplicationView {
             return div().into_any_element();
         };
         let now = Utc::now();
-        let adding = self.form.as_ref().is_some_and(|form| form.editing.is_none());
+        let adding = self
+            .form
+            .as_ref()
+            .is_some_and(|form| form.editing.is_none());
 
         // Focus is tracked on this wrapper rather than the resizable layout,
         // which doesn't take it.
@@ -355,7 +358,11 @@ impl ApplicationView {
             .queue(move |write| commands::delete_event(write, event));
         self.focus_handle.focus(window, cx);
         cx.notify();
-        if self.form.as_ref().is_some_and(|form| form.editing == Some(event)) {
+        if self
+            .form
+            .as_ref()
+            .is_some_and(|form| form.editing == Some(event))
+        {
             self.form = None;
         }
     }
@@ -516,7 +523,10 @@ impl ApplicationView {
                 } else {
                     "When"
                 },
-                div().w(px(260.)).child(DatePicker::new(&self.date)).into_any_element(),
+                div()
+                    .w(px(260.))
+                    .child(DatePicker::new(&self.date))
+                    .into_any_element(),
             ))
             .when(form.step == StepKind::Interview, |this| {
                 this.child(field(
@@ -526,7 +536,8 @@ impl ApplicationView {
                         .small()
                         .selected_index(interview_kind_index)
                         .children(
-                            InterviewKind::ALL.map(|kind| Tab::new().label(interview_kind_label(kind))),
+                            InterviewKind::ALL
+                                .map(|kind| Tab::new().label(interview_kind_label(kind))),
                         )
                         .on_click(cx.listener(|this, index: &usize, _, cx| {
                             if let (Some(form), Some(&kind)) =
@@ -538,40 +549,47 @@ impl ApplicationView {
                         }))
                         .into_any_element(),
                 ))
-                .child(field("With", Input::new(&self.with).into_any_element()))
-            })
-            .when(form.step == StepKind::Applied && details.resumes.len() > 1, |this| {
-                this.child(field(
-                    "Résumé sent",
-                    v_flex()
-                        .gap_1()
-                        .children(details.resumes.iter().rev().enumerate().map(
-                            |(index, &(id, generated_at))| {
-                            let current = details.current() == Some(id);
-                            Radio::new(("sent-resume", index))
-                                .label(format!(
-                                    "Generated {}{}",
-                                    date_label(generated_at, true),
-                                    if current { " (current)" } else { "" }
-                                ))
-                                .checked(form.resume == Some(id))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(form) = this.form.as_mut() {
-                                        form.resume = Some(id);
-                                        cx.notify();
-                                    }
-                                }))
-                        }))
-                        .into_any_element(),
+                .child(field(
+                    "With",
+                    text_field(Input::new(&self.with), &self.with, cx).into_any_element(),
                 ))
             })
+            .when(
+                form.step == StepKind::Applied && details.resumes.len() > 1,
+                |this| {
+                    this.child(field(
+                        "Résumé sent",
+                        v_flex()
+                            .gap_1()
+                            .children(details.resumes.iter().rev().enumerate().map(
+                                |(index, &(id, generated_at))| {
+                                    let current = details.current() == Some(id);
+                                    Radio::new(("sent-resume", index))
+                                        .label(format!(
+                                            "Generated {}{}",
+                                            date_label(generated_at, true),
+                                            if current { " (current)" } else { "" }
+                                        ))
+                                        .checked(form.resume == Some(id))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(form) = this.form.as_mut() {
+                                                form.resume = Some(id);
+                                                cx.notify();
+                                            }
+                                        }))
+                                },
+                            ))
+                            .into_any_element(),
+                    ))
+                },
+            )
             .child(field(
                 if form.step == StepKind::Note {
                     "Note"
                 } else {
                     "Note (optional)"
                 },
-                Textarea::new(&self.note).into_any_element(),
+                text_field(Textarea::new(&self.note), &self.note, cx).into_any_element(),
             ))
             .when_some(form.error, |this, error| {
                 this.child(div().text_sm().text_color(theme.danger).child(error))
@@ -659,87 +677,97 @@ impl ApplicationView {
                     )
                     // Edited in place, so it's clear which event the form is for.
                     .when(editing, |this| this.child(self.render_form(details, cx)))
-                    .when(!editing, |this| this.child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .child(event_title(event, now)),
-                                    )
-                                    .when(upcoming, |this| {
-                                        this.child(Tag::secondary().outline().xsmall().child("Upcoming"))
-                                    })
-                                    .when(called_off, |this| {
-                                        this.child(
-                                            Tag::secondary()
-                                                .outline()
-                                                .xsmall()
-                                                .child("Called off"),
+                    .when(!editing, |this| {
+                        this.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(event_title(event, now)),
                                         )
-                                    })
-                                    .child(div().flex_1())
-                                    .child(
-                                        h_flex()
-                                            .gap_1()
-                                            .invisible()
-                                            .group_hover(group.clone(), |style| style.visible())
-                                            .child(
-                                                Button::new(SharedString::from(format!(
-                                                    "edit-{}",
-                                                    id.0
-                                                )))
-                                                .label("Edit")
-                                                .ghost()
-                                                .xsmall()
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        let step = StepKind::of(&editable.kind);
-                                                        this.open_form(
-                                                            step,
-                                                            Some(editable.clone()),
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    },
-                                                )),
+                                        .when(upcoming, |this| {
+                                            this.child(
+                                                Tag::secondary()
+                                                    .outline()
+                                                    .xsmall()
+                                                    .child("Upcoming"),
                                             )
-                                            .child(
-                                                Button::new(SharedString::from(format!(
-                                                    "delete-{}",
-                                                    id.0
-                                                )))
-                                                .label("Delete")
-                                                .ghost()
-                                                .xsmall()
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.delete(id, window, cx)
-                                                    },
-                                                )),
+                                        })
+                                        .when(called_off, |this| {
+                                            this.child(
+                                                Tag::secondary()
+                                                    .outline()
+                                                    .xsmall()
+                                                    .child("Called off"),
+                                            )
+                                        })
+                                        .child(div().flex_1())
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .invisible()
+                                                .group_hover(group.clone(), |style| style.visible())
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "edit-{}",
+                                                        id.0
+                                                    )))
+                                                    .label("Edit")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            let step = StepKind::of(&editable.kind);
+                                                            this.open_form(
+                                                                step,
+                                                                Some(editable.clone()),
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                                )
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "delete-{}",
+                                                        id.0
+                                                    )))
+                                                    .label("Delete")
+                                                    .ghost()
+                                                    .xsmall()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.delete(id, window, cx)
+                                                        },
+                                                    )),
+                                                ),
+                                        )
+                                        .child(caption(
+                                            date_label(
+                                                event.at,
+                                                matches!(
+                                                    event.kind,
+                                                    JobEventKind::Interview { .. }
+                                                ),
                                             ),
-                                    )
-                                    .child(caption(
-                                        date_label(
-                                            event.at,
-                                            matches!(event.kind, JobEventKind::Interview { .. }),
-                                        ),
-                                        cx,
-                                    )),
-                            )
-                            .when_some(event_details, |this, event_details| {
-                                this.child(caption(event_details, cx))
-                            })
-                            // The user's own words: the size of the details, in the
-                            // text colour.
-                            .when_some(event.note.clone(), |this, note| {
-                                this.child(div().text_xs().child(note))
-                            }),
-                    ))
+                                            cx,
+                                        )),
+                                )
+                                .when_some(event_details, |this, event_details| {
+                                    this.child(caption(event_details, cx))
+                                })
+                                // The user's own words: the size of the details, in the
+                                // text colour.
+                                .when_some(event.note.clone(), |this, note| {
+                                    this.child(div().text_xs().child(note))
+                                }),
+                        )
+                    })
             })))
             .into_any_element()
     }
@@ -1137,8 +1165,9 @@ mod tests {
         }
 
         fn form_error(&mut self) -> Option<&'static str> {
-            self.view
-                .read_with(self.cx, |view, _| view.form.as_ref().and_then(|form| form.error))
+            self.view.read_with(self.cx, |view, _| {
+                view.form.as_ref().and_then(|form| form.error)
+            })
         }
 
         fn form_open(&mut self) -> bool {
@@ -1217,7 +1246,10 @@ mod tests {
             panic!("the event is gone");
         };
         assert_eq!(edited.note.as_deref(), Some("Edited."));
-        assert_eq!(edited.at, event.at, "left as it was, the time is kept to the second");
+        assert_eq!(
+            edited.at, event.at,
+            "left as it was, the time is kept to the second"
+        );
         assert_eq!(tab.events().len(), events.len());
     }
 
@@ -1231,11 +1263,12 @@ mod tests {
             panic!("Ledgerly has no events");
         };
         // As after a click: focus outside the tab's keys.
-        tab.cx.update(|window, cx| cx.focus_handle().focus(window, cx));
+        tab.cx
+            .update(|window, cx| cx.focus_handle().focus(window, cx));
         tab.update(|view, window, cx| view.delete(event, window, cx));
-        let focused = tab
-            .view
-            .update_in(tab.cx, |view, window, _| view.focus_handle.is_focused(window));
+        let focused = tab.view.update_in(tab.cx, |view, window, _| {
+            view.focus_handle.is_focused(window)
+        });
         assert!(focused, "so Ctrl+Z reaches the workspace");
         assert_eq!(tab.events().len(), events.len() - 1);
         tab.undo();
@@ -1251,9 +1284,9 @@ mod tests {
         tab.log(StepKind::Applied);
         tab.keys("ctrl-enter");
         assert_eq!(tab.stage(), Some(Stage::Applied));
-        let current = tab
-            .view
-            .read_with(tab.cx, |view, _| view.details.as_ref().and_then(JobDetails::current));
+        let current = tab.view.read_with(tab.cx, |view, _| {
+            view.details.as_ref().and_then(JobDetails::current)
+        });
         let sent = tab.view.read_with(tab.cx, |view, _| {
             view.application.as_ref().and_then(Application::sent_resume)
         });
