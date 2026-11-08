@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::SetUpAi;
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
@@ -878,7 +879,17 @@ impl JobView {
             Ok(Some(assigned)) => assigned,
             Ok(None) => {
                 notify(
-                    Notification::warning("To write a résumé, add an AI provider in Settings."),
+                    Notification::warning("To write a résumé, set up an AI provider.").action(
+                        |_, _, cx| {
+                            Button::new("set-up-ai")
+                                .label("Set up AI")
+                                .small()
+                                .on_click(cx.listener(|notification, _, window, cx| {
+                                    notification.dismiss(window, cx);
+                                    window.dispatch_action(Box::new(SetUpAi), cx);
+                                }))
+                        },
+                    ),
                     window,
                     cx,
                 );

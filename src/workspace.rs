@@ -85,6 +85,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-,", ShowSettings, None),
     ]);
     settings_page::init(cx);
+    ai_settings::init(cx);
     facts_page::init(cx);
     import_page::init(cx);
     redaction_check::init(cx);

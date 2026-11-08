@@ -193,6 +193,8 @@ pub enum Error {
     Keyring(keyring::Error),
     Unsupported(String),
     Provider(ProviderError),
+    /// An OpenAI-compatible server, by name, didn't answer.
+    Unreachable(String),
     TimedOut,
     /// The runtime didn't start, or the call's task stopped.
     Runtime(String),
@@ -237,6 +239,9 @@ impl fmt::Display for Error {
                 )
             }
             Self::Provider(error) => write!(formatter, "The call failed: {:?}.", error.kind()),
+            Self::Unreachable(name) => {
+                write!(formatter, "Couldn't reach {name}. Check that it's running.")
+            }
             Self::TimedOut => write!(formatter, "The model took too long to answer."),
             Self::Runtime(error) => write!(formatter, "The call couldn't run: {error}."),
         }
@@ -379,8 +384,44 @@ pub fn add_compatible(
     add_provider(write, name, COMPATIBLE_VENDOR, Some(base_url), model)
 }
 
-/// Removes the provider; the tasks set to it go back to the default. Its
-/// key is `set_key`'s to remove.
+/// Renames an OpenAI-compatible server, or points it at another address
+/// that serves `models`. A task set to a model it doesn't serve moves to the
+/// first it does, so it doesn't fail on a model that's gone.
+pub fn edit_server(
+    write: &mut Write,
+    provider: Uuid,
+    name: &str,
+    base_url: &str,
+    models: &[String],
+) -> Result<(), database::Error> {
+    write.update(
+        LlmProviders,
+        provider,
+        &[
+            llm_providers::NAME.value(&name),
+            llm_providers::BASE_URL.value(&Some(base_url)),
+        ],
+    )?;
+    let Some(first) = models.first() else {
+        return Ok(());
+    };
+    let gone: Vec<String> = write
+        .prepare_device("SELECT task, model FROM llm_assignments WHERE provider_id = ?1")?
+        .query_map([provider], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<(String, String)>, _>>()?
+        .into_iter()
+        .filter(|(_, model)| !models.contains(model))
+        .map(|(task, _)| task)
+        .collect();
+    for task in gone {
+        write.set(llm_assignments::MODEL, task.as_str(), &first.as_str())?;
+    }
+    Ok(())
+}
+
+/// Removes the provider; the tasks set to it go back to the default. If
+/// the default was on it, another provider's model takes its place, so the
+/// others keep working. Its key is `set_key`'s to remove.
 pub fn remove_provider(write: &mut Write, provider: Uuid) -> Result<(), database::Error> {
     let tasks: Vec<String> = write
         .prepare_device("SELECT task FROM llm_assignments WHERE provider_id = ?1")?
@@ -391,7 +432,38 @@ pub fn remove_provider(write: &mut Write, provider: Uuid) -> Result<(), database
     for task in tasks {
         write.remove(LlmAssignments, task.as_str())?;
     }
-    write.remove(LlmProviders, provider)
+    write.remove(LlmProviders, provider)?;
+    if assignment_of(write, None)?.is_none()
+        && let Some((provider, model)) = next_default(write)?
+    {
+        assign(write, None, Some((provider, &model)))?;
+    }
+    Ok(())
+}
+
+/// What becomes the default when it goes: a task's own model, or else the
+/// oldest vendor provider's starting model. A server's models aren't known
+/// here, so with only servers left the user picks one.
+fn next_default(write: &Write) -> Result<Option<(Uuid, String)>, database::Error> {
+    let task: Option<(Uuid, String)> = write
+        .prepare_device(
+            "SELECT provider_id, model FROM llm_assignments WHERE task != 'default'
+             ORDER BY task LIMIT 1",
+        )?
+        .query_row([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    if task.is_some() {
+        return Ok(task);
+    }
+    let providers: Vec<(Uuid, String)> = write
+        .prepare_device(
+            "SELECT id, vendor FROM llm_providers WHERE base_url IS NULL ORDER BY added_at, id",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    Ok(providers
+        .into_iter()
+        .find_map(|(provider, id)| vendor(&id).map(|vendor| (provider, vendor.model.to_owned()))))
 }
 
 /// The models `vendor` offers that rig's catalog lists, by id, with their
@@ -515,7 +587,14 @@ pub async fn call(
     let response = tokio::time::timeout(TIMEOUT, model.call(request))
         .await
         .map_err(|_| Error::TimedOut)?
-        .map_err(Error::Provider)?;
+        .map_err(|error| match error {
+            // A server on the user's machine that isn't running, more
+            // likely than their connection being down.
+            ProviderError::Http(_) if provider.is_compatible() => {
+                Error::Unreachable(provider.name.clone())
+            }
+            error => Error::Provider(error),
+        })?;
     let catalog_price = || {
         // A compatible server's models aren't the catalog's, whatever
         // they're named.
@@ -715,6 +794,109 @@ mod tests {
         assert_eq!(assigned(writer.device(), Purpose::ExtractFacts)?, None);
         assert!(providers(writer.device())?.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn an_edited_server_keeps_the_models_it_still_serves() -> Result<(), database::Error> {
+        let mut writer = Writer::open_in_memory()?;
+        let (server, _) = writer.execute(|write| {
+            add_compatible(write, "Ollama", "http://localhost:11434/v1", "qwen3")
+        })?;
+        writer.execute(|write| {
+            assign(
+                write,
+                Some(Purpose::GenerateResume),
+                Some((server, "llama3.3")),
+            )
+        })?;
+        writer.execute(|write| {
+            edit_server(
+                write,
+                server,
+                "Home server",
+                "http://192.168.1.5:11434/v1",
+                &["mistral-small".to_owned(), "qwen3".to_owned()],
+            )
+        })?;
+        let Some(assigned) = assigned(writer.device(), Purpose::ExtractFacts)? else {
+            panic!("the server is still the default");
+        };
+        assert_eq!(assigned.provider.id, server);
+        assert_eq!(assigned.provider.name, "Home server");
+        assert_eq!(
+            assigned.provider.base_url.as_deref(),
+            Some("http://192.168.1.5:11434/v1")
+        );
+        assert_eq!(assigned.model, "qwen3", "still served, so kept");
+        assert_eq!(
+            assignment(writer.device(), Some(Purpose::GenerateResume))?,
+            Some((server, "mistral-small".to_owned())),
+            "gone, so moved to the first served"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removing_the_defaults_provider_hands_the_default_to_another() -> Result<(), database::Error>
+    {
+        let mut writer = Writer::open_in_memory()?;
+        let (deepseek, _) = writer.execute(deepseek)?;
+        let (anthropic, _) = writer.execute(|write| {
+            add_provider(write, "Anthropic", "anthropic", None, "claude-haiku-4-5")
+        })?;
+        writer.execute(|write| remove_provider(write, deepseek))?;
+        assert_eq!(
+            assignment(writer.device(), None)?,
+            Some((anthropic, "claude-haiku-4-5".to_owned()))
+        );
+        // A task's own model is kept in its place, over a starting model.
+        let (server, _) = writer.execute(|write| {
+            add_compatible(write, "Ollama", "http://localhost:11434/v1", "qwen3")
+        })?;
+        writer.execute(|write| {
+            assign(
+                write,
+                Some(Purpose::GenerateResume),
+                Some((server, "qwen3")),
+            )
+        })?;
+        writer.execute(|write| remove_provider(write, anthropic))?;
+        assert_eq!(
+            assignment(writer.device(), None)?,
+            Some((server, "qwen3".to_owned()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_server_that_isnt_running_is_named_in_the_error() {
+        let assigned = Assigned {
+            provider: Provider {
+                id: Uuid::nil(),
+                name: "Ollama".to_owned(),
+                vendor: COMPATIBLE_VENDOR.to_owned(),
+                format: Some(CHAT_FORMAT.to_owned()),
+                // Port 1: nothing listens there.
+                base_url: Some("http://127.0.0.1:1/v1".to_owned()),
+            },
+            model: "qwen3".to_owned(),
+        };
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("couldn't start a runtime: {error}"),
+        };
+        let reply = runtime.block_on(call(
+            &assigned,
+            String::new(),
+            CompletionRequest::new("Hello".to_owned()),
+        ));
+        assert_eq!(
+            reply.err().map(|error| error.to_string()),
+            Some("Couldn't reach Ollama. Check that it's running.".to_owned())
+        );
     }
 
     /// The catalog comes with rig: an update that drops a model a vendor
