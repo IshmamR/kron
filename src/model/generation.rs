@@ -12,7 +12,7 @@ use std::ops::Range;
 
 use chrono::{Datelike, Local};
 use rig_core::completion::CompletionRequest;
-use rig_core::completion::options::{GenerationOptions, Reasoning};
+use rig_core::completion::options::{GenerationOptions, OnUnsupported, Reasoning};
 use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -30,8 +30,9 @@ use crate::database::schema::{
 use crate::database::{Error, Write};
 use crate::typeset::{self, Paper};
 
-/// What the model is told. The answer's shape is spelled out, since DeepSeek
-/// takes "a JSON object" rather than a schema.
+/// What the model is told. The answer's shape is spelled out, since that's
+/// how every provider is asked for it: only DeepSeek is put in JSON mode
+/// (`llm::call`), and it takes "a JSON object" rather than a schema.
 const PREAMBLE: &str = r#"You write a résumé for one job from facts about a person. Each fact has an id, like F12. Facts are grouped in entries, like E3: a job, degree, project, certification, group of skills, or other items like talks.
 
 Answer with one JSON object. Ids are strings in it, like "F12" and "E3":
@@ -320,8 +321,9 @@ impl Material {
 }
 
 /// The request asking the model for a résumé for `job` from `redacted`, what
-/// the material sends (`Material::sent`) as redacted. It's asked not to reason: it's slower and
-/// costs more, and nothing it reasons is checked.
+/// the material sends (`Material::sent`) as redacted. It's asked not to
+/// reason, where the model can stop: it's slower and costs more, and nothing
+/// it reasons is checked.
 pub fn request(redacted: &str, job: &Job) -> CompletionRequest {
     let prompt = format!(
         "The facts:\n{redacted}\nThe job: {} at {}\n\n{}",
@@ -331,8 +333,11 @@ pub fn request(redacted: &str, job: &Job) -> CompletionRequest {
         .preamble(PREAMBLE)
         .temperature(0.)
         .max_tokens(MAX_TOKENS)
-        .options(GenerationOptions::new().reasoning(Reasoning::Off))
-        .additional_params(serde_json::json!({ "response_format": { "type": "json_object" } }))
+        .options(
+            GenerationOptions::new()
+                .reasoning(Reasoning::Off)
+                .on_unsupported(OnUnsupported::Ignore),
+        )
 }
 
 impl Answer {
@@ -1443,10 +1448,10 @@ mod tests {
             device,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let provider = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
+        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
             .map_err(|error| format!("{error:?}"))?
             .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(provider.id)?.ok_or("no key saved for the provider")?;
+        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
         let writer = sample::written().map_err(|error| error.to_string())?;
         let job = sample::job(writer.kron(), "Cinder Labs").map_err(|error| error.to_string())?;
         let (title, company, description): (String, String, String) = writer.kron().query_row(
@@ -1474,7 +1479,7 @@ mod tests {
         };
         let reply = runtime
             .block_on(crate::llm::call(
-                &provider,
+                &assigned,
                 key,
                 request(&redaction.text, &job),
             ))
@@ -1529,16 +1534,16 @@ mod tests {
             device,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let provider = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
+        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
             .map_err(|error| format!("{error:?}"))?
             .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(provider.id)?.ok_or("no key saved for the provider")?;
+        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         let call = |request| {
             runtime
-                .block_on(crate::llm::call(&provider, key.clone(), request))
+                .block_on(crate::llm::call(&assigned, key.clone(), request))
                 .map_err(|error| error.to_string())
         };
         let jobs: Vec<(&str, &str, &str, String)> = JOBS

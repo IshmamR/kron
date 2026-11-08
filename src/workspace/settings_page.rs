@@ -17,9 +17,8 @@ use super::ai_settings::AiSettings;
 use super::palette_picker::palette_picker;
 use super::stand_in_name::StandInName;
 use crate::appearance::{Appearance, Motion, Palette};
-use crate::database::schema::{LlmAssignments, LlmProviders, Settings as SettingsTable};
+use crate::database::schema::Settings as SettingsTable;
 use crate::database::{Changed, Database};
-use crate::llm::{self, Purpose};
 use crate::model::settings;
 
 const KEY_CONTEXT: &str = "SettingsPage";
@@ -37,7 +36,7 @@ pub struct SettingsPage {
     generation: usize,
     start: SettingsSection,
     focus_handle: FocusHandle,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Render for SettingsPage {
@@ -98,14 +97,15 @@ impl SettingsPage {
     ) -> Self {
         let ai_settings = cx.new(|cx| AiSettings::new(database.clone(), window, cx));
         let stand_in_name = cx.new(|cx| StandInName::new(database.clone(), window, cx));
-        let subscription = cx.subscribe(&database, |_, _, changed: &Changed, cx| {
-            if changed.touches(SettingsTable)
-                || changed.touches(LlmAssignments)
-                || changed.touches(LlmProviders)
-            {
-                cx.notify();
-            }
-        });
+        let subscriptions = vec![
+            cx.subscribe(&database, |_, _, changed: &Changed, cx| {
+                if changed.touches(SettingsTable) {
+                    cx.notify();
+                }
+            }),
+            // Its rows are drawn by the page.
+            cx.observe(&ai_settings, |_, _, cx| cx.notify()),
+        ];
         Self {
             database,
             ai_settings,
@@ -113,7 +113,7 @@ impl SettingsPage {
             generation: 0,
             start,
             focus_handle: cx.focus_handle(),
-            _subscription: subscription,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -214,122 +214,103 @@ impl SettingsPage {
             )
     }
 
-    /// The provider and model facts are found with, the provider's key, and
-    /// the name sent in place of the user's.
+    /// The providers set up, each with its own key, the model each task
+    /// runs on, and the name sent in place of the user's.
     fn ai_page(&self, cx: &App) -> SettingPage {
-        let database = self.database.clone();
-        let assigned = {
-            let database = database.clone();
-            move |cx: &App| {
-                llm::assigned(database.read(cx).device_connection(), Purpose::ExtractFacts)
-                    .unwrap_or_else(|error| {
-                        eprintln!("settings: couldn't read the AI provider: {error}");
-                        None
-                    })
-            }
-        };
-        let vendor = assigned(cx).map_or(llm::VENDORS[0].0.to_owned(), |provider| provider.vendor);
         let ai_settings = self.ai_settings.clone();
+        // A row like the others, with nothing on its right: the buttons to
+        // add go under the list.
+        let heading = SettingItem::new("Providers", SettingField::render(|_, _, _| div()))
+            .description(
+                "Keys are kept in your system keyring, never in Kron's data. Your name and \
+                 contact details are hidden before anything is sent.",
+            )
+            .keywords(["api key", "credentials", "keyring", "ollama", "server"]);
+        let add = {
+            let ai_settings = ai_settings.clone();
+            SettingItem::render(move |_, _, cx| {
+                ai_settings.update(cx, |settings, cx| settings.render_add(cx))
+            })
+        };
+        let providers = self.ai_settings.read(cx).providers();
+        let listed: Vec<_> = providers
+            .iter()
+            .map(|provider| {
+                let ai_settings = ai_settings.clone();
+                let row = provider.clone();
+                let item = SettingItem::new(
+                    provider.name.clone(),
+                    SettingField::render(move |_, _, cx| {
+                        ai_settings
+                            .update(cx, |settings, cx| settings.render_provider(row.clone(), cx))
+                    }),
+                );
+                match &provider.base_url {
+                    Some(url) => item.description(url.clone()),
+                    None => item,
+                }
+            })
+            .collect();
+        let empty = providers.is_empty().then(|| {
+            SettingItem::render(|_, _, cx| {
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("No providers yet. Add one to find facts and write résumés.")
+            })
+        });
+        let picker = |index: usize, title: &'static str, description: &'static str| {
+            let ai_settings = ai_settings.clone();
+            SettingItem::new(
+                title,
+                SettingField::render(move |_, _, cx| ai_settings.read(cx).render_picker(index)),
+            )
+            .description(description)
+            .keywords(["model"])
+        };
         let stand_in_name = self.stand_in_name.clone();
         SettingPage::new("AI")
             .icon(gpui_kit::assets::IconName::Sparkles)
             .resettable(false)
             .group(
                 SettingGroup::new()
-                    .item(
-                        SettingItem::new(
-                            "Provider",
-                            SettingField::dropdown(
-                                llm::VENDORS
-                                    .iter()
-                                    .map(|(id, name)| ((*id).into(), (*name).into()))
-                                    .collect(),
-                                {
-                                    let assigned = assigned.clone();
-                                    move |cx| {
-                                        assigned(cx)
-                                            .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
-                                                provider.vendor
-                                            })
-                                            .into()
-                                    }
-                                },
-                                {
-                                    let assigned = assigned.clone();
-                                    let database = database.clone();
-                                    move |vendor, cx| {
-                                        let model = assigned(cx)
-                                            .filter(|provider| provider.vendor == vendor.as_ref())
-                                            .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
-                                                provider.model
-                                            });
-                                        database.read(cx).queue(move |write| {
-                                            llm::set_default(write, &vendor, &model).map(|_| ())
-                                        });
-                                    }
-                                },
-                            ),
-                        )
-                        .description(
-                            "Your documents are sent here to find their facts, with your name \
-                             and contact details hidden first.",
-                        ),
+                    .item(heading)
+                    .items(empty)
+                    .items(listed)
+                    // Under the list, where the eye ends up, not beside the
+                    // heading.
+                    .item(add),
+            )
+            .group(
+                SettingGroup::new()
+                    .item(picker(
+                        0,
+                        "Default",
+                        "Used for everything without a model of its own.",
+                    ))
+                    .item(picker(
+                        1,
+                        "Finding facts",
+                        "Copies the facts out of your documents. A fast, cheap model does it well.",
+                    ))
+                    .item(picker(
+                        2,
+                        "Writing résumés",
+                        "Picks and words the facts for a job.",
+                    )),
+            )
+            .group(
+                SettingGroup::new().item(
+                    SettingItem::new(
+                        "Your name is sent as",
+                        SettingField::render(move |_, _, _| stand_in_name.clone()),
                     )
-                    .item(
-                        SettingItem::new(
-                            "Model",
-                            SettingField::scrollable_dropdown(
-                                llm::models(&vendor)
-                                    .into_iter()
-                                    .map(|(id, name)| (id.into(), name.into()))
-                                    .collect(),
-                                {
-                                    let assigned = assigned.clone();
-                                    move |cx| {
-                                        assigned(cx)
-                                            .map_or(llm::DEFAULT_MODEL.to_owned(), |provider| {
-                                                provider.model
-                                            })
-                                            .into()
-                                    }
-                                },
-                                move |model, cx| {
-                                    let vendor = assigned(cx)
-                                        .map_or(llm::VENDORS[0].0.to_owned(), |provider| {
-                                            provider.vendor
-                                        });
-                                    database.read(cx).queue(move |write| {
-                                        llm::set_default(write, &vendor, &model).map(|_| ())
-                                    });
-                                },
-                            ),
-                        )
-                        .description("Used to find facts and write your résumés."),
+                    .description(
+                        "A made-up name the AI sees in place of yours, so it reads your \
+                         documents as written. Yours is put back in what comes back.",
                     )
-                    .item(
-                        SettingItem::new(
-                            "API key",
-                            SettingField::render(move |_, _, _| ai_settings.clone()),
-                        )
-                        .description("Kept in your system keyring, never in Kron's data.")
-                        .keywords(["credentials", "password", "keyring"]),
-                    )
-                    .item(
-                        SettingItem::new(
-                            "Your name is sent as",
-                            SettingField::render(move |_, _, _| stand_in_name.clone()),
-                        )
-                        .description(
-                            "A made-up name the AI sees in place of yours, so it reads your \
-                             documents as written. Yours is put back in what comes back.",
-                        )
-                        .keywords([
-                            "stand-in",
-                            "redaction",
-                            "personal",
-                            "privacy",
-                        ]),
-                    ),
+                    .keywords(["stand-in", "redaction", "personal", "privacy"]),
+                ),
             )
     }
 }
@@ -392,7 +373,7 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, _| {
             assert!(window.try_find("choose-dark-palette").is_none());
-            assert!(window.find("add-api-key").visible());
+            assert!(window.find("add-provider").visible());
         });
     }
 }

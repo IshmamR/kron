@@ -174,7 +174,11 @@ system.
 `llm.rs` calls models through rig, on a tokio runtime of its own (GPUI doesn't
 run one). Providers, and the model for each task (extract facts, generate
 résumé), are per device in `device.sqlite`, because keys and local endpoints
-are. DeepSeek is the provider offered today.
+are. Several providers can be set up at once: Anthropic, OpenAI, Gemini,
+DeepSeek, xAI, Mistral, Groq and OpenRouter by key, and any OpenAI-compatible
+server (Ollama, LM Studio) by URL, whose models are listed from it. The first
+provider becomes the default; each task can run on another model, or the
+default's.
 
 - API keys are in the OS keyring, never in the database.
 - Prompts and responses are never stored or logged. `llm_runs` keeps each
@@ -203,8 +207,8 @@ GPUI through gpui-kit (gpui-component), light and dark themes.
   edit, hide and merge facts, add notes.
 - **Import** (`workspace/import_page.rs`): drop, choose or paste documents,
   check the text, hide details, then find facts.
-- **Settings**: appearance, the stand-in name, and AI providers
-  (`workspace/ai_settings.rs`).
+- **Settings**: appearance, the stand-in name, AI providers and the model
+  each task runs on (`workspace/ai_settings.rs`).
 - **Onboarding** (`workspace/onboarding.rs`) takes the place of the app until
   there's a document, a job or a name.
 

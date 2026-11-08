@@ -874,8 +874,8 @@ impl JobView {
             return;
         }
         let database = self.database.read(cx);
-        let provider = match llm::assigned(database.device_connection(), Purpose::GenerateResume) {
-            Ok(Some(provider)) => provider,
+        let assigned = match llm::assigned(database.device_connection(), Purpose::GenerateResume) {
+            Ok(Some(assigned)) => assigned,
             Ok(None) => {
                 notify(
                     Notification::warning("To write a résumé, add an AI provider in Settings."),
@@ -936,7 +936,7 @@ impl JobView {
         );
         let started_at = Utc::now().timestamp_millis();
         let start = Instant::now();
-        let call = llm::complete(&provider, request, cx);
+        let call = llm::complete(&assigned, request, cx);
         let database = self.database.clone();
         self.generating = true;
         cx.notify();
@@ -970,7 +970,7 @@ impl JobView {
                         write,
                         &llm::Run {
                             purpose: Purpose::GenerateResume,
-                            provider: &provider,
+                            assigned: &assigned,
                             started_at,
                             duration,
                             reply: reply.as_ref(),

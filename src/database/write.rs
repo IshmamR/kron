@@ -306,6 +306,33 @@ impl Write<'_> {
         self.update_row(Shape::of::<T>(), &key.values(), &[("deleted_at", &now)])
     }
 
+    /// Deletes the row from device.sqlite. Device rows aren't synced or
+    /// undone, so they go for good instead of being marked as `delete` does.
+    pub fn remove<T: Table>(&mut self, _table: T, key: impl Key<T::Key>) -> Result<(), Error> {
+        if !T::DEVICE {
+            return Err(Error::Misuse(format!(
+                "{} is synced, so its rows are marked deleted, not removed",
+                T::NAME
+            )));
+        }
+        let parameters = key.values();
+        let row_key = row_key(&parameters)?;
+        let condition = Shape::of::<T>().condition(1);
+        let removed = self
+            .connection_for(T::DEVICE)?
+            .prepare_cached(&format!("DELETE FROM \"{}\" WHERE {condition}", T::NAME))?
+            .execute(parameters.as_slice())?;
+        if removed == 0 {
+            return Err(Error::RowNotFound { table: T::NAME });
+        }
+        self.changes.push(Change {
+            table: T::NAME,
+            key: row_key.into(),
+            field: None,
+        });
+        Ok(())
+    }
+
     /// Saves `bytes` as `files/ab/abcd…`, named by their BLAKE3 hash, and adds
     /// their `files` row, unless both are there already. Returns the hash.
     pub fn add_file(&mut self, bytes: &[u8], media_type: &str) -> Result<[u8; 32], Error> {

@@ -177,7 +177,7 @@ pub struct Change {
     pub table: &'static str,
     /// The row's primary key values joined, as in `outbox.row_key`.
     pub key: Box<[u8]>,
-    /// `None`: the row was added.
+    /// `None`: the row was added, or removed from device.sqlite.
     pub field: Option<&'static str>,
 }
 

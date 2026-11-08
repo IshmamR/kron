@@ -13,7 +13,7 @@ mod fixes;
 use std::ops::Range;
 
 use rig_core::completion::CompletionRequest;
-use rig_core::completion::options::{GenerationOptions, Reasoning};
+use rig_core::completion::options::{GenerationOptions, OnUnsupported, Reasoning};
 use rusqlite::Connection;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -24,8 +24,9 @@ use super::{DocumentId, EntryKind, FactKind, Review, ReviewReason, possible_dupl
 use crate::database::schema::{Entries, FactSources, Facts, entries, fact_sources, facts};
 use crate::database::{Error, Write};
 
-/// What the model is told. The answer's shape is spelled out, since DeepSeek
-/// takes "a JSON object" rather than a schema.
+/// What the model is told. The answer's shape is spelled out, since that's
+/// how every provider is asked for it: only DeepSeek is put in JSON mode
+/// (`llm::call`), and it takes "a JSON object" rather than a schema.
 const PREAMBLE: &str = r#"You read a CV, or other text about a person's work, and list what it says as exact quotes.
 
 Answer with one JSON object. Each Quote in it is {"quote": string, "fixed": string or null}, as the rules say.
@@ -67,14 +68,18 @@ const MAX_TOKENS: u64 = 16_000;
 const BULLETS: [char; 8] = ['•', '-', '*', '–', '▪', '◦', '·', '‣'];
 
 /// The request asking the model for the facts in `redacted`. It's asked not
-/// to reason: copying quotes needs none, and it's slower and costs more.
+/// to reason, where the model can stop: copying quotes needs none, and it's
+/// slower and costs more.
 pub fn request(redacted: &str) -> CompletionRequest {
     CompletionRequest::new(redacted.to_owned())
         .preamble(PREAMBLE)
         .temperature(0.)
         .max_tokens(MAX_TOKENS)
-        .options(GenerationOptions::new().reasoning(Reasoning::Off))
-        .additional_params(serde_json::json!({ "response_format": { "type": "json_object" } }))
+        .options(
+            GenerationOptions::new()
+                .reasoning(Reasoning::Off)
+                .on_unsupported(OnUnsupported::Ignore),
+        )
 }
 
 /// The model's answer, as the preamble describes it.
@@ -1408,10 +1413,10 @@ mod tests {
             device,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
-        let provider = crate::llm::assigned(&device, crate::llm::Purpose::ExtractFacts)
+        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::ExtractFacts)
             .map_err(|error| format!("{error:?}"))?
             .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(provider.id)?.ok_or("no key saved for the provider")?;
+        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -1454,7 +1459,7 @@ mod tests {
             let started = std::time::Instant::now();
             let reply = runtime
                 .block_on(crate::llm::call(
-                    &provider,
+                    &assigned,
                     key.clone(),
                     request(&redaction.text),
                 ))

@@ -540,11 +540,11 @@ impl ImportPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let provider = match llm::assigned(
+        let assigned = match llm::assigned(
             self.database.read(cx).device_connection(),
             Purpose::ExtractFacts,
         ) {
-            Ok(Some(provider)) => provider,
+            Ok(Some(assigned)) => assigned,
             Ok(None) => {
                 notify(
                     Notification::warning(format!(
@@ -576,7 +576,7 @@ impl ImportPage {
         );
         let started_at = Utc::now().timestamp_millis();
         let start = Instant::now();
-        let call = llm::complete(&provider, extraction::request(&redaction.text), cx);
+        let call = llm::complete(&assigned, extraction::request(&redaction.text), cx);
         let database = self.database.clone();
         self.finding.push(document);
         cx.spawn_in(window, async move |this, cx| {
@@ -600,7 +600,7 @@ impl ImportPage {
                         write,
                         &llm::Run {
                             purpose: Purpose::ExtractFacts,
-                            provider: &provider,
+                            assigned: &assigned,
                             started_at,
                             duration,
                             reply: reply.as_ref(),
