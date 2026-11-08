@@ -496,25 +496,25 @@ mod tests {
         Ok(())
     }
 
+    /// Kron has one migration until it ships; these stand in for the ones
+    /// after it, which an older database runs from where it is.
     #[test]
     fn a_database_from_an_older_version_migrates_and_keeps_its_rows() -> Result<(), Error> {
+        let migrations = [
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, text TEXT NOT NULL)",
+            "ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+        ];
         let mut connection = Connection::open_in_memory()?;
-        migrate(&mut connection, "kron.sqlite", &KRON_MIGRATIONS[..1])?;
-        connection.execute(
-            "INSERT INTO documents (id, added_at) VALUES (?1, 0)",
-            [Uuid::now_v7()],
-        )?;
-        migrate(&mut connection, "kron.sqlite", KRON_MIGRATIONS)?;
+        migrate(&mut connection, "test", &migrations[..1])?;
+        connection.execute("INSERT INTO notes (text) VALUES ('kept')", [])?;
+        migrate(&mut connection, "test", &migrations)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        assert_eq!(version as usize, KRON_MIGRATIONS.len());
-        assert_eq!(count(&connection, "documents")?, 1);
-        let indexes: i64 = connection.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE type = 'index'
-             AND name IN ('facts_by_merged_into', 'line_citations_by_fact', 'lines_by_block')",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(indexes, 3);
+        assert_eq!(version, 2);
+        let note: (String, i64) =
+            connection.query_row("SELECT text, pinned FROM notes", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        assert_eq!(note, ("kept".to_owned(), 0));
         Ok(())
     }
 

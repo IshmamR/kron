@@ -85,6 +85,9 @@ CREATE TABLE facts (
 ) STRICT;
 CREATE INDEX facts_by_entry ON facts(entry_id);
 CREATE INDEX facts_to_review ON facts(entry_id) WHERE review IS NOT NULL;
+-- Following merges: from a fact to the facts merged into it. Partial, since
+-- few facts are ever merged.
+CREATE INDEX facts_by_merged_into ON facts(merged_into) WHERE merged_into IS NOT NULL;
 
 CREATE TABLE fact_sources (
     id             BLOB PRIMARY KEY,
@@ -286,6 +289,9 @@ CREATE TABLE sections (
     title          TEXT NOT NULL CHECK (length(title) <= 256),  -- empty where none is shown, like the header; a custom one's name
     deleted_at     INTEGER
 ) STRICT;
+-- A résumé's or cover letter's tree is read by its parent keys, here and
+-- below, so reading one doesn't scan every generation's.
+CREATE INDEX sections_by_generation ON sections(generation_id);
 
 CREATE TABLE blocks (
     id          BLOB PRIMARY KEY,
@@ -295,6 +301,7 @@ CREATE TABLE blocks (
                     'header', 'entry', 'skills', 'text', 'item', 'paragraph')),
     deleted_at  INTEGER
 ) STRICT;
+CREATE INDEX blocks_by_section ON blocks(section_id);
 
 -- One piece of text on the page. Its role is its place in the block:
 --   header: name (one), contact
@@ -315,6 +322,7 @@ CREATE TABLE lines (
     text        TEXT NOT NULL CHECK (length(text) <= 4096),  -- what's on the page
     deleted_at  INTEGER
 ) STRICT;
+CREATE INDEX lines_by_block ON lines(block_id);
 
 CREATE TABLE line_citations (
     line_id   BLOB NOT NULL REFERENCES lines(id),
@@ -322,6 +330,8 @@ CREATE TABLE line_citations (
     sort_key  TEXT NOT NULL,
     PRIMARY KEY (line_id, fact_id)
 ) STRICT;
+-- The lines that cite a fact, for where it's used.
+CREATE INDEX line_citations_by_fact ON line_citations(fact_id);
 
 -- The facts a generation was made from, as they were then; never changes.
 CREATE TABLE fact_versions (
@@ -350,6 +360,7 @@ CREATE TABLE unsupported_claims (
     CHECK ((reason = 'invented_year') = (year IS NOT NULL)),
     CHECK ((reason = 'uses_hidden_fact') = (hidden_fact_id IS NOT NULL))
 ) STRICT;
+CREATE INDEX unsupported_claims_by_generation ON unsupported_claims(generation_id);
 
 -- LLM usage -------------------------------------------------------------------
 -- One row per task run, summing its calls as rig's UsageTotals does. Synced, so
@@ -405,7 +416,14 @@ CREATE TABLE settings (
     appearance        TEXT NOT NULL DEFAULT 'system' CHECK (appearance IN ('system', 'light', 'dark')),
     motion            TEXT NOT NULL DEFAULT 'system' CHECK (motion IN ('system', 'reduced', 'full')),
     default_template  BLOB REFERENCES templates(id),  -- its newest version is used; NULL: the bundled one
-    default_photo     BLOB REFERENCES photos(id)      -- NULL: none
+    default_photo     BLOB REFERENCES photos(id),     -- NULL: none
+    -- The made-up name sent to models in place of the user's.
+    stand_in_name     TEXT NOT NULL DEFAULT 'Jordan Ellis' CHECK (trim(stand_in_name) <> ''),
+    -- Each mode's palette, kept whichever mode is showing.
+    light_palette     TEXT NOT NULL DEFAULT 'linen'
+                          CHECK (light_palette IN ('porcelain', 'linen', 'glacier', 'clay', 'paper', 'lilac')),
+    dark_palette      TEXT NOT NULL DEFAULT 'orchid'
+                          CHECK (dark_palette IN ('moss', 'midnight', 'copper', 'orchid', 'olive', 'graphite'))
 ) STRICT;
 INSERT INTO settings (singleton) VALUES (1);
 
