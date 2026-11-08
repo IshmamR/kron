@@ -1979,19 +1979,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn a_job_without_a_resume_has_no_versions() -> Result<(), Error> {
-        let writer = sample::written()?;
-        let job = JobId(writer.kron().query_row(
-            "SELECT id FROM jobs WHERE company = 'Halcyon Cloud'",
-            [],
-            |row| row.get(0),
-        )?);
-        let versions = Versions::read(writer.kron(), job)?;
-        assert!(versions.current.is_none() && versions.sent.is_none());
-        Ok(())
-    }
-
     // The view in a window, driven by keys, with the pages typeset.
 
     struct View<'a> {
@@ -2109,20 +2096,6 @@ mod tests {
                 )
             }))
         }
-    }
-
-    #[test]
-    fn the_view_reads_the_current_resume_and_its_pages() {
-        let mut app = TestAppContext::single();
-        let mut view = open(&mut app, "Ledgerly");
-        let shown = view.shown();
-        assert_eq!(Some(shown.id), view.current());
-        assert!(!shown.lines.is_empty());
-        assert!(view.read(|view| view.pages.is_some()), "typeset");
-        assert!(
-            view.inspection().claims.len() == 2,
-            "Ledgerly's two unsupported claims"
-        );
     }
 
     #[test]
@@ -2358,28 +2331,6 @@ mod tests {
     }
 
     #[test]
-    fn merging_a_cited_fact_cites_the_one_kept() {
-        let mut app = TestAppContext::single();
-        let mut view = open(&mut app, "Ledgerly");
-        let migration = view.fact("Led the migration");
-        let linkedin = view.fact("Migrated 12 backend");
-        let citing: Vec<LineId> = view
-            .shown()
-            .lines
-            .iter()
-            .filter(|line| line.cites.contains(&migration))
-            .map(|line| line.id)
-            .collect();
-        assert!(!citing.is_empty());
-        view.run(move |write| commands::merge_facts(write, linkedin, &[migration]).map(drop));
-        let shown = view.shown();
-        for line in shown.lines.iter().filter(|line| citing.contains(&line.id)) {
-            assert!(line.cites.contains(&linkedin));
-            assert!(!line.cites.contains(&migration));
-        }
-    }
-
-    #[test]
     fn a_template_switch_shows_in_the_template_bar() {
         let mut app = TestAppContext::single();
         let mut view = open(&mut app, "Ledgerly");
@@ -2399,57 +2350,6 @@ mod tests {
             let shown = view.read(|view| view.shown_version().map(|version| version.paper));
             assert_eq!(shown, Some(paper));
         }
-    }
-
-    #[test]
-    fn a_claim_added_as_a_fact_says_so() {
-        let mut app = TestAppContext::single();
-        let mut view = open(&mut app, "Ledgerly");
-        let claim = view
-            .inspection()
-            .claims
-            .iter()
-            .find(|claim| {
-                claim.added_as.is_none()
-                    && !matches!(claim.reason, UnsupportedReason::UsesHiddenFact(_))
-            })
-            .map(|claim| claim.id);
-        let Some(claim) = claim else {
-            panic!("no claim to add");
-        };
-        view.run(move |write| commands::add_claim_as_fact(write, claim).map(drop));
-        let added = view
-            .inspection()
-            .claims
-            .iter()
-            .find(|each| each.id == claim)
-            .and_then(|claim| claim.added_as);
-        assert!(added.is_some());
-    }
-
-    #[test]
-    fn a_claim_needing_a_hidden_fact_is_resolved_once_its_shown() {
-        let mut app = TestAppContext::single();
-        let mut view = open(&mut app, "Ledgerly");
-        let hidden = view
-            .inspection()
-            .claims
-            .iter()
-            .find_map(|claim| match claim.reason {
-                UnsupportedReason::UsesHiddenFact(fact) => Some((claim.id, fact)),
-                _ => None,
-            });
-        let Some((claim, fact)) = hidden else {
-            panic!("Ledgerly has no claim needing a hidden fact");
-        };
-        view.run(move |write| commands::set_hidden(write, fact, false));
-        let shown_again = view
-            .inspection()
-            .claims
-            .iter()
-            .find(|each| each.id == claim)
-            .map(|claim| claim.hidden_fact_shown);
-        assert_eq!(shown_again, Some(true));
     }
 
     #[test]

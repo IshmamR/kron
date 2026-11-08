@@ -268,40 +268,25 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn palette_choices_are_kept_separately_from_appearance() -> Result<(), Error> {
-        let mut writer = Writer::open_in_memory()?;
-        writer.execute(|write| {
-            set_palette(write, Palette::Glacier)?;
-            set_palette(write, Palette::Moss)
-        })?;
-        let stored = Settings::read(writer.kron())?;
-        assert_eq!(stored.appearance, Appearance::System);
-        assert_eq!(
-            stored.palettes,
-            Palettes {
-                light: Palette::Glacier,
-                dark: Palette::Moss
-            }
-        );
-        writer.execute(|write| set_appearance(write, Appearance::Dark))?;
-        assert_eq!(Settings::read(writer.kron())?.palettes, stored.palettes);
-        Ok(())
-    }
-
     /// The schema lists the palettes it accepts; one missing there can't be saved.
     #[test]
-    fn every_palette_can_be_saved() -> Result<(), Error> {
+    fn every_palette_can_be_saved_without_changing_the_other_mode() -> Result<(), Error> {
         let mut writer = Writer::open_in_memory()?;
         for palette in Palette::ALL {
+            let before = Settings::read(writer.kron())?;
             writer.execute(|write| set_palette(write, palette))?;
+            let after = Settings::read(writer.kron())?;
+            assert_eq!(after.palettes.for_mode(palette.is_dark()), palette);
             assert_eq!(
-                Settings::read(writer.kron())?
-                    .palettes
-                    .for_mode(palette.is_dark()),
-                palette
+                after.palettes.for_mode(!palette.is_dark()),
+                before.palettes.for_mode(!palette.is_dark()),
+                "{palette:?}"
             );
+            assert_eq!(after.appearance, before.appearance);
         }
+        let palettes = Settings::read(writer.kron())?.palettes;
+        writer.execute(|write| set_appearance(write, Appearance::Dark))?;
+        assert_eq!(Settings::read(writer.kron())?.palettes, palettes);
         Ok(())
     }
 

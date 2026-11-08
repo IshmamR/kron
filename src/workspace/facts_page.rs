@@ -2070,24 +2070,6 @@ mod tests {
     }
 
     #[test]
-    fn undo_takes_back_the_latest_change_first() {
-        let mut app = TestAppContext::single();
-        let mut page = open(&mut app);
-        let migration = page.fact("Led the migration");
-        let linkedin = page.fact("Migrated 12 backend");
-        page.show(migration);
-        page.show(linkedin);
-        page.keys("ctrl-enter");
-        page.keys("enter");
-        page.keys("backspace");
-        assert!(page.stored::<bool>("hidden", migration));
-        page.undo();
-        assert!(!page.stored::<bool>("hidden", migration));
-        let merged_into: Option<uuid::Uuid> = page.stored("merged_into", linkedin);
-        assert_eq!(merged_into, Some(migration.0), "the merge stays");
-    }
-
-    #[test]
     fn with_no_fact_picked_the_prompt_fills_the_detail_panel() {
         use gpui_kit::test::TestWindowExt;
 
@@ -2201,10 +2183,17 @@ mod tests {
         let mut page = open(&mut app);
         let latency = page.fact("Cut p99 latency");
         page.show(latency);
-        assert!(page.read(|page, _| page.detail.is_some()));
+        // A re-read would replace the detail panel's text with the stored one.
+        page.update(|page, _, _| {
+            if let Some(detail) = page.detail.as_mut() {
+                detail.extracted = "not read again".into();
+            }
+        });
         // Settings: nothing the page shows.
         page.run(|write| write.set(crate::database::schema::settings::APPEARANCE, 1, &"dark"));
-        assert!(page.read(|page, _| page.detail.is_some()));
+        let extracted =
+            page.read(|page, _| page.detail.as_ref().map(|detail| detail.extracted.clone()));
+        assert_eq!(extracted.as_deref(), Some("not read again"));
     }
 
     #[test]

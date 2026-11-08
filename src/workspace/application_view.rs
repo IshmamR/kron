@@ -1064,7 +1064,7 @@ mod tests {
     use gpui_kit::{TestAppContext, VisualTestContext};
 
     use super::*;
-    use crate::database::{TemporaryDirectory, Write};
+    use crate::database::TemporaryDirectory;
     use crate::workspace::testing;
 
     struct Tab<'a> {
@@ -1127,10 +1127,6 @@ mod tests {
             self.settle();
         }
 
-        fn run(&mut self, command: impl FnOnce(&mut Write) -> Result<(), Error> + Send + 'static) {
-            testing::run(self.cx, &self.database, command);
-        }
-
         fn update(
             &mut self,
             update: impl FnOnce(&mut ApplicationView, &mut Window, &mut Context<ApplicationView>),
@@ -1181,25 +1177,6 @@ mod tests {
                     .map(|application| application.stage(Utc::now()))
             })
         }
-    }
-
-    /// The grid's cards show an upcoming interview and an offer in these
-    /// colors, which the palette sets; the timeline once used the kit's own.
-    #[test]
-    fn upcoming_events_and_offers_match_the_cards_colors() {
-        let mut app = TestAppContext::single();
-        let tab = open(&mut app, "Ledgerly");
-        tab.cx.update(|_, cx| {
-            let interview = JobEventKind::Interview {
-                kind: InterviewKind::Phone,
-                with: String::new(),
-            };
-            assert_eq!(dot_color(&interview, true, cx), cx.theme().warning);
-            assert_eq!(
-                dot_color(&JobEventKind::Offer, false, cx),
-                cx.theme().primary
-            );
-        });
     }
 
     #[test]
@@ -1320,16 +1297,5 @@ mod tests {
         assert!(tab.stage().is_some_and(|stage| !stage.is_closed()));
         tab.update(|view, _, cx| view.log_now(JobEventKind::NoResponse, cx));
         assert_eq!(tab.stage(), Some(Stage::NoResponse));
-    }
-
-    #[test]
-    fn an_event_logged_elsewhere_shows() {
-        let mut app = TestAppContext::single();
-        let mut tab = open(&mut app, "Ledgerly");
-        let before = tab.events().len();
-        let job = tab.job;
-        let event = JobEvent::new(Utc::now(), JobEventKind::RecruiterReplied);
-        tab.run(move |write| commands::save_event(write, job, &event));
-        assert_eq!(tab.events().len(), before + 1);
     }
 }

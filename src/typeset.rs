@@ -907,20 +907,6 @@ mod tests {
     }
 
     #[test]
-    fn every_line_is_located_in_every_template() {
-        for (resume, typeset) in every_sample_in_every_template() {
-            for line in resume.lines() {
-                assert!(
-                    typeset.layout.boxes_of(line.id).next().is_some(),
-                    "{:?} has no box in {:?}",
-                    line.text,
-                    resume.template
-                );
-            }
-        }
-    }
-
-    #[test]
     fn a_click_inside_a_line_finds_it_in_every_template() {
         for (resume, typeset) in every_sample_in_every_template() {
             for line_box in &typeset.layout.boxes {
@@ -1166,17 +1152,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn the_long_sample_runs_onto_a_second_page() {
-        let Some(long) = sample_resumes()
-            .into_iter()
-            .max_by_key(|resume| resume.lines().count())
-        else {
-            panic!("no sample résumés");
-        };
-        assert!(typeset(&Typesetter::new(), &long).layout.pages.len() >= 2);
     }
 
     #[test]

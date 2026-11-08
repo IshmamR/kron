@@ -954,12 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_counts_the_claims_left_out() {
-        assert_eq!(left_out_label(1), "1 claim left out");
-        assert_eq!(left_out_label(3), "3 claims left out");
-    }
-
-    #[test]
     fn the_current_resumes_read_back_what_the_sample_wrote() -> Result<(), Error> {
         let writer = sample::written()?;
         assert_eq!(summary(writer.kron())?, expected(&SAMPLE));

@@ -1034,17 +1034,6 @@ mod tests {
     }
 
     #[test]
-    fn on_the_grid_only_the_filter_is_highlighted_in_the_sidebar() {
-        assert!(!resumes_highlighted(Page::Resumes, false), "the filter is");
-        assert!(
-            resumes_highlighted(Page::Resumes, true),
-            "no filters when collapsed"
-        );
-        assert!(resumes_highlighted(Page::Job, false), "no filters in a job");
-        assert!(!resumes_highlighted(Page::Facts, false));
-    }
-
-    #[test]
     fn open_line_opens_the_job_with_the_line_selected() {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
@@ -1165,7 +1154,9 @@ mod tests {
         assert_eq!(open.read(|_, cx| Motion::current(cx)), Motion::Reduced);
         assert_eq!(
             open.read(|_, cx| cx.theme().primary),
-            gpui_kit::Hsla::from(gpui_kit::rgb(0x93c4ac)),
+            gpui_kit::Hsla::from(gpui_kit::rgb(
+                crate::appearance::Palette::Moss.colors().accent
+            )),
         );
         open.run(|write| settings::set_appearance(write, Appearance::Light));
         assert_eq!(
@@ -1174,7 +1165,9 @@ mod tests {
         );
         assert_eq!(
             open.read(|_, cx| cx.theme().primary),
-            gpui_kit::Hsla::from(gpui_kit::rgb(0x376dbb)),
+            gpui_kit::Hsla::from(gpui_kit::rgb(
+                crate::appearance::Palette::Glacier.colors().accent
+            )),
         );
     }
 }

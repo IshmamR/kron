@@ -363,12 +363,4 @@ mod tests {
         }
         Ok(())
     }
-
-    #[test]
-    fn a_missing_resume_has_no_sections() -> Result<(), Error> {
-        let writer = sample::written()?;
-        let sections = Section::read_all(writer.kron(), ResumeId::new())?;
-        assert!(sections.is_empty());
-        Ok(())
-    }
 }

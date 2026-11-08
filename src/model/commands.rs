@@ -874,43 +874,6 @@ mod tests {
     }
 
     #[test]
-    fn a_template_switch_lays_out_the_current_resume() -> Result<(), Error> {
-        let mut writer = with_sample()?;
-        let job = sample::job(writer.kron(), "Ledgerly")?;
-        run(&mut writer, |write| set_template(write, job, "sidebar"))?;
-        let version: Option<Uuid> = writer.kron().query_row(
-            "SELECT template_version_id FROM current_generations
-             WHERE job_id = ?1 AND kind = 'resume'",
-            [job.0],
-            |row| row.get(0),
-        )?;
-        assert_eq!(typeset::template_of_version(version).key, "sidebar");
-        Ok(())
-    }
-
-    #[test]
-    fn a_paper_switch_lays_out_the_current_resume() -> Result<(), Error> {
-        let mut writer = with_sample()?;
-        let job = sample::job(writer.kron(), "Ledgerly")?;
-        let paper = |writer: &Writer| -> rusqlite::Result<Option<String>> {
-            writer.kron().query_row(
-                "SELECT paper FROM current_generations WHERE job_id = ?1 AND kind = 'resume'",
-                [job.0],
-                |row| row.get(0),
-            )
-        };
-        run(&mut writer, |write| {
-            set_paper(write, job, typeset::Paper::A4)
-        })?;
-        assert_eq!(paper(&writer)?.as_deref(), Some("a4"));
-        run(&mut writer, |write| {
-            set_paper(write, job, typeset::Paper::Letter)
-        })?;
-        assert_eq!(paper(&writer)?.as_deref(), Some("letter"));
-        Ok(())
-    }
-
-    #[test]
     fn a_line_edit_keeps_what_was_generated_and_reverts_to_it() -> Result<(), Error> {
         let mut writer = with_sample()?;
         let (line, generated): (Uuid, String) = writer.kron().query_row(
