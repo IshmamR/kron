@@ -18,7 +18,7 @@ use rusqlite::{Connection, OptionalExtension};
 use super::OpenLine;
 use super::fact_list::{FactList, Filter, ListedFact};
 use super::parts::{
-    Source, caption, card, fact_kind_label, fact_status, heading, notice, page_title,
+    Source, caption, card, fact_kind_label, fact_status, heading, key_hint, notice, page_title,
     search_suffix, source_excerpt, sources, text_field,
 };
 use crate::database::schema::{
@@ -839,7 +839,15 @@ impl FactsPage {
                         &self.fact_editor,
                         cx,
                     )))
-                    .child(caption("↩ saves, ⇧↩ adds a line break, Esc cancels.", cx))
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_x_3()
+                            .gap_y_1()
+                            .child(key_hint(&["enter"], "saves", cx))
+                            .child(key_hint(&["shift-enter"], "adds a line break", cx))
+                            .child(key_hint(&["escape"], "cancels", cx)),
+                    )
                     .when(fact.text != detail.extracted, |this| {
                         this.child(
                             h_flex()

@@ -35,9 +35,9 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Pixels, Point, RenderImage, ScrollHandle, Stateful, Subscription, Task, Window,
-    actions, canvas, div, img, point, prelude::*, px, rgb,
+    FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, KeyBinding, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Pixels, Point, RenderImage, ScrollHandle, Stateful, StyledText,
+    Subscription, Task, Window, actions, canvas, div, img, point, prelude::*, px, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -1408,10 +1408,8 @@ fn job_header(
     generated_at: Option<DateTime<Utc>>,
     cx: &Context<JobView>,
 ) -> impl IntoElement {
-    let mut details = vec![
-        job.title.clone(),
-        application_view::status_label(job, Utc::now()),
-    ];
+    let (heading, title_length) = heading(&job.title, &job.company);
+    let mut details = vec![application_view::status_label(job, Utc::now())];
     if let Some(generated_at) = generated_at {
         details.push(format!(
             "Generated {}",
@@ -1436,9 +1434,14 @@ fn job_header(
                 .min_w_0()
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
                         .truncate()
-                        .child(job.company.clone()),
+                        .child(StyledText::new(heading).with_highlights([(
+                            0..title_length,
+                            HighlightStyle {
+                                font_weight: Some(FontWeight::SEMIBOLD),
+                                ..Default::default()
+                            },
+                        )])),
                 )
                 .child(
                     div()
@@ -1448,6 +1451,16 @@ fn job_header(
                         .child(details.join(" · ")),
                 ),
         )
+}
+
+/// "Title - Company", and how many bytes of it the title takes so it can be
+/// set bolder.
+fn heading(title: &str, company: &str) -> (String, usize) {
+    match (title.trim(), company.trim()) {
+        ("", company) => (company.to_string(), 0),
+        (title, "") => (title.to_string(), title.len()),
+        (title, company) => (format!("{title} - {company}"), title.len()),
+    }
 }
 
 /// Says when the résumé sent is older than the current one, and switches
@@ -1707,6 +1720,16 @@ mod tests {
             "Alex Rahman - Acme-Co- Labs.pdf"
         );
         assert_eq!(pdf_name(Some(" "), None), "Résumé.pdf");
+    }
+
+    #[test]
+    fn the_heading_leads_with_the_title_then_the_company() {
+        assert_eq!(
+            heading("Senior Rust Engineer", "Cinder Labs"),
+            ("Senior Rust Engineer - Cinder Labs".to_string(), 20)
+        );
+        assert_eq!(heading(" ", "Cinder Labs"), ("Cinder Labs".to_string(), 0));
+        assert_eq!(heading("Engineer", ""), ("Engineer".to_string(), 8));
     }
     use crate::database::{TemporaryDirectory, Write};
     use crate::model::{ClaimId, FactId, UnsupportedReason, sample};
@@ -2206,6 +2229,26 @@ mod tests {
             );
             assert!(window.find("regenerate-outdated").visible());
         });
+    }
+
+    /// The hint once wrapped between its arrows, ending one line on ↑.
+    #[test]
+    fn the_source_hint_keeps_its_arrow_keys_together() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let view = open(&mut app, "Cinder Labs");
+        for width in [720., 1100., 1500.] {
+            view.cx.simulate_resize(gpui_kit::size(px(width), px(720.)));
+            view.cx.run_until_parked();
+            view.cx.update(|window, cx| window.render_frame(cx));
+            let (Some(up), Some(down)) =
+                (view.cx.debug_bounds("kbd:↑"), view.cx.debug_bounds("kbd:↓"))
+            else {
+                panic!("at {width}px the hint doesn't show both arrow keys");
+            };
+            assert_eq!(up.top(), down.top(), "at {width}px the arrows split");
+        }
     }
 
     /// Ledgerly's line citing the latency fact, selected.

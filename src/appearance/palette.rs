@@ -149,7 +149,7 @@ impl Palette {
                 ink: 0x22272a,
                 secondary: 0x656c70,
                 accent: 0x476878,
-                selection: 0xdbe7eb,
+                selection: 0xc0d9e4,
                 accent_text: 0xffffff,
                 danger: 0xa8524d,
                 warning: 0x9e752d,
@@ -164,7 +164,7 @@ impl Palette {
                 ink: 0x27322b,
                 secondary: 0x5d6b60,
                 accent: 0x497858,
-                selection: 0xdbebde,
+                selection: 0xc1e2cf,
                 accent_text: 0xffffff,
                 danger: 0xa24e47,
                 warning: 0x946924,
@@ -179,7 +179,7 @@ impl Palette {
                 ink: 0x192b3b,
                 secondary: 0x5b7086,
                 accent: 0x376dbb,
-                selection: 0xdbeafd,
+                selection: 0xc4deff,
                 accent_text: 0xffffff,
                 danger: 0xb54e62,
                 warning: 0xa37534,
@@ -210,7 +210,7 @@ impl Palette {
                 ink: 0x2f2a24,
                 secondary: 0x6b6256,
                 accent: 0xb35733,
-                selection: 0xf1dccf,
+                selection: 0xefc8b6,
                 accent_text: 0xffffff,
                 danger: 0xa83a4a,
                 warning: 0x8d6a1f,
@@ -226,7 +226,7 @@ impl Palette {
                 ink: 0x232325,
                 secondary: 0x626266,
                 accent: 0x2b2b2d,
-                selection: 0xdcdcd8,
+                selection: 0xc9c9c4,
                 accent_text: 0xf2f2ef,
                 danger: 0xa8463f,
                 warning: 0x8f6a22,
@@ -241,7 +241,7 @@ impl Palette {
                 ink: 0x2a2534,
                 secondary: 0x675f74,
                 accent: 0x7350a6,
-                selection: 0xe6dcf5,
+                selection: 0xd8c6f3,
                 accent_text: 0xffffff,
                 danger: 0xb04a5a,
                 warning: 0x93702a,
@@ -324,6 +324,27 @@ mod tests {
             let colors = palette.colors();
             let ratio = contrast(colors.accent, colors.background);
             assert!(ratio >= 3., "{}: accent at {ratio:.2}:1", palette.label());
+        }
+    }
+
+    /// There's no standard for this. The dark palettes' selections sit near
+    /// 1.5:1 from their background and read at a glance; light ones at
+    /// 1.1:1 to 1.2:1 had to be hunted for, so the floor sits between.
+    #[test]
+    fn every_selection_stands_out_from_what_it_sits_on() {
+        for palette in Palette::ALL {
+            let colors = palette.colors();
+            for (name, behind, floor) in [
+                ("background", colors.background, 1.25),
+                ("sidebar", colors.sidebar, 1.15),
+            ] {
+                let ratio = contrast(colors.selection, behind);
+                assert!(
+                    ratio >= floor,
+                    "{}: selection on the {name} at {ratio:.2}:1",
+                    palette.label()
+                );
+            }
         }
     }
 

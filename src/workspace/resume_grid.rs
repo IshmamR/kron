@@ -18,7 +18,7 @@ use gpui_kit::{
 use rusqlite::Connection;
 
 use super::application_view;
-use super::parts::{page_title, search_suffix, text_field};
+use super::parts::{key_hint, page_title, search_suffix, text_field};
 use super::previews::{self, Previews, Render as PageRender};
 use crate::database::schema::{Events, FactVersions, Facts, Generations, Jobs, UnsupportedClaims};
 use crate::database::{Changed, Database, Error};
@@ -352,7 +352,12 @@ impl Render for ResumeGrid {
                     .text_color(cx.theme().muted_foreground)
                     .child(job_count_label(jobs.len(), job_count))
                     .when(padding == GRID_PADDING, |this| {
-                        this.child("↑ ↓ ← → select · Return opens")
+                        this.child(
+                            h_flex()
+                                .gap_3()
+                                .child(key_hint(&["↑", "↓", "←", "→"], "select", cx))
+                                .child(key_hint(&["enter"], "opens", cx)),
+                        )
                     }),
             )
     }
@@ -659,9 +664,8 @@ impl ResumeGrid {
                                     this.child(
                                         h_flex()
                                             .gap_1()
-                                            .text_color(theme.danger)
                                             .child(Icon::new(IconName::Info).xsmall())
-                                            .child(unsupported_label(unsupported)),
+                                            .child(left_out_label(unsupported)),
                                     )
                                 })
                                 .when(outdated, |this| {
@@ -866,10 +870,10 @@ fn job_card_id(job: JobId) -> ElementId {
     ElementId::Name(format!("job-card-{}", job.0).into())
 }
 
-fn unsupported_label(count: usize) -> String {
+fn left_out_label(count: usize) -> String {
     match count {
-        1 => "1 unsupported claim".into(),
-        count => format!("{count} unsupported claims"),
+        1 => "1 claim left out".into(),
+        count => format!("{count} claims left out"),
     }
 }
 
@@ -947,6 +951,12 @@ mod tests {
             }
         }
         rows
+    }
+
+    #[test]
+    fn a_card_counts_the_claims_left_out() {
+        assert_eq!(left_out_label(1), "1 claim left out");
+        assert_eq!(left_out_label(3), "3 claims left out");
     }
 
     #[test]

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::ShowFact;
 use super::job_view::{ShownLine, ShownResume};
 use super::parts::{
-    Source, caption, card, entry_label, fact_kind_label, fact_status, heading, notice,
+    Source, caption, card, entry_label, fact_kind_label, fact_status, heading, key_hint, notice,
     source_excerpt, sources, text_field,
 };
 use crate::database::{Database, Error};
@@ -51,17 +51,16 @@ impl RenderOnce for Inspector {
 
         let source = match selected_line {
             Some(line) => self.sources(line, cx).into_any_element(),
-            // No-break spaces keep the arrows together.
-            None => caption(
-                "Select a line to see the facts it came from. ↑\u{a0}↓\u{a0}move between lines.",
-                cx,
-            )
-            .into_any_element(),
+            None => v_flex()
+                .gap_2()
+                .child(caption("Select a line to see the facts it came from.", cx))
+                .child(key_hint(&["↑", "↓"], "move between lines", cx))
+                .into_any_element(),
         };
 
         let claims = &self.inspection.claims;
         let unsupported = if claims.is_empty() {
-            caption("No unsupported claims. Every line is backed by a fact.", cx).into_any_element()
+            caption("Nothing left out. Every line is backed by a fact.", cx).into_any_element()
         } else {
             v_flex()
                 .gap_2()
@@ -101,7 +100,7 @@ impl RenderOnce for Inspector {
                     .py_4()
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(heading("Unsupported claims", Some(claims.len()), cx))
+                    .child(heading("Left out", Some(claims.len()), cx))
                     .child(unsupported),
             )
     }
@@ -263,16 +262,10 @@ impl Inspector {
             .added_as
             .or(hidden_fact.filter(|_| claim.hidden_fact_shown));
 
-        let (reason, reason_color) = match (resolved, claim.added_as) {
-            (Some(_), Some(_)) => (
-                "Added to your facts. Regenerate to use it.".into(),
-                theme.muted_foreground,
-            ),
-            (Some(_), None) => (
-                "You showed the fact it needs again. Regenerate to use it.".into(),
-                theme.muted_foreground,
-            ),
-            (None, _) => (unsupported_reason(&claim.reason), theme.danger),
+        let reason: SharedString = match (resolved, claim.added_as) {
+            (Some(_), Some(_)) => "Added to your facts. Regenerate to use it.".into(),
+            (Some(_), None) => "You showed the fact it needs again. Regenerate to use it.".into(),
+            (None, _) => unsupported_reason(&claim.reason).into(),
         };
         let action = match (resolved, hidden_fact) {
             (Some(fact), _) => show_in_facts_button(("show-claim-fact", index), fact),
@@ -314,7 +307,12 @@ impl Inspector {
                     .when(resolved.is_none(), |this| this.line_through())
                     .child(claim.text.clone()),
             )
-            .child(div().text_xs().text_color(reason_color).child(reason))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(reason),
+            )
             .when(self.line_editor.is_some(), |this| {
                 this.child(h_flex().child(action))
             })

@@ -1049,8 +1049,8 @@ fn date_label(at: DateTime<Utc>, with_time: bool) -> String {
 fn dot_color(kind: &JobEventKind, upcoming: bool, cx: &App) -> Hsla {
     let theme = cx.theme();
     match kind {
-        _ if upcoming => theme.blue,
-        JobEventKind::Offer => theme.success,
+        _ if upcoming => theme.warning,
+        JobEventKind::Offer => theme.primary,
         JobEventKind::Rejected | JobEventKind::Withdrawn | JobEventKind::NoResponse => {
             theme.muted_foreground
         }
@@ -1181,6 +1181,25 @@ mod tests {
                     .map(|application| application.stage(Utc::now()))
             })
         }
+    }
+
+    /// The grid's cards show an upcoming interview and an offer in these
+    /// colors, which the palette sets; the timeline once used the kit's own.
+    #[test]
+    fn upcoming_events_and_offers_match_the_cards_colors() {
+        let mut app = TestAppContext::single();
+        let tab = open(&mut app, "Ledgerly");
+        tab.cx.update(|_, cx| {
+            let interview = JobEventKind::Interview {
+                kind: InterviewKind::Phone,
+                with: String::new(),
+            };
+            assert_eq!(dot_color(&interview, true, cx), cx.theme().warning);
+            assert_eq!(
+                dot_color(&JobEventKind::Offer, false, cx),
+                cx.theme().primary
+            );
+        });
     }
 
     #[test]
