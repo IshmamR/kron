@@ -4073,6 +4073,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7125,9 +7131,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.44.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c60db6e3da7681abbdfa9637c1a76dbd5a713f935f0a6753d72c5d2770ed4c6"
+checksum = "c46316e31b3e80a050ad35790f1b612b4dfdb46982293cc78641caf4271f1b05"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -7136,6 +7142,8 @@ dependencies = [
  "futures",
  "glob",
  "http",
+ "httpdate",
+ "indexmap",
  "mime",
  "mime_guess",
  "ordered-float",
@@ -7146,18 +7154,20 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tracing",
  "url",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
 name = "rig-derive"
-version = "0.44.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1146bdcb55a3b2dbdd9d2df7a8846714499c9985e9042926c06ffe98b3a821bc"
+checksum = "be8c7db5ee8f8ece69fa04b253d096d9b40fa28bd0d7e5cb8a77602b5edf93de"
 dependencies = [
  "convert_case 0.11.0",
  "proc-macro-crate",
@@ -7168,9 +7178,9 @@ dependencies = [
 
 [[package]]
 name = "rig-http"
-version = "0.44.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9b68e5fe7258d64aeffb0a976ad0665ad2f94104d41eb4cdf463065ba57ec0b"
+checksum = "ac927db714f03f383330e16ef360d4ab288fdf42eecab6156982fab90786d5bd"
 dependencies = [
  "bytes",
  "futures",
@@ -7178,14 +7188,15 @@ dependencies = [
  "http",
  "mime",
  "thiserror 2.0.21",
+ "tokio",
  "url",
 ]
 
 [[package]]
 name = "rig-reqwest"
-version = "0.44.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d478ca821bdf7030b4cabfdc7acc07ab5f0449886f9a7e472de205a6ec4b2b1d"
+checksum = "a203e5c50e5460024594cc4ccf6cfc99c7ff22aee57cbacef0fb52ea0c7abd10"
 dependencies = [
  "bytes",
  "futures",
@@ -7193,15 +7204,16 @@ dependencies = [
  "reqwest",
  "rig-http",
  "thiserror 2.0.21",
- "tokio",
+ "tracing",
  "url",
+ "webpki-root-certs",
 ]
 
 [[package]]
 name = "rig-tungstenite"
-version = "0.44.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d145d2d41722fd040dbb47f05b797c8119884697bb4ee7e53fc5c1c1ec9610df"
+checksum = "4f64568ff4658f631da1f818e03bbe6a91087ac805314e2b4b5f546e589e7b05"
 dependencies = [
  "futures",
  "rig-http",
@@ -8683,19 +8695,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
- "tokio-macros",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "tokio-macros"
-version = "2.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.10",
 ]
 
 [[package]]

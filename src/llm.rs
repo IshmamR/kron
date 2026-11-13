@@ -603,7 +603,8 @@ pub async fn call(
         }
         Catalog::builtin()
             .resolve(&format!("{}/{}", provider.vendor, assigned.model))
-            .and_then(|spec| spec.pricing)
+            .ok()
+            .and_then(|resolved| resolved.spec.pricing)
             .and_then(|pricing| pricing.cost(&response.usage))
             .map(|cost| cost.total)
     };
