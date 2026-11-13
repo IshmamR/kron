@@ -10,11 +10,12 @@ use gpui_kit::component::notification::Notification;
 use gpui_kit::component::{ActiveTheme, IconName, Root, Sizable, WindowExt, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, Div, Entity, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
-    Keystroke, MouseButton, SharedString, StyledText, Window, div, prelude::*, px,
+    MouseButton, SharedString, StyledText, Window, div, prelude::*, px,
 };
 
 use rusqlite::Connection;
 
+use super::shortcuts::keystroke;
 use crate::database::Error;
 use crate::model::{EntryId, FactId, FactKind};
 
@@ -51,18 +52,16 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
 /// Keys drawn as key caps, then what they do: "[↑] [↓] move between lines".
 /// `keys` are keystrokes as bindings spell them ("enter", "shift-enter");
 /// an arrow is written as itself, which the cap shows as is.
-pub fn key_hint(keys: &[&'static str], action: &str, cx: &App) -> Div {
+pub fn key_hint(keys: &[&str], action: &str, cx: &App) -> Div {
     h_flex()
         .gap_1()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .children(keys.iter().filter_map(|key| match Keystroke::parse(key) {
-            Ok(keystroke) => Some(Kbd::new(keystroke).outline()),
-            Err(error) => {
-                eprintln!("key hint: couldn't read {key:?}: {error}");
-                None
-            }
-        }))
+        .children(
+            keys.iter()
+                .filter_map(|key| keystroke(key, cx))
+                .map(|keystroke| Kbd::new(keystroke).outline()),
+        )
         .child(div().ml_0p5().child(action.to_owned()))
 }
 

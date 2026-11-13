@@ -13,13 +13,13 @@ use gpui_kit::component::time_field::TimePrecision;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
-    IntoElement, KeyBinding, Pixels, SharedString, Subscription, Window, actions, div, prelude::*,
-    px,
+    IntoElement, Pixels, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 
 use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, card, heading, text_field};
+use super::shortcuts::binding;
 use crate::database::schema::{Events, Generations, JobDescriptions, Jobs};
 use crate::database::{Changed, Database, Error};
 use crate::model::commands;
@@ -47,14 +47,18 @@ pub struct LogStep {
 
 pub fn init(cx: &mut App) {
     let input_in = format!("{FORM_CONTEXT} > Input");
-    cx.bind_keys([
-        KeyBinding::new("secondary-enter", SaveEvent, Some(FORM_CONTEXT)),
-        KeyBinding::new("escape", CancelEvent, Some(FORM_CONTEXT)),
-        // The text boxes' own Esc does nothing, and Ctrl+Enter in the note
-        // would add a line.
-        KeyBinding::new("secondary-enter", SaveEvent, Some(&input_in)),
-        KeyBinding::new("escape", CancelEvent, Some(&input_in)),
-    ]);
+    cx.bind_keys(
+        [
+            binding("secondary-enter", SaveEvent, Some(FORM_CONTEXT), cx),
+            binding("escape", CancelEvent, Some(FORM_CONTEXT), cx),
+            // The text boxes' own Esc does nothing, and Ctrl+Enter in the note
+            // would add a line.
+            binding("secondary-enter", SaveEvent, Some(&input_in), cx),
+            binding("escape", CancelEvent, Some(&input_in), cx),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 }
 
 pub enum ApplicationViewEvent {

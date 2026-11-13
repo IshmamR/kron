@@ -9,6 +9,7 @@ use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
 use super::parts::notify;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
+use super::shortcuts::binding;
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
     Generations, Jobs, LineCitations, Lines, Sections, UnsupportedClaims,
@@ -36,7 +37,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, KeyBinding, MouseButton,
+    FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, MouseButton,
     MouseDownEvent, MouseMoveEvent, Pixels, Point, RenderImage, ScrollHandle, Stateful, StyledText,
     Subscription, Task, Window, actions, canvas, div, img, point, prelude::*, px, rgb,
 };
@@ -74,20 +75,25 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("down", SelectNextLine, Some(KEY_CONTEXT)),
-        KeyBinding::new("up", SelectPreviousLine, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", Back, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-1", ShowResumeTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", EditLine, Some(KEY_CONTEXT)),
-        // Esc in a text box does nothing of its own.
-        KeyBinding::new(
-            "escape",
-            CancelLineEdit,
-            Some(&format!("{LINE_EDITOR_CONTEXT} > Input")),
-        ),
-    ]);
+    cx.bind_keys(
+        [
+            binding("down", SelectNextLine, Some(KEY_CONTEXT), cx),
+            binding("up", SelectPreviousLine, Some(KEY_CONTEXT), cx),
+            binding("escape", Back, Some(KEY_CONTEXT), cx),
+            binding("secondary-1", ShowResumeTab, Some(KEY_CONTEXT), cx),
+            binding("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT), cx),
+            binding("enter", EditLine, Some(KEY_CONTEXT), cx),
+            // Esc in a text box does nothing of its own.
+            binding(
+                "escape",
+                CancelLineEdit,
+                Some(&format!("{LINE_EDITOR_CONTEXT} > Input")),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     application_view::init(cx);
 }
 

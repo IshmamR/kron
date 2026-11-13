@@ -10,8 +10,7 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyBinding, Keystroke, Pixels, ScrollStrategy, SharedString, Subscription, Window, actions,
-    div, prelude::*, px,
+    Pixels, ScrollStrategy, SharedString, Subscription, Window, actions, div, prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -21,6 +20,7 @@ use super::parts::{
     Source, caption, card, fact_kind_label, fact_status, heading, key_hint, notice, page_title,
     search_suffix, source_excerpt, sources, text_field,
 };
+use super::shortcuts::{binding, keystroke};
 use crate::database::schema::{
     Blocks, Documents, Entries, FactSources, FactVersions, Facts, Generations, Jobs, LineCitations,
     Lines, Sections,
@@ -64,36 +64,51 @@ pub struct KeepWording {
     pub index: usize,
 }
 
-/// Number keys pick a merge wording; past nine, click. Spelled out because
-/// gpui only reads keystrokes from `'static` strings.
-const WORDING_KEYS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+/// Number keys pick a merge wording; past nine, click.
+const WORDING_KEYS: usize = 9;
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys(
-        WORDING_KEYS.iter().enumerate().map(|(index, key)| {
-            KeyBinding::new(key, KeepWording { index }, Some(LIST_KEY_CONTEXT))
-        }),
-    );
+    let wording_keys: Vec<_> = (0..WORDING_KEYS)
+        .filter_map(|index| {
+            binding(
+                &(index + 1).to_string(),
+                KeepWording { index },
+                Some(LIST_KEY_CONTEXT),
+                cx,
+            )
+        })
+        .collect();
+    cx.bind_keys(wording_keys);
     let input_in = |context: &str| format!("{context} > Input");
     // These replace the list's and the text boxes' own keys, which run after
     // the kit's: Enter and Esc in the list only select, and Esc in a text box
     // does nothing.
-    cx.bind_keys([
-        KeyBinding::new("secondary-f", FocusSearch, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", ConfirmFact, Some(LIST_KEY_CONTEXT)),
-        KeyBinding::new("backspace", ToggleHidden, Some(LIST_KEY_CONTEXT)),
-        KeyBinding::new("delete", ToggleHidden, Some(LIST_KEY_CONTEXT)),
-        KeyBinding::new("escape", Dismiss, Some(LIST_KEY_CONTEXT)),
-        KeyBinding::new("down", FocusList, Some(&input_in(SEARCH_CONTEXT))),
-        KeyBinding::new("escape", ClearSearch, Some(&input_in(SEARCH_CONTEXT))),
-        KeyBinding::new("escape", CancelEdit, Some(&input_in(FACT_EDITOR_CONTEXT))),
-        KeyBinding::new("escape", Dismiss, Some(&input_in(NOTE_EDITOR_CONTEXT))),
-        KeyBinding::new(
-            "secondary-enter",
-            AddFacts,
-            Some(&input_in(NOTE_EDITOR_CONTEXT)),
-        ),
-    ]);
+    cx.bind_keys(
+        [
+            binding("secondary-f", FocusSearch, Some(KEY_CONTEXT), cx),
+            binding("enter", ConfirmFact, Some(LIST_KEY_CONTEXT), cx),
+            binding("backspace", ToggleHidden, Some(LIST_KEY_CONTEXT), cx),
+            binding("delete", ToggleHidden, Some(LIST_KEY_CONTEXT), cx),
+            binding("escape", Dismiss, Some(LIST_KEY_CONTEXT), cx),
+            binding("down", FocusList, Some(&input_in(SEARCH_CONTEXT)), cx),
+            binding("escape", ClearSearch, Some(&input_in(SEARCH_CONTEXT)), cx),
+            binding(
+                "escape",
+                CancelEdit,
+                Some(&input_in(FACT_EDITOR_CONTEXT)),
+                cx,
+            ),
+            binding("escape", Dismiss, Some(&input_in(NOTE_EDITOR_CONTEXT)), cx),
+            binding(
+                "secondary-enter",
+                AddFacts,
+                Some(&input_in(NOTE_EDITOR_CONTEXT)),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 }
 
 /// Everything the app knows about the user, to review, correct, hide, merge
@@ -1048,9 +1063,9 @@ impl FactsPage {
                                             }),
                                         ))
                                         .children(
-                                            WORDING_KEYS
-                                                .get(index)
-                                                .and_then(|key| Keystroke::parse(key).ok())
+                                            (index < WORDING_KEYS)
+                                                .then(|| keystroke(&(index + 1).to_string(), cx))
+                                                .flatten()
                                                 .map(Kbd::new),
                                         )
                                         .child(
