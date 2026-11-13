@@ -38,7 +38,9 @@ pub struct DevOverlay {
     reset: Option<Task<()>>,
     /// Timestamps of recent frames, newest last.
     frames: VecDeque<Instant>,
-    system: System,
+    /// `None` when sysinfo can't read this system; the overlay then shows no
+    /// hardware or process stats.
+    system: Option<System>,
     pid: Option<Pid>,
     stats: ProcessStats,
     hardware: Hardware,
@@ -49,18 +51,20 @@ pub struct DevOverlay {
 impl DevOverlay {
     pub fn new(database: Entity<Database>, cx: &mut Context<Self>) -> Self {
         let system =
-            System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));
-        let cpu = system
-            .cpus()
+            System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()))
+                .inspect_err(|error| eprintln!("couldn't read system info: {error}"))
+                .ok();
+        let cpus = system.as_ref().map(System::cpus).unwrap_or_default();
+        let cpu = cpus
             .first()
             .map(|cpu| cpu.brand().trim().to_string())
             .unwrap_or_else(|| "unknown".into());
-        let threads = system.cpus().len();
+        let threads = cpus.len();
         let cores = match System::physical_core_count() {
-            Some(physical) => format!("{physical} cores / {threads} threads"),
-            None => format!("{threads} threads"),
+            Ok(physical) => format!("{physical} cores / {threads} threads"),
+            Err(_) => format!("{threads} threads"),
         };
-        let os = System::long_os_version().unwrap_or_else(|| std::env::consts::OS.into());
+        let os = System::long_os_version().unwrap_or_else(|_| std::env::consts::OS.into());
 
         let mut this = Self {
             database,
@@ -109,13 +113,15 @@ impl DevOverlay {
     }
 
     fn sample(&mut self) {
-        let Some(pid) = self.pid else { return };
-        self.system.refresh_processes_specifics(
+        let (Some(system), Some(pid)) = (self.system.as_mut(), self.pid) else {
+            return;
+        };
+        system.refresh_processes_specifics(
             ProcessesToUpdate::Some(&[pid]),
             true,
             ProcessRefreshKind::nothing().with_cpu().with_memory(),
         );
-        if let Some(process) = self.system.process(pid) {
+        if let Some(process) = system.process(pid) {
             self.stats.cpu = process.cpu_usage();
             self.stats.memory = process.memory();
         }

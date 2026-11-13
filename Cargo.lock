@@ -2913,7 +2913,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
- "x11rb",
+ "x11rb 0.13.2",
  "xkbcommon",
  "zed-scap",
  "zed-xim",
@@ -3320,7 +3320,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
- "x11rb",
+ "x11rb 0.13.2",
  "xkbcommon",
  "zed-scap",
  "zed-xim",
@@ -4749,7 +4749,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stop-words",
- "sysinfo 0.39.6",
+ "sysinfo 0.40.3",
  "text2num",
  "tokio",
  "typst",
@@ -4758,7 +4758,7 @@ dependencies = [
  "typst-pdf",
  "typst-render",
  "uuid",
- "x11rb",
+ "x11rb 0.14.0",
 ]
 
 [[package]]
@@ -8266,9 +8266,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.39.6"
+version = "0.40.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+checksum = "a86bac2f7d06e6384984118ad727f5694110f0ec44d924d05c8fdec3d030bee6"
 dependencies = [
  "libc",
  "memchr",
@@ -11062,8 +11062,19 @@ dependencies = [
  "gethostname",
  "libc",
  "rustix",
- "x11rb-protocol",
+ "x11rb-protocol 0.13.2",
  "xcursor",
+]
+
+[[package]]
+name = "x11rb"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a8885a854a8bfdf87a301e53e41b17c5f8f33639903131338b997b1eb614f44"
+dependencies = [
+ "gethostname",
+ "rustix",
+ "x11rb-protocol 0.14.0",
 ]
 
 [[package]]
@@ -11071,6 +11082,12 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "x11rb-protocol"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xcb"
@@ -11435,7 +11452,7 @@ dependencies = [
  "ahash",
  "hashbrown 0.14.5",
  "log",
- "x11rb",
+ "x11rb 0.13.2",
  "xim-ctext",
  "xim-parser",
 ]
