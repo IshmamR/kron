@@ -622,8 +622,10 @@ fn text_string(bytes: &[u8]) -> String {
     match bytes.strip_prefix(&[0xFE, 0xFF]) {
         Some(utf16) => String::from_utf16_lossy(
             &utf16
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
                 .collect::<Vec<_>>(),
         ),
         None => bytes.iter().map(|&byte| char::from(byte)).collect(),

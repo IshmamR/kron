@@ -144,7 +144,7 @@ pub fn read(format: Format, bytes: Vec<u8>) -> Result<Reading, Error> {
 /// once saved it.
 fn decode(bytes: &[u8]) -> Result<String, Error> {
     let utf16 = |bytes: &[u8], unit: fn([u8; 2]) -> u16| {
-        let units = bytes.chunks_exact(2).map(|pair| unit([pair[0], pair[1]]));
+        let units = bytes.as_chunks::<2>().0.iter().map(|pair| unit(*pair));
         char::decode_utf16(units)
             .collect::<Result<String, _>>()
             .map_err(|_| Error::Encoding)
