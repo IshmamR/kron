@@ -13,11 +13,12 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    InteractiveText, IntoElement, KeyBinding, SharedString, StyledText, Subscription,
-    UnderlineStyle, Window, actions, div, prelude::*, px,
+    InteractiveText, IntoElement, SharedString, StyledText, Subscription, UnderlineStyle, Window,
+    actions, div, prelude::*, px,
 };
 
 use super::parts::{caption, text_field};
+use super::shortcuts::binding;
 use crate::model::redaction::{self, Found, Identifier, Redaction};
 
 const KEY_CONTEXT: &str = "RedactionCheck";
@@ -25,11 +26,11 @@ const KEY_CONTEXT: &str = "RedactionCheck";
 actions!(redaction_check, [Confirm]);
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "secondary-enter",
-        Confirm,
-        Some(KEY_CONTEXT),
-    )]);
+    cx.bind_keys(
+        [binding("secondary-enter", Confirm, Some(KEY_CONTEXT), cx)]
+            .into_iter()
+            .flatten(),
+    );
 }
 
 pub struct RedactionCheck {

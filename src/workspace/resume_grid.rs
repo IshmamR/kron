@@ -12,14 +12,15 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     Action, Anchor, AnyElement, App, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, IntoElement, KeyBinding, MouseButton, MouseDownEvent, ObjectFit,
-    Pixels, ScrollHandle, Subscription, Window, actions, canvas, div, img, prelude::*, px,
+    Focusable, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, ObjectFit, Pixels,
+    ScrollHandle, Subscription, Window, actions, canvas, div, img, prelude::*, px,
 };
 use rusqlite::Connection;
 
 use super::application_view;
 use super::parts::{key_hint, page_title, search_suffix, text_field};
 use super::previews::{self, Previews, Render as PageRender};
+use super::shortcuts::binding;
 use crate::database::schema::{Events, FactVersions, Facts, Generations, Jobs, UnsupportedClaims};
 use crate::database::{Changed, Database, Error};
 use crate::model::{Application, JobId, Nudge, ResumeId, Stage};
@@ -70,26 +71,35 @@ struct SortJobs {
 }
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("up", SelectUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", SelectDown, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", OpenSelected, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-f", FocusSearch, Some(KEY_CONTEXT)),
-        KeyBinding::new(
-            "escape",
-            ClearSearch,
-            Some(&format!("{SEARCH_CONTEXT} > Input")),
-        ),
-    ]);
-    cx.bind_keys((0..JobFilter::ALL.len()).map(|index| {
-        KeyBinding::new(
-            &format!("secondary-{}", index + 1),
-            ShowFilter { index },
-            Some(KEY_CONTEXT),
-        )
-    }));
+    cx.bind_keys(
+        [
+            binding("left", SelectLeft, Some(KEY_CONTEXT), cx),
+            binding("right", SelectRight, Some(KEY_CONTEXT), cx),
+            binding("up", SelectUp, Some(KEY_CONTEXT), cx),
+            binding("down", SelectDown, Some(KEY_CONTEXT), cx),
+            binding("enter", OpenSelected, Some(KEY_CONTEXT), cx),
+            binding("secondary-f", FocusSearch, Some(KEY_CONTEXT), cx),
+            binding(
+                "escape",
+                ClearSearch,
+                Some(&format!("{SEARCH_CONTEXT} > Input")),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    let filter_keys: Vec<_> = (0..JobFilter::ALL.len())
+        .filter_map(|index| {
+            binding(
+                &format!("secondary-{}", index + 1),
+                ShowFilter { index },
+                Some(KEY_CONTEXT),
+                cx,
+            )
+        })
+        .collect();
+    cx.bind_keys(filter_keys);
 }
 
 pub enum ResumeGridEvent {

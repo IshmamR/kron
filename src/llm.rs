@@ -192,7 +192,8 @@ pub enum Error {
     NoKey,
     Keyring(keyring::Error),
     Unsupported(String),
-    Provider(ProviderError),
+    /// Boxed: rig's error is several times the size of every other variant.
+    Provider(Box<ProviderError>),
     /// An OpenAI-compatible server, by name, didn't answer.
     Unreachable(String),
     TimedOut,
@@ -213,38 +214,45 @@ impl fmt::Display for Error {
                 )
             }
             Self::Unsupported(vendor) => write!(formatter, "{vendor} isn't supported yet."),
-            Self::Provider(ProviderError::InvalidAuthentication(_)) => {
-                write!(formatter, "The API key was refused. Check it in Settings.")
-            }
-            Self::Provider(ProviderError::ProviderResponse(response)) => {
-                match response.status.map(|status| status.as_u16()) {
-                    Some(402) => write!(formatter, "The account's balance has run out."),
-                    Some(429) => write!(formatter, "Too many requests. Try again in a minute."),
-                    Some(status) if status >= 500 => {
-                        write!(
-                            formatter,
-                            "The provider had a problem ({status}). Try again later."
-                        )
-                    }
-                    Some(status) => {
-                        write!(formatter, "The provider refused the request ({status}).")
-                    }
-                    None => write!(formatter, "The provider refused the request."),
-                }
-            }
-            Self::Provider(ProviderError::Http(_)) => {
-                write!(
-                    formatter,
-                    "Couldn't reach the provider. Check your connection."
-                )
-            }
-            Self::Provider(error) => write!(formatter, "The call failed: {:?}.", error.kind()),
+            Self::Provider(error) => describe_provider_error(error, formatter),
             Self::Unreachable(name) => {
                 write!(formatter, "Couldn't reach {name}. Check that it's running.")
             }
             Self::TimedOut => write!(formatter, "The model took too long to answer."),
             Self::Runtime(error) => write!(formatter, "The call couldn't run: {error}."),
         }
+    }
+}
+
+/// What a provider's error means for the user, by its kind.
+fn describe_provider_error(error: &ProviderError, formatter: &mut fmt::Formatter) -> fmt::Result {
+    match error {
+        ProviderError::InvalidAuthentication(_) => {
+            write!(formatter, "The API key was refused. Check it in Settings.")
+        }
+        ProviderError::ProviderResponse(response) => {
+            match response.status.map(|status| status.as_u16()) {
+                Some(402) => write!(formatter, "The account's balance has run out."),
+                Some(429) => write!(formatter, "Too many requests. Try again in a minute."),
+                Some(status) if status >= 500 => {
+                    write!(
+                        formatter,
+                        "The provider had a problem ({status}). Try again later."
+                    )
+                }
+                Some(status) => {
+                    write!(formatter, "The provider refused the request ({status}).")
+                }
+                None => write!(formatter, "The provider refused the request."),
+            }
+        }
+        ProviderError::Http(_) => {
+            write!(
+                formatter,
+                "Couldn't reach the provider. Check your connection."
+            )
+        }
+        error => write!(formatter, "The call failed: {:?}.", error.kind()),
     }
 }
 
@@ -556,7 +564,7 @@ pub fn served_models(
                 )
                 .await
                 .map_err(|_| Error::TimedOut)?
-                .map_err(Error::Provider)?;
+                .map_err(|error| Error::Provider(Box::new(error)))?;
                 let mut models: Vec<String> =
                     listed.data.into_iter().map(|model| model.id).collect();
                 models.sort();
@@ -593,7 +601,7 @@ pub async fn call(
             ProviderError::Http(_) if provider.is_compatible() => {
                 Error::Unreachable(provider.name.clone())
             }
-            error => Error::Provider(error),
+            error => Error::Provider(Box::new(error)),
         })?;
     let catalog_price = || {
         // A compatible server's models aren't the catalog's, whatever
@@ -603,7 +611,8 @@ pub async fn call(
         }
         Catalog::builtin()
             .resolve(&format!("{}/{}", provider.vendor, assigned.model))
-            .and_then(|spec| spec.pricing)
+            .ok()
+            .and_then(|resolved| resolved.spec.pricing)
             .and_then(|pricing| pricing.cost(&response.usage))
             .map(|cost| cost.total)
     };

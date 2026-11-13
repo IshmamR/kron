@@ -1,6 +1,6 @@
-// Reads a PDF's text with hayro, the PDF reader Typst already uses for PDF
-// images. hayro gives each glyph's text, position and size; this puts the
-// glyphs into words, lines and reading order. Columns, like a sidebar, are
+// Reads a PDF's text with hayro, the PDF reader Typst uses for PDF images.
+// hayro gives each glyph's text, position and size; this puts the glyphs
+// into words, lines and reading order. Columns, like a sidebar, are
 // found by XY-cut (Nagy and Seth, 1984): a region is split at its widest
 // empty band, down the page or across it, and each part is read in turn.
 // The gaps that separate words, runs and lines are pdfminer.six's (LAParams).
@@ -9,10 +9,11 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use hayro_interpret::font::Glyph as PdfGlyph;
+use hayro_interpret::font::GlyphRun;
 use hayro_interpret::hayro_cmap::BfString;
 use hayro_interpret::{
-    BlendMode, ClipPath, Context, Device, GlyphDrawMode, Image, InterpreterCache,
-    InterpreterSettings, Paint, PathDrawMode, RectExt, SoftMask, TransformExt, interpret_page,
+    BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps,
+    InterpreterCache, InterpreterSettings, RectExt, SoftMask, TransformExt, interpret_page,
 };
 use hayro_syntax::content::ops::TypedInstruction;
 use hayro_syntax::object::{Array, Dict, Rect as PdfRect, String as PdfString, dict_or_stream};
@@ -176,31 +177,31 @@ struct Drawn {
 }
 
 impl<'a> Device<'a> for Drawn {
-    fn set_soft_mask(&mut self, _: Option<SoftMask<'a>>) {}
-    fn set_blend_mode(&mut self, _: BlendMode) {}
-    fn draw_path(&mut self, _: &BezPath, _: Affine, _: &Paint<'a>, _: &PathDrawMode) {}
+    fn draw_path(&mut self, _: &BezPath, _: DrawProps<'a>, _: &DrawMode) {}
     fn push_clip_path(&mut self, _: &ClipPath) {}
     fn push_transparency_group(&mut self, _: f32, _: Option<SoftMask<'a>>, _: BlendMode) {}
-    fn draw_image(&mut self, _: Image<'a, '_>, _: Affine) {
+    fn draw_image(&mut self, _: Image<'a, '_>, _: ImageDrawProps<'a>) {
         self.picture = true;
     }
-    fn pop_clip_path(&mut self) {}
+    fn pop_clip(&mut self) {}
     fn pop_transparency_group(&mut self) {}
-    fn begin_marked_content(&mut self, _: &[u8], _: Option<i32>) {
+    fn begin_marked_content(&mut self, _: &[u8], _: Option<&Dict<'_>>) {
         self.spans.push(self.actual_texts.next().flatten());
     }
     fn end_marked_content(&mut self) {
         self.spans.pop();
     }
 
-    fn draw_glyph(
-        &mut self,
-        glyph: &PdfGlyph<'a>,
-        transform: Affine,
-        glyph_transform: Affine,
-        _: &Paint<'a>,
-        _: &GlyphDrawMode,
-    ) {
+    fn draw_glyph_run(&mut self, run: &GlyphRun<'_, 'a>, props: DrawProps<'a>, _: &DrawMode) {
+        for glyph in run.glyphs() {
+            self.draw_glyph(glyph, props.transform * glyph.transform());
+        }
+    }
+}
+
+impl Drawn {
+    /// Adds a glyph drawn with `transform`, from its glyph space to the page.
+    fn draw_glyph(&mut self, glyph: &PdfGlyph<'_>, transform: Affine) {
         let text = match glyph.as_unicode() {
             Some(BfString::Char(character)) => Some(character.to_string()),
             Some(BfString::String(text)) => Some(text),
@@ -222,7 +223,6 @@ impl<'a> Device<'a> for Drawn {
         };
         let text = unligated(text);
         let drawn_font = matches!(glyph, PdfGlyph::Type3(_));
-        let transform = transform * glyph_transform;
         let origin = transform * Point::ZERO;
         if text.chars().all(char::is_whitespace) {
             // Where a Type 3 font's space is drawn, the glyph before it ends.
@@ -262,9 +262,7 @@ impl<'a> Device<'a> for Drawn {
             unmeasured: drawn_font,
         });
     }
-}
 
-impl Drawn {
     /// Ends each Type 3 glyph where the next glyph or space on its line
     /// starts, as text is set, so a word's letters touch and the gap a
     /// space leaves stays; or else a letter's width on from its start.
@@ -624,8 +622,10 @@ fn text_string(bytes: &[u8]) -> String {
     match bytes.strip_prefix(&[0xFE, 0xFF]) {
         Some(utf16) => String::from_utf16_lossy(
             &utf16
-                .chunks_exact(2)
-                .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_be_bytes(*pair))
                 .collect::<Vec<_>>(),
         ),
         None => bytes.iter().map(|&byte| char::from(byte)).collect(),

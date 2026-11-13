@@ -10,10 +10,11 @@ dirs = "7.0.0"
 futures = "0.3.34"
 # Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
 # re-exports gpui, gpui-base, gpui-component and the Lucide icons.
-gpui-kit = "0.7.1"
-# Typst's PDF reader, already built for its PDF images; reads imported PDFs.
-hayro-interpret = "0.7.0"
-hayro-syntax = "0.7.2"
+gpui-kit = "0.9.1"
+# Typst's PDF reader, the one it uses for PDF images; reads imported PDFs.
+# Newer than Typst 0.15's copy (0.7), so both are built until Typst catches up.
+hayro-interpret = "0.9.0"
+hayro-syntax = "0.9.0"
 # GPUI's own, for building its images from rendered pages.
 image = { version = "0.25.10", default-features = false }
 # API keys, in the OS keyring.
@@ -26,15 +27,15 @@ markdown = "1.0.0"
 # Already built for gpui and Typst; finds contact details to redact.
 regex = "1.13.1"
 # Calls to AI models, with usage and the catalog's prices (ARCHITECTURE.md).
-rig-core = { version = "0.44.0", features = ["reqwest"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
+rig-core = { version = "0.46.0", features = ["reqwest"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "uuid"] }
 rust-stemmers = "1.2.0"
 # Extraction's answers, read from the model's JSON.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # NLTK's English list: the Snowball project's, matching rust-stemmers.
 stop-words = { version = "0.10.1", default-features = false, features = ["nltk"] }
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.3", default-features = false, features = ["system"] }
 text2num = { version = "2.8.0", default-features = false, features = ["std", "en"] }
 # rig's HTTP client needs its runtime; GPUI doesn't run one.
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "time"] }
@@ -47,10 +48,10 @@ uuid = { version = "1.28.0", features = ["v7"] }
 
 [build-dependencies]
 # Runs the migrations to generate the schema's tables and columns.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = "0.13"
+x11rb = "0.14"
 
 # Debug builds leave dependencies unoptimized, and the UI framework and Typst
 # are then far slower than in release. Optimize every dependency while our
@@ -60,4 +61,4 @@ opt-level = 2
 
 [dev-dependencies]
 # Headless windows for UI tests: simulated keys, clicks and actions.
-gpui-kit = { version = "0.7.1", features = ["test-support"] }
+gpui-kit = { version = "0.9.1", features = ["test-support"] }

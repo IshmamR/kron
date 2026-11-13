@@ -32,7 +32,7 @@ use gpui_kit::component::{
     ActiveTheme, Collapsible, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    Action, App, Bounds, Context, Entity, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
+    Action, App, Bounds, Context, Entity, Focusable, IntoElement, Pixels, SharedString,
     Subscription, Task, Window, WindowBounds, actions, div, prelude::*, px,
 };
 
@@ -52,6 +52,7 @@ use onboarding::{Onboarding, OnboardingEvent};
 use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
 use settings_page::{SettingsPage, SettingsSection};
+use shortcuts::binding;
 
 const SIDEBAR_WIDTH: Pixels = px(204.);
 /// How long the window has to stay put before where it is gets saved, so a
@@ -76,14 +77,18 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("secondary-b", ToggleSidebar, None),
-        KeyBinding::new("secondary-/", ShowShortcuts, None),
-        // A text field's own undo comes first: its key context is deeper.
-        KeyBinding::new("secondary-z", Undo, None),
-        KeyBinding::new("secondary-y", Redo, None),
-        KeyBinding::new("secondary-,", ShowSettings, None),
-    ]);
+    cx.bind_keys(
+        [
+            binding("secondary-b", ToggleSidebar, None, cx),
+            binding("secondary-/", ShowShortcuts, None, cx),
+            // A text field's own undo comes first: its key context is deeper.
+            binding("secondary-z", Undo, None, cx),
+            binding("secondary-y", Redo, None, cx),
+            binding("secondary-,", ShowSettings, None, cx),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     settings_page::init(cx);
     ai_settings::init(cx);
     facts_page::init(cx);

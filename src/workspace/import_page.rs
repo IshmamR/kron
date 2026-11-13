@@ -23,13 +23,14 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, FontWeight,
-    IntoElement, KeyBinding, PathPromptOptions, SharedString, Subscription, Task, Window, actions,
-    div, prelude::*, px,
+    IntoElement, PathPromptOptions, SharedString, Subscription, Task, Window, actions, div,
+    prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 
 use super::parts::{caption, notice, notify, page_title, text_field};
 use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
+use super::shortcuts::binding;
 use super::{SetUpAi, ShowFacts};
 use crate::database::{Database, Error};
 use crate::import::{self, Format, Warning, name};
@@ -48,17 +49,22 @@ actions!(import_page, [Paste, Write, Cancel, Save]);
 
 pub fn init(cx: &mut App) {
     // A text field's own paste comes first: its key context is deeper.
-    cx.bind_keys([
-        KeyBinding::new("secondary-v", Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new("secondary-n", Write, Some(KEY_CONTEXT)),
-        KeyBinding::new("escape", Cancel, Some(KEY_CONTEXT)),
-        // In the text field, where its own Ctrl+Enter would add a line.
-        KeyBinding::new(
-            "secondary-enter",
-            Save,
-            Some(&format!("{KEY_CONTEXT} > Input")),
-        ),
-    ]);
+    cx.bind_keys(
+        [
+            binding("secondary-v", Paste, Some(KEY_CONTEXT), cx),
+            binding("secondary-n", Write, Some(KEY_CONTEXT), cx),
+            binding("escape", Cancel, Some(KEY_CONTEXT), cx),
+            // In the text field, where its own Ctrl+Enter would add a line.
+            binding(
+                "secondary-enter",
+                Save,
+                Some(&format!("{KEY_CONTEXT} > Input")),
+                cx,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
 }
 
 pub struct ImportPage {

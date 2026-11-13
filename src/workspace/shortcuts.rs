@@ -2,9 +2,11 @@ use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, WindowExt, h_flex, v_flex};
+use std::rc::Rc;
+
 use gpui_kit::{
-    Action, AnyElement, App, AsKeystroke, FontWeight, IntoElement, Keystroke, Window, div,
-    prelude::*, px,
+    Action, AnyElement, App, AsKeystroke, FontWeight, IntoElement, KeyBinding,
+    KeyBindingContextPredicate, Keystroke, Window, div, prelude::*, px,
 };
 
 use super::ToggleSidebar;
@@ -32,6 +34,34 @@ const SECONDARY_CLICK: &str = if cfg!(target_os = "macos") {
 } else {
     "Ctrl+click"
 };
+
+/// A key binding that may use `secondary-` (⌘ on macOS, Ctrl elsewhere):
+/// gpui resolves it only from the host's OS, which `KeyBinding::new` doesn't
+/// know. Logs and skips a binding that doesn't parse.
+pub fn binding<A: Action>(
+    keystrokes: &str,
+    action: A,
+    context: Option<&str>,
+    cx: &App,
+) -> Option<KeyBinding> {
+    let predicate = match context.map(KeyBindingContextPredicate::parse).transpose() {
+        Ok(predicate) => predicate.map(Rc::new),
+        Err(error) => {
+            eprintln!("key binding {keystrokes:?}: bad context {context:?}: {error}");
+            return None;
+        }
+    };
+    KeyBinding::load(keystrokes, Box::new(action), predicate, false, None, cx)
+        .inspect_err(|error| eprintln!("key binding {keystrokes:?}: {error}"))
+        .ok()
+}
+
+/// A keystroke as bindings spell it, `secondary-` included, for a key cap.
+pub fn keystroke(source: &str, cx: &App) -> Option<Keystroke> {
+    Keystroke::parse_with_os(source, cx.platform_info().os)
+        .inspect_err(|error| eprintln!("keystroke {source:?}: {error}"))
+        .ok()
+}
 
 /// Opens the list of keyboard shortcuts. Keys are read from the keymap, so
 /// the list shows whatever is actually bound.
@@ -307,7 +337,7 @@ impl Keys {
                     None => unbound(cx),
                 };
             }
-            Keys::Keystroke(keystroke) => Keystroke::parse(keystroke).ok().into_iter().collect(),
+            Keys::Keystroke(source) => keystroke(source, cx).into_iter().collect(),
             Keys::Gesture(gesture) => {
                 return div()
                     .text_xs()

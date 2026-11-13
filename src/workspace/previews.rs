@@ -229,7 +229,7 @@ impl RenderedPages {
             .filter_map(|page| {
                 let mut bgra = page.rgba;
                 // GPUI draws BGRA.
-                for pixel in bgra.chunks_exact_mut(4) {
+                for pixel in bgra.as_chunks_mut::<4>().0 {
                     pixel.swap(0, 2);
                 }
                 let buffer = RgbaImage::from_raw(page.width, page.height, bgra)?;
