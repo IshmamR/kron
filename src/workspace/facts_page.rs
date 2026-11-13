@@ -64,17 +64,16 @@ pub struct KeepWording {
     pub index: usize,
 }
 
-/// Number keys pick a merge wording; past nine, click.
-const WORDING_KEYS: usize = 9;
+/// Number keys pick a merge wording; past nine, click. Spelled out because
+/// gpui only reads keystrokes from `'static` strings.
+const WORDING_KEYS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 pub fn init(cx: &mut App) {
-    cx.bind_keys((0..WORDING_KEYS).map(|index| {
-        KeyBinding::new(
-            &(index + 1).to_string(),
-            KeepWording { index },
-            Some(LIST_KEY_CONTEXT),
-        )
-    }));
+    cx.bind_keys(
+        WORDING_KEYS.iter().enumerate().map(|(index, key)| {
+            KeyBinding::new(key, KeepWording { index }, Some(LIST_KEY_CONTEXT))
+        }),
+    );
     let input_in = |context: &str| format!("{context} > Input");
     // These replace the list's and the text boxes' own keys, which run after
     // the kit's: Enter and Esc in the list only select, and Esc in a text box
@@ -1049,11 +1048,9 @@ impl FactsPage {
                                             }),
                                         ))
                                         .children(
-                                            (index < WORDING_KEYS)
-                                                .then(|| {
-                                                    Keystroke::parse(&(index + 1).to_string()).ok()
-                                                })
-                                                .flatten()
+                                            WORDING_KEYS
+                                                .get(index)
+                                                .and_then(|key| Keystroke::parse(key).ok())
                                                 .map(Kbd::new),
                                         )
                                         .child(

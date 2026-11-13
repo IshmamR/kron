@@ -51,7 +51,7 @@ pub fn caption(text: impl Into<SharedString>, cx: &App) -> impl IntoElement {
 /// Keys drawn as key caps, then what they do: "[↑] [↓] move between lines".
 /// `keys` are keystrokes as bindings spell them ("enter", "shift-enter");
 /// an arrow is written as itself, which the cap shows as is.
-pub fn key_hint(keys: &[&str], action: &str, cx: &App) -> Div {
+pub fn key_hint(keys: &[&'static str], action: &str, cx: &App) -> Div {
     h_flex()
         .gap_1()
         .text_xs()

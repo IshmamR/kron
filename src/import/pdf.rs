@@ -9,8 +9,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use hayro_interpret::font::Glyph as PdfGlyph;
-use hayro_interpret::hayro_cmap::BfString;
 use hayro_interpret::font::GlyphRun;
+use hayro_interpret::hayro_cmap::BfString;
 use hayro_interpret::{
     BlendMode, ClipPath, Context, Device, DrawMode, DrawProps, Image, ImageDrawProps,
     InterpreterCache, InterpreterSettings, RectExt, SoftMask, TransformExt, interpret_page,

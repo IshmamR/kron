@@ -26,6 +26,15 @@ use crate::model::{Application, JobId, Nudge, ResumeId, Stage};
 
 const KEY_CONTEXT: &str = "ResumeGrid";
 const SEARCH_CONTEXT: &str = "JobSearch";
+/// The keys for `JobFilter::ALL`, in order. Spelled out because gpui only
+/// reads keystrokes from `'static` strings.
+const FILTER_KEYS: [&str; JobFilter::ALL.len()] = [
+    "secondary-1",
+    "secondary-2",
+    "secondary-3",
+    "secondary-4",
+    "secondary-5",
+];
 const CARD_WIDTH: Pixels = px(248.);
 const THUMBNAIL_WIDTH: Pixels = px(218.);
 /// US Letter proportions (8.5 × 11), so the page fills the box.
@@ -83,13 +92,12 @@ pub fn init(cx: &mut App) {
             Some(&format!("{SEARCH_CONTEXT} > Input")),
         ),
     ]);
-    cx.bind_keys((0..JobFilter::ALL.len()).map(|index| {
-        KeyBinding::new(
-            &format!("secondary-{}", index + 1),
-            ShowFilter { index },
-            Some(KEY_CONTEXT),
-        )
-    }));
+    cx.bind_keys(
+        FILTER_KEYS
+            .iter()
+            .enumerate()
+            .map(|(index, key)| KeyBinding::new(key, ShowFilter { index }, Some(KEY_CONTEXT))),
+    );
 }
 
 pub enum ResumeGridEvent {
