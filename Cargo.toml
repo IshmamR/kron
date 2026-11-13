@@ -11,9 +11,10 @@ futures = "0.3.34"
 # Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
 # re-exports gpui, gpui-base, gpui-component and the Lucide icons.
 gpui-kit = "0.7.1"
-# Typst's PDF reader, already built for its PDF images; reads imported PDFs.
-hayro-interpret = "0.7.0"
-hayro-syntax = "0.7.2"
+# Typst's PDF reader, the one it uses for PDF images; reads imported PDFs.
+# Newer than Typst 0.15's copy (0.7), so both are built until Typst catches up.
+hayro-interpret = "0.9.0"
+hayro-syntax = "0.9.0"
 # GPUI's own, for building its images from rendered pages.
 image = { version = "0.25.10", default-features = false }
 # API keys, in the OS keyring.
