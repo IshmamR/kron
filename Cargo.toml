@@ -27,7 +27,7 @@ markdown = "1.0.0"
 regex = "1.13.1"
 # Calls to AI models, with usage and the catalog's prices (ARCHITECTURE.md).
 rig-core = { version = "0.44.0", features = ["reqwest"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "uuid"] }
 rust-stemmers = "1.2.0"
 # Extraction's answers, read from the model's JSON.
 serde = { version = "1.0.229", features = ["derive"] }
@@ -47,7 +47,7 @@ uuid = { version = "1.28.0", features = ["v7"] }
 
 [build-dependencies]
 # Runs the migrations to generate the schema's tables and columns.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.14"
