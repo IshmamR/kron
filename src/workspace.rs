@@ -295,6 +295,12 @@ impl Workspace {
                             this.onboarding = None;
                             this.open_resumes(window, cx);
                         }
+                        OnboardingEvent::FirstJob(job) => {
+                            this.onboarding = None;
+                            this.open_job(*job, window, cx);
+                            this.job_view
+                                .update(cx, |job_view, cx| job_view.write_first_resume(window, cx));
+                        }
                     },
                 ));
                 Some(onboarding)

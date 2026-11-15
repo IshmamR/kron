@@ -1,5 +1,6 @@
 // What a new user sees first: a welcome around the import page, with an
-// example job to open, then the name their CV seemed to give, to confirm. Shown while the user has nothing
+// example job to open, then the name their CV seemed to give, to confirm,
+// then a job they're interested in, to write their first résumé for. Shown while the user has nothing
 // yet: no documents, jobs or name. Data arriving another way, like the
 // sample seeded in debug builds or a sync, ends it.
 
@@ -16,10 +17,12 @@ use rusqlite::Connection;
 
 use super::example::{Example, ExampleEvent};
 use super::import_page::{ImportPage, ImportPageEvent, PAGE_MAX_WIDTH};
+use super::job_form::{JobForm, JobFormEvent};
 use super::parts::{caption, notice, notify, text_field};
 use crate::database::{self, Changed, Database};
-use crate::model::DocumentId;
+use crate::llm::{self, Purpose};
 use crate::model::commands;
+use crate::model::{DocumentId, JobId};
 
 /// Says what Kron does that a chat app doesn't.
 const WELCOME: &str = "A chatbot can promise not to make things up. Kron checks every line of \
@@ -40,6 +43,8 @@ pub struct Onboarding {
 
 pub enum OnboardingEvent {
     Done,
+    /// Done, with a job to write the first résumé for.
+    FirstJob(JobId),
 }
 
 impl EventEmitter<OnboardingEvent> for Onboarding {}
@@ -50,6 +55,7 @@ impl Render for Onboarding {
             Step::Import => self.render_import(cx).into_any_element(),
             Step::Example { example, .. } => example.clone().into_any_element(),
             Step::Name => self.render_name(cx).into_any_element(),
+            Step::FirstJob { form, .. } => self.render_first_job(form, cx).into_any_element(),
         }
     }
 }
@@ -85,7 +91,10 @@ impl Onboarding {
                     }
                 },
             ),
+            // Facts found, or not, while the first job is filled in.
+            cx.observe(&import_page, |this, _, cx| this.refresh_waiting(cx)),
             cx.subscribe(&database, |this, database, _: &Changed, cx| {
+                this.refresh_waiting(cx);
                 // While its own import saves, the import page isn't choosing;
                 // once saved, the name is asked.
                 if !matches!(this.step, Step::Import) || !this.import_page.read(cx).is_choosing() {
@@ -151,6 +160,86 @@ impl Onboarding {
         }
     }
 
+    /// Asks for a job to write the first résumé for, once the CV imported
+    /// has been sent for its facts and an AI can write; else it's done.
+    fn ask_first_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.can_write_first_resume(cx) {
+            cx.emit(OnboardingEvent::Done);
+            return;
+        }
+        let form = cx.new(|cx| {
+            JobForm::new(self.database.clone(), window, cx).labels(
+                "Paste its posting, and Kron writes your first résumé for it from the facts \
+                     in your CV.",
+                "Write my résumé",
+                "Skip for now",
+            )
+        });
+        let subscription = cx.subscribe(&form, |_, _, event, cx| match event {
+            JobFormEvent::Added(job) => cx.emit(OnboardingEvent::FirstJob(*job)),
+            JobFormEvent::Cancelled => cx.emit(OnboardingEvent::Done),
+        });
+        form.update(cx, |form, cx| form.focus(window, cx));
+        self.step = Step::FirstJob {
+            form,
+            _subscription: subscription,
+        };
+        self.refresh_waiting(cx);
+        cx.notify();
+    }
+
+    /// Whether the document imported is having its facts found, or has
+    /// them, and an AI is set up to write.
+    fn can_write_first_resume(&self, cx: &Context<Self>) -> bool {
+        let Some(found) = &self.found else {
+            return false;
+        };
+        let database = self.database.read(cx);
+        let writes = llm::assigned(database.device_connection(), Purpose::GenerateResume)
+            .unwrap_or_else(|error| {
+                eprintln!("onboarding: couldn't read the AI provider: {error}");
+                None
+            })
+            .is_some();
+        writes && (self.import_page.read(cx).is_finding(found.document) || self.has_facts(cx))
+    }
+
+    /// Whether facts of the user's work were found: their name and contacts
+    /// don't make a résumé.
+    fn has_facts(&self, cx: &Context<Self>) -> bool {
+        let found = self.database.read(cx).connection().query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM facts
+                 WHERE deleted_at IS NULL AND merged_into IS NULL AND hidden = 0
+                     AND kind NOT IN ('name', 'contact')
+             )",
+            [],
+            |row| row.get(0),
+        );
+        found.unwrap_or_else(|error| {
+            eprintln!("onboarding: couldn't read the facts: {error}");
+            false
+        })
+    }
+
+    /// Holds the first job back while the CV's facts are being found, and
+    /// says so when none were.
+    fn refresh_waiting(&mut self, cx: &mut Context<Self>) {
+        let (Step::FirstJob { form, .. }, Some(found)) = (&self.step, &self.found) else {
+            return;
+        };
+        let form = form.clone();
+        let waiting: Option<SharedString> = if self.import_page.read(cx).is_finding(found.document)
+        {
+            Some("Finding the facts in your CV. Fill this in meanwhile.".into())
+        } else if self.has_facts(cx) {
+            None
+        } else {
+            Some("No facts were found in your CV, so there's nothing to write from yet.".into())
+        };
+        form.update(cx, |form, cx| form.set_waiting(waiting, cx));
+    }
+
     fn ask_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.step = Step::Name;
         let guess = self
@@ -165,7 +254,7 @@ impl Onboarding {
         cx.notify();
     }
 
-    fn confirm(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.name.read(cx).value().trim().to_owned();
         if name.is_empty() {
             return;
@@ -175,10 +264,10 @@ impl Onboarding {
             .database
             .read(cx)
             .write(cx, move |write| commands::add_name(write, &name, document));
-        self.saving = cx.spawn(async move |this, cx| {
+        self.saving = cx.spawn_in(window, async move |this, cx| {
             let saved = saved.await;
-            let updated = this.update(cx, |this, cx| match saved {
-                Ok(_) => cx.emit(OnboardingEvent::Done),
+            let updated = this.update_in(cx, |this, window, cx| match saved {
+                Ok(_) => this.ask_first_job(window, cx),
                 Err(error) => {
                     eprintln!("onboarding: couldn't save the name: {error}");
                     this.problem = Some("Couldn't save your name. Try again.".into());
@@ -242,6 +331,35 @@ impl Onboarding {
             .child(div().flex_1().min_h_0().child(self.import_page.clone()))
     }
 
+    fn render_first_job(&self, form: &Entity<JobForm>, cx: &Context<Self>) -> impl IntoElement {
+        h_flex()
+            .id("onboarding-first-job")
+            .size_full()
+            .p_6()
+            .overflow_y_scrollbar()
+            .items_start()
+            .justify_center()
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(640.))
+                    .p_6()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .shadow_sm()
+                    .gap_4()
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Now, a job you're interested in"),
+                    )
+                    .child(form.clone()),
+            )
+    }
+
     fn render_name(&self, cx: &Context<Self>) -> impl IntoElement {
         let found = self.found.as_ref();
         let guessed = found.is_some_and(|found| found.name.is_some());
@@ -292,9 +410,9 @@ impl Onboarding {
                                     .label("Skip")
                                     .ghost()
                                     .small()
-                                    .on_click(
-                                        cx.listener(|_, _, _, cx| cx.emit(OnboardingEvent::Done)),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.ask_first_job(window, cx)
+                                    })),
                             )
                             .child(
                                 Button::new("confirm-name")
@@ -318,6 +436,10 @@ enum Step {
         _subscription: Subscription,
     },
     Name,
+    FirstJob {
+        form: Entity<JobForm>,
+        _subscription: Subscription,
+    },
 }
 
 struct Found {
@@ -372,6 +494,8 @@ mod tests {
         database: Entity<Database>,
         cx: &'a mut VisualTestContext,
         done: Rc<Cell<bool>>,
+        /// The job it ended with, to write the first résumé for.
+        first_job: Rc<Cell<Option<JobId>>>,
         _done: Subscription,
         _directory: TemporaryDirectory,
     }
@@ -383,15 +507,23 @@ mod tests {
             Onboarding::new(database.clone(), import_page, window, cx)
         });
         let done = Rc::new(Cell::new(false));
+        let first_job = Rc::new(Cell::new(None));
         let subscription = cx.update(|_, cx| {
             let done = done.clone();
-            cx.subscribe(&onboarding, move |_, _: &OnboardingEvent, _| done.set(true))
+            let first_job = first_job.clone();
+            cx.subscribe(&onboarding, move |_, event: &OnboardingEvent, _| {
+                done.set(true);
+                if let OnboardingEvent::FirstJob(job) = event {
+                    first_job.set(Some(*job));
+                }
+            })
         });
         Open {
             onboarding,
             database,
             cx,
             done,
+            first_job,
             _done: subscription,
             _directory: directory,
         }
@@ -478,6 +610,63 @@ mod tests {
         testing::settle(open.cx, &open.database);
         assert!(open.done.get());
         assert_eq!(open.names(), [("Alex Rahman".to_owned(), Some(0))]);
+    }
+
+    #[test]
+    fn with_facts_and_an_ai_it_asks_for_a_job_to_write_the_first_resume_for() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(LATEX);
+        assert!(open.asking_name().is_some());
+        // No key: nothing here calls the model.
+        testing::run(open.cx, &open.database, |write| {
+            llm::add_provider(write, "OpenAI", "openai", None, "gpt-5.4-mini").map(drop)
+        });
+        // As if facts were found in it.
+        testing::run(open.cx, &open.database, |write| {
+            commands::add_note(write, "Moved twelve services to Rust.").map(drop)
+        });
+        open.onboarding
+            .update_in(open.cx, |onboarding, window, cx| {
+                onboarding.confirm(window, cx)
+            });
+        testing::settle(open.cx, &open.database);
+        assert!(!open.done.get(), "a job is asked for first");
+        let form = open
+            .onboarding
+            .read_with(open.cx, |onboarding, _| match &onboarding.step {
+                Step::FirstJob { form, .. } => Some(form.clone()),
+                _ => None,
+            });
+        let Some(form) = form else {
+            panic!("no job is asked for");
+        };
+        form.update_in(open.cx, |form, window, cx| {
+            form.fill(
+                "Rust Engineer",
+                "Cinder Labs",
+                "Own our Rust services.",
+                window,
+                cx,
+            );
+            form.add(cx);
+        });
+        testing::settle(open.cx, &open.database);
+        assert!(open.first_job.get().is_some());
+    }
+
+    #[test]
+    fn without_an_ai_it_ends_after_the_name() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.import(LATEX);
+        open.onboarding
+            .update_in(open.cx, |onboarding, window, cx| {
+                onboarding.confirm(window, cx)
+            });
+        testing::settle(open.cx, &open.database);
+        assert!(open.done.get());
+        assert_eq!(open.first_job.get(), None);
     }
 
     #[test]

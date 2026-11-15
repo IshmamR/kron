@@ -146,6 +146,9 @@ pub struct JobView {
     /// Writing a résumé with the model, which runs on while the user looks
     /// elsewhere.
     generating: bool,
+    /// The user's first résumé: says how to read it, until a line is
+    /// selected or it's closed.
+    first_resume_hint: bool,
     generation: Task<()>,
     /// Saving the résumé shown as a PDF, from asking where to writing it.
     export: Task<()>,
@@ -159,6 +162,9 @@ impl EventEmitter<JobViewEvent> for JobView {}
 impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read(cx);
+        if self.selected.is_some() {
+            self.first_resume_hint = false;
+        }
         self.sync_line_editor(window, cx);
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
         let shown = self.shown_id();
@@ -301,6 +307,7 @@ impl JobView {
             page_bounds: Rc::default(),
             scroll_pending: false,
             generating: false,
+            first_resume_hint: false,
             generation: Task::ready(()),
             export: Task::ready(()),
             _instructions_form: None,
@@ -316,8 +323,16 @@ impl JobView {
         &self.database
     }
 
+    /// Writes the job's résumé, the user's first, without asking for
+    /// instructions, and says how to read it once it's there.
+    pub fn write_first_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.first_resume_hint = true;
+        self.generate(None, window, cx);
+    }
+
     pub fn set_job(&mut self, job: JobId, cx: &mut Context<Self>) {
         if self.job != Some(job) {
+            self.first_resume_hint = false;
             self.job = Some(job);
             self.tab = Tab::Resume;
             self.showing_sent = None;
@@ -821,6 +836,40 @@ impl JobView {
         )
     }
 
+    /// How to read a first résumé: where its lines come from, and why some
+    /// were left out.
+    fn first_resume_notice(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .flex_none()
+            .gap_3()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.primary.opacity(0.06))
+            .text_sm()
+            .child(
+                Icon::new(IconName::Info)
+                    .small()
+                    .text_color(theme.muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().child(
+                "Your first résumé. Click any line to see the facts it came from. Left out \
+                 lists what your facts don't back, so it isn't on the page.",
+            ))
+            .child(
+                Button::new("close-first-resume-notice")
+                    .icon(IconName::Close)
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.first_resume_hint = false;
+                        cx.notify();
+                    })),
+            )
+    }
+
     /// Asks for anything to steer the résumé, starting from what the last was
     /// asked, then writes it.
     fn ask_to_generate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1063,6 +1112,9 @@ impl JobView {
                                 shown.and_then(|resume| self.outdated_notice(resume, cx)),
                                 |this, notice| this.child(notice),
                             )
+                            .when(self.first_resume_hint && shown.is_some(), |this| {
+                                this.child(self.first_resume_notice(cx))
+                            })
                         })
                         .child(self.render_resume(shown.map(Rc::as_ref), render, cx)),
                 ),
@@ -2151,6 +2203,26 @@ mod tests {
         assert_eq!(*view.closed.borrow(), 0);
         view.keys("escape");
         assert_eq!(*view.closed.borrow(), 1);
+    }
+
+    #[test]
+    fn the_first_resume_says_how_to_read_it_until_a_line_is_selected() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        // As `write_first_resume` leaves it, once the résumé is written.
+        view.update(|view, cx| {
+            view.first_resume_hint = true;
+            cx.notify();
+        });
+        view.cx.run_until_parked();
+        assert!(view.read(|view| view.first_resume_hint));
+        let line = view.shown().lines.first().map(|line| line.id);
+        let Some(line) = line else {
+            panic!("the résumé has no lines");
+        };
+        view.update(|view, cx| view.select_line(line, cx));
+        view.cx.run_until_parked();
+        assert!(!view.read(|view| view.first_resume_hint));
     }
 
     #[test]
