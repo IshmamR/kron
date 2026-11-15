@@ -1,4 +1,5 @@
 mod ai_settings;
+mod ai_setup;
 mod application_view;
 mod example;
 mod fact_list;

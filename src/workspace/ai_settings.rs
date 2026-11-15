@@ -949,7 +949,7 @@ fn models(
 /// Saves `key` for the provider. If the keyring refuses it, a provider
 /// just `added` is taken back out, so none is left without the key it was
 /// added with.
-async fn save_key(
+pub(super) async fn save_key(
     provider: Uuid,
     key: String,
     added: bool,

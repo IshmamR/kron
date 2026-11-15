@@ -403,8 +403,11 @@ mod tests {
                 .read_with(self.cx, |onboarding, _| onboarding.import_page.clone())
         }
 
-        /// Confirms what's hidden of the text saved.
+        /// Goes on without AI, as these databases have none set up, and
+        /// confirms what's hidden of the text saved.
         fn confirm_check(&mut self) {
+            self.cx.simulate_keystrokes("escape");
+            self.cx.run_until_parked();
             self.cx.simulate_keystrokes("ctrl-enter");
             self.cx.run_until_parked();
         }

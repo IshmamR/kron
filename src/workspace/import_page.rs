@@ -1,8 +1,8 @@
 // Adding a CV: a PDF, Markdown or text file is dropped or chosen, read on
 // the device, and its text shown to check and correct before it's saved; or
 // text is pasted or written straight in. What's saved is the text as
-// corrected, since facts are found in it. Once saved, it's shown as an AI
-// model would be sent it, with the user's details hidden; confirmed, it's
+// corrected, since facts are found in it. Once saved, an AI provider is
+// asked for if none is set up; then it's shown as an AI model would be sent it, with the user's details hidden; confirmed, it's
 // sent, and the facts found are saved while the page goes on. Files added
 // together are taken one at a time, each asked about first in case it was
 // added by mistake, as is a file imported before.
@@ -28,6 +28,7 @@ use gpui_kit::{
 };
 use rusqlite::{Connection, OptionalExtension};
 
+use super::ai_setup::{AiSetup, AiSetupEvent};
 use super::parts::{caption, notice, notify, page_title, text_field};
 use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
 use super::{SetUpAi, ShowFacts};
@@ -92,6 +93,7 @@ impl Render for ImportPage {
                 .into_any_element(),
             Step::Ask(file) => self.render_ask(file, cx).into_any_element(),
             Step::Confirm(read) => self.render_confirm(read, cx).into_any_element(),
+            Step::SetUpAi { setup, .. } => setup.clone().into_any_element(),
             Step::Check { check, .. } => check.clone().into_any_element(),
         };
         div()
@@ -102,6 +104,8 @@ impl Render for ImportPage {
             .on_action(cx.listener(|this, _: &Save, window, cx| this.save(window, cx)))
             .on_action(cx.listener(|this, _: &Cancel, window, cx| match this.step {
                 Step::Choose => {}
+                // Saved already; going on without AI is skipping it.
+                Step::SetUpAi { .. } => this.after_ai(window, cx),
                 // Saved already; the files waiting are still to come.
                 Step::Check { .. } => this.next(window, cx),
                 _ => this.skip_rest(window, cx),
@@ -184,7 +188,13 @@ impl ImportPage {
         match read {
             Ok((file_name, text)) => {
                 let label = file_name.map_or("your text".into(), SharedString::from);
-                self.check(document, label, text.into(), None, window, cx);
+                let saved = Saved {
+                    document,
+                    label,
+                    text: text.into(),
+                    name: None,
+                };
+                self.check(saved, window, cx);
             }
             Err(error) => eprintln!("import page: couldn't read the document: {error}"),
         }
@@ -463,7 +473,13 @@ impl ImportPage {
                         );
                     }
                     let label = file_name.clone().unwrap_or_else(|| "your text".into());
-                    this.check(document, label, saved_text.clone(), name, window, cx);
+                    let saved = Saved {
+                        document,
+                        label,
+                        text: saved_text.clone(),
+                        name,
+                    };
+                    this.set_up_ai_or_check(saved, window, cx);
                 }
                 Err(error) => {
                     eprintln!("import page: couldn't save the document: {error}");
@@ -486,17 +502,52 @@ impl ImportPage {
         cx.notify();
     }
 
+    /// Asks for an AI provider when none is set up, so the text is checked
+    /// knowing where it goes; then checks it.
+    fn set_up_ai_or_check(&mut self, saved: Saved, window: &mut Window, cx: &mut Context<Self>) {
+        let assigned = llm::assigned(
+            self.database.read(cx).device_connection(),
+            Purpose::ExtractFacts,
+        );
+        match assigned {
+            Ok(None) => {}
+            Ok(Some(_)) => return self.check(saved, window, cx),
+            Err(error) => {
+                eprintln!("import page: couldn't read the AI provider: {error}");
+                return self.check(saved, window, cx);
+            }
+        }
+        let setup = cx.new(|cx| AiSetup::new(self.database.clone(), window, cx));
+        let subscription =
+            cx.subscribe_in(&setup, window, |this, _, event, window, cx| match event {
+                AiSetupEvent::Ready | AiSetupEvent::Skip => this.after_ai(window, cx),
+            });
+        setup.focus_handle(cx).focus(window, cx);
+        self.step = Step::SetUpAi {
+            setup,
+            saved,
+            _subscription: subscription,
+        };
+        cx.notify();
+    }
+
+    /// Goes on from asking for an AI provider, set up or not, to the check.
+    fn after_ai(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match std::mem::replace(&mut self.step, Step::Choose) {
+            Step::SetUpAi { saved, .. } => self.check(saved, window, cx),
+            step => self.step = step,
+        }
+    }
+
     /// Shows the text saved as an AI model would be sent it, hiding the
     /// user's names and the one it seemed to give.
-    fn check(
-        &mut self,
-        document: DocumentId,
-        label: SharedString,
-        text: SharedString,
-        name: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn check(&mut self, saved: Saved, window: &mut Window, cx: &mut Context<Self>) {
+        let Saved {
+            document,
+            label,
+            text,
+            name,
+        } = saved;
         let mut names =
             redaction::names(self.database.read(cx).connection()).unwrap_or_else(|error| {
                 eprintln!("import page: couldn't read the user's names: {error}");
@@ -960,11 +1011,27 @@ enum Step {
     /// imported before.
     Ask(File),
     Confirm(Read),
+    /// Asking for an AI provider, with none set up, before the check.
+    SetUpAi {
+        setup: Entity<AiSetup>,
+        saved: Saved,
+        _subscription: Subscription,
+    },
     /// Showing the text saved as an AI model would be sent it.
     Check {
         check: Entity<RedactionCheck>,
         _subscription: Subscription,
     },
+}
+
+/// A document just saved, on its way to being checked.
+struct Saved {
+    document: DocumentId,
+    /// Its file's name, or "your text".
+    label: SharedString,
+    text: SharedString,
+    /// The name it seemed to give, hidden in the check.
+    name: Option<String>,
 }
 
 /// A file loaded, not read yet.
@@ -1074,6 +1141,8 @@ mod tests {
         Confirm(String),
         /// Text pasted or written, with no file.
         Typed,
+        /// Asking for an AI provider, before the check.
+        SetUpAi,
         /// The text saved, as an AI model would be sent it.
         Check(String),
     }
@@ -1122,6 +1191,7 @@ mod tests {
                     Some(file) => Shown::Confirm(file.file_name.to_string()),
                     None => Shown::Typed,
                 },
+                Step::SetUpAi { .. } => Shown::SetUpAi,
                 Step::Check { check, .. } => Shown::Check(check.read(cx).redaction().text),
             })
         }
@@ -1138,10 +1208,15 @@ mod tests {
             });
         }
 
+        /// Saves the text, and goes on without AI when asked for it, as
+        /// these databases have none set up.
         fn save(&mut self) {
             self.page
                 .update_in(self.cx, |page, window, cx| page.save(window, cx));
             testing::settle(self.cx, &self.database);
+            self.page
+                .update_in(self.cx, |page, window, cx| page.after_ai(window, cx));
+            self.cx.run_until_parked();
         }
 
         fn problem(&mut self) -> String {
@@ -1277,6 +1352,39 @@ mod tests {
         assert_eq!(saved.last().map(String::as_str), Some("Alex Rahman\nRust"));
     }
 
+    /// Saves an OpenAI provider, as Settings would, with no key.
+    fn add_provider(write: &mut crate::database::Write) -> Result<(), Error> {
+        llm::add_provider(write, "OpenAI", "openai", None, "gpt-5.4-mini").map(drop)
+    }
+
+    #[test]
+    fn with_no_ai_set_up_it_asks_for_one_before_the_check() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        open.act(|page, window, cx| page.write("Rust".to_owned(), window, cx));
+        open.act(|page, window, cx| page.save(window, cx));
+        testing::settle(open.cx, &open.database);
+        assert_eq!(open.shown(), Shown::SetUpAi);
+        // As in Settings, which "Use another provider" opens.
+        testing::run(open.cx, &open.database, add_provider);
+        assert_eq!(
+            open.shown(),
+            Shown::Check("Rust".into()),
+            "set up elsewhere, it goes on"
+        );
+    }
+
+    #[test]
+    fn with_ai_set_up_the_check_comes_straight_after_saving() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        testing::run(open.cx, &open.database, add_provider);
+        open.act(|page, window, cx| page.write("Rust".to_owned(), window, cx));
+        open.act(|page, window, cx| page.save(window, cx));
+        testing::settle(open.cx, &open.database);
+        assert_eq!(open.shown(), Shown::Check("Rust".into()));
+    }
+
     #[test]
     fn a_document_saved_before_is_checked_before_its_facts_are_found() {
         let mut app = TestAppContext::single();
@@ -1347,7 +1455,9 @@ mod tests {
             saved.last().map(String::as_str),
             Some("Organized Code Fest 2019.")
         );
-        open.cx.simulate_keystrokes("ctrl-enter");
+        assert_eq!(open.shown(), Shown::SetUpAi, "with no AI set up");
+        // Esc goes on without it, and Ctrl+Enter confirms the check.
+        open.cx.simulate_keystrokes("escape ctrl-enter");
         assert_eq!(open.shown(), Shown::Choose);
         open.cx.simulate_keystrokes("ctrl-n");
         assert_eq!(
