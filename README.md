@@ -52,7 +52,6 @@ Early and personal: it works from import to exported PDF on real CVs. Not
 built yet: cover letters, fetching a job description from its link, a
 model-based check of what a line means (today's checker catches invented
 figures, years and counts, not overstated wording), and sync between devices.
-DeepSeek is the only AI provider offered so far.
 
 ## Building and running
 

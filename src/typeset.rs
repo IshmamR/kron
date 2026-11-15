@@ -456,6 +456,22 @@ pub fn resume_markup(template: &Template, sections: &[Section], paper: Paper) ->
             Paper::Letter => "us-letter",
         })
     ));
+    // PDF viewers show the title in place of the file name, and applicant
+    // tracking systems read both.
+    let name = sections
+        .iter()
+        .flat_map(|section| &section.blocks)
+        .find_map(|block| match block {
+            Block::Header { name, .. } => Some(name.text.as_str()),
+            _ => None,
+        });
+    if let Some(name) = name {
+        markup.push_str(&format!(
+            "\n#set document(title: {}, author: {})",
+            string_literal(&format!("{name} – Résumé")),
+            string_literal(name)
+        ));
+    }
     markup.push_str("\n#let resume = (sections: (\n");
     for section in sections {
         markup.push_str(&format!(
@@ -878,7 +894,16 @@ mod tests {
 
             let markup = resume_markup(template, &resume.sections, Paper::A4);
             match typesetter.pdf(&markup) {
-                Ok(pdf) => assert!(pdf.starts_with(b"%PDF-"), "{}", template.key),
+                Ok(pdf) => {
+                    assert!(pdf.starts_with(b"%PDF-"), "{}", template.key);
+                    // The metadata stream is plain XML in the PDF.
+                    let pdf = String::from_utf8_lossy(&pdf);
+                    assert!(
+                        pdf.contains("Alex Rahman – Résumé") && pdf.contains("dc:creator"),
+                        "{} has no title or author",
+                        template.key
+                    );
+                }
                 Err(error) => panic!("no PDF in {}: {error}", template.key),
             }
         }
