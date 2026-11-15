@@ -311,6 +311,11 @@ impl JobView {
         self.job
     }
 
+    #[cfg(test)]
+    pub fn database(&self) -> &Entity<Database> {
+        &self.database
+    }
+
     pub fn set_job(&mut self, job: JobId, cx: &mut Context<Self>) {
         if self.job != Some(job) {
             self.job = Some(job);

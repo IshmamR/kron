@@ -1,10 +1,33 @@
-// Writes the sample data in `assets/sample/sample.sql`, for building the UI
-// before import and generation exist. Development only: release builds start
-// empty.
+// Writes the sample data in `assets/sample/sample.sql`: the example a new user
+// can open, in databases of its own, and what debug builds start with.
 
 use crate::database::{self, Write};
+use crate::model::JobId;
 
 const SAMPLE: &str = include_str!("../../assets/sample/sample.sql");
+/// The job the example opens on: its résumé has claims left out, each for a
+/// different reason.
+const EXAMPLE_COMPANY: &str = "Cinder Labs";
+/// Makes the example job's résumés current, so it shows a résumé as it was
+/// generated: the sample has its facts changed since, and a line edited, to
+/// show those states. Its company is `EXAMPLE_COMPANY`.
+const EXAMPLE_AS_GENERATED: &str = "
+    UPDATE fact_versions SET
+        text = (SELECT facts.text FROM facts WHERE facts.id = fact_versions.fact_id),
+        hidden = (SELECT facts.hidden FROM facts WHERE facts.id = fact_versions.fact_id)
+    WHERE generation_id IN (
+        SELECT generations.id FROM generations JOIN jobs ON jobs.id = generations.job_id
+        WHERE jobs.company = 'Cinder Labs'
+    );
+    UPDATE lines SET text = generated
+    WHERE block_id IN (
+        SELECT blocks.id FROM blocks
+        JOIN sections ON sections.id = blocks.section_id
+        JOIN generations ON generations.id = sections.generation_id
+        JOIN jobs ON jobs.id = generations.job_id
+        WHERE jobs.company = 'Cinder Labs'
+    );
+";
 /// What the sample's imported documents are saved as: their text, since the
 /// sample has no PDFs.
 const DOCUMENT_MEDIA_TYPE: &str = "text/plain; charset=utf-8";
@@ -44,6 +67,20 @@ pub fn write_sample(write: &mut Write) -> Result<(), database::Error> {
         }
     }
     Ok(())
+}
+
+/// Writes the example a new user can open into its own, empty database:
+/// the templates, the sample, and its job's résumé as generated. Returns the
+/// job to show.
+pub fn write_example(write: &mut Write) -> Result<JobId, database::Error> {
+    crate::typeset::install_templates(write)?;
+    write_sample(write)?;
+    write.seed(EXAMPLE_AS_GENERATED)?;
+    Ok(JobId(
+        write
+            .prepare("SELECT id FROM jobs WHERE company = ?1")?
+            .query_row([EXAMPLE_COMPANY], |row| row.get(0))?,
+    ))
 }
 
 /// An in-memory database with the bundled templates and the sample.
@@ -133,6 +170,28 @@ mod tests {
                 row.get(0)
             })?;
         assert_eq!(violations, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_example_job_shows_its_resume_as_generated() -> Result<(), Error> {
+        let mut writer = Writer::open_in_memory()?;
+        let (job, _) = writer.execute(write_example)?;
+        let kron = writer.kron();
+        let resume: crate::model::ResumeId = crate::model::ResumeId(kron.query_row(
+            "SELECT id FROM generations WHERE job_id = ?1 AND kind = 'resume'
+             ORDER BY generated_at DESC LIMIT 1",
+            [job.0],
+            |row| row.get(0),
+        )?);
+        assert_eq!(crate::model::section::fact_changes(kron, resume)?, []);
+        assert_eq!(count(kron, "lines WHERE text != generated")?, 0);
+        let left_out: i64 = kron.query_row(
+            "SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1",
+            [resume.0],
+            |row| row.get(0),
+        )?;
+        assert_eq!(left_out, 3);
         Ok(())
     }
 

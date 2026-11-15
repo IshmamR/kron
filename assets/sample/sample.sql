@@ -1,7 +1,7 @@
--- Sample data for building the UI before import and generation exist.
--- Written by `src/model/sample.rs` into a database with the bundled templates
--- installed; development builds only. Foreign keys are checked at commit, so
--- tables can be written in any order. Times are relative to now: an event's
+-- Sample data: what debug builds start with, and the example a new user can
+-- open. Written by `src/model/sample.rs` into a database with the bundled
+-- templates installed. Foreign keys are checked at commit, so tables can be
+-- written in any order. Times are relative to now: an event's
 -- `localtime` expression puts it at that local hour of its day.
 --
 -- It covers every state the facts screen shows: unreviewed, confirmed,

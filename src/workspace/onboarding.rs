@@ -1,23 +1,29 @@
-// What a new user sees first: a welcome around the import page, then the
-// name their CV seemed to give, to confirm. Shown while the user has nothing
+// What a new user sees first: a welcome around the import page, with an
+// example job to open, then the name their CV seemed to give, to confirm. Shown while the user has nothing
 // yet: no documents, jobs or name. Data arriving another way, like the
 // sample seeded in debug builds or a sync, ends it.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_kit::{
-    Context, Entity, EventEmitter, FontWeight, IntoElement, SharedString, Subscription, Task,
-    Window, div, prelude::*, px,
+    Context, Entity, EventEmitter, Focusable, FontWeight, IntoElement, SharedString, Subscription,
+    Task, Window, div, prelude::*, px,
 };
 use rusqlite::Connection;
 
+use super::example::{Example, ExampleEvent};
 use super::import_page::{ImportPage, ImportPageEvent, PAGE_MAX_WIDTH};
-use super::parts::{caption, notice, text_field};
-use crate::database::{Changed, Database};
+use super::parts::{caption, notice, notify, text_field};
+use crate::database::{self, Changed, Database};
 use crate::model::DocumentId;
 use crate::model::commands;
+
+/// Says what Kron does that a chat app doesn't.
+const WELCOME: &str = "A chatbot can promise not to make things up. Kron checks every line of \
+                       your résumé against your own work, and shows you what it kept off.";
 
 pub struct Onboarding {
     database: Entity<Database>,
@@ -40,8 +46,9 @@ impl EventEmitter<OnboardingEvent> for Onboarding {}
 
 impl Render for Onboarding {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        match self.step {
+        match &self.step {
             Step::Import => self.render_import(cx).into_any_element(),
+            Step::Example { example, .. } => example.clone().into_any_element(),
             Step::Name => self.render_name(cx).into_any_element(),
         }
     }
@@ -105,6 +112,42 @@ impl Onboarding {
             problem: None,
             saving: Task::ready(()),
             _subscriptions: subscriptions,
+        }
+    }
+
+    fn open_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let directory = self.database.read(cx).example_directory();
+        let opened = database::open_example(directory, cx);
+        let example_database = match opened {
+            Ok(example_database) => example_database,
+            Err(error) => {
+                eprintln!("onboarding: couldn't open the example: {error}");
+                notify(
+                    Notification::error("Couldn't open the example."),
+                    window,
+                    cx,
+                );
+                return;
+            }
+        };
+        let example = cx.new(|cx| Example::new(example_database, window, cx));
+        let subscription =
+            cx.subscribe_in(&example, window, |this, _, event, window, cx| match event {
+                ExampleEvent::Close => this.close_example(window, cx),
+            });
+        example.focus_handle(cx).focus(window, cx);
+        self.step = Step::Example {
+            example,
+            _subscription: subscription,
+        };
+        cx.notify();
+    }
+
+    fn close_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.step, Step::Example { .. }) {
+            self.step = Step::Import;
+            self.import_page.focus_handle(cx).focus(window, cx);
+            cx.notify();
         }
     }
 
@@ -173,11 +216,17 @@ impl Onboarding {
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .child("Welcome to Kron"),
                                 )
-                                .child(caption(
-                                    "Kron builds every résumé from the facts of your work, each line citing \
-                                     its source.",
-                                    cx,
-                                )),
+                                .child(caption(WELCOME, cx)),
+                        )
+                        .child(
+                            Button::new("see-example")
+                                .label("See an example")
+                                .small()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_example(window, cx)
+                                    }),
+                                ),
                         )
                         .child(
                             Button::new("skip-onboarding")
@@ -264,6 +313,10 @@ impl Onboarding {
 
 enum Step {
     Import,
+    Example {
+        example: Entity<Example>,
+        _subscription: Subscription,
+    },
     Name,
 }
 
@@ -454,6 +507,57 @@ mod tests {
         // As the sample is seeded in debug builds, after the window opens.
         testing::run(open.cx, &open.database, testing::write_sample);
         assert!(open.done.get());
+    }
+
+    #[test]
+    fn the_example_has_data_of_its_own_and_closes_back_to_import() {
+        let mut app = TestAppContext::single();
+        let open = open(&mut app);
+        open.onboarding
+            .update_in(open.cx, |onboarding, window, cx| {
+                onboarding.open_example(window, cx)
+            });
+        open.cx.run_until_parked();
+        let example = open
+            .onboarding
+            .read_with(open.cx, |onboarding, _| match &onboarding.step {
+                Step::Example { example, .. } => Some(example.clone()),
+                _ => None,
+            });
+        let Some(example) = example else {
+            panic!("the example isn't shown");
+        };
+        let example_database = example.read_with(open.cx, |example, cx| {
+            example.job_view().read(cx).database().clone()
+        });
+        example_database.read_with(open.cx, |database, _| database.flush());
+        open.cx.run_until_parked();
+        let company = example.read_with(open.cx, |example, cx| {
+            let job = example.job_view().read(cx).job()?;
+            example_database
+                .read(cx)
+                .connection()
+                .query_row("SELECT company FROM jobs WHERE id = ?1", [job.0], |row| {
+                    row.get::<_, String>(0)
+                })
+                .ok()
+        });
+        assert_eq!(company.as_deref(), Some("Cinder Labs"));
+        let still_new = open
+            .database
+            .read_with(open.cx, |database, _| is_new(database.connection()));
+        assert!(
+            matches!(still_new, Ok(true)),
+            "the user's data is untouched"
+        );
+        assert!(!open.done.get());
+
+        example.update(open.cx, |_, cx| cx.emit(ExampleEvent::Close));
+        open.cx.run_until_parked();
+        let importing = open.onboarding.read_with(open.cx, |onboarding, _| {
+            matches!(onboarding.step, Step::Import)
+        });
+        assert!(importing);
     }
 
     #[test]
