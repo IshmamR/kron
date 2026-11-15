@@ -633,6 +633,7 @@ impl ImportPage {
         cx.spawn_in(window, async move |this, cx| {
             let reply = call.await;
             let duration = start.elapsed();
+            let cost = reply.as_ref().ok().and_then(|reply| reply.cost);
             let found = match &reply {
                 Ok(reply) => Answer::parse(&reply.response.text())
                     .map(|answer| Extraction::locate(answer, &text, &redaction))
@@ -694,6 +695,9 @@ impl ImportPage {
                         0 => {}
                         1 => message.push_str(" 1 needs a look."),
                         count => message.push_str(&format!(" {count} need a look.")),
+                    }
+                    if let Some(cost) = cost {
+                        message.push_str(&format!(" It cost {}.", llm::cost_label(cost)));
                     }
                     Notification::success(message).action(|_, _, cx| {
                         Button::new("show-facts")

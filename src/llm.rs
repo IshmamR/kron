@@ -654,6 +654,18 @@ fn assignment_of(
         .optional()?)
 }
 
+/// What a run cost, as the user reads it: "under 1¢", "3¢", "$1.20".
+pub fn cost_label(cost: f64) -> String {
+    let cents = (cost * 100.).round();
+    if cents < 1. {
+        "under 1¢".to_owned()
+    } else if cents < 100. {
+        format!("{cents}¢")
+    } else {
+        format!("${:.2}", cents / 100.)
+    }
+}
+
 /// Records a call: what it took and cost, never what was sent or answered.
 /// A call with no price counts as unpriced, at no cost: the total is a
 /// lower bound.
@@ -965,5 +977,14 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn costs_read_in_cents_under_a_dollar() {
+        assert_eq!(cost_label(0.0004), "under 1¢");
+        assert_eq!(cost_label(0.012), "1¢");
+        assert_eq!(cost_label(0.237), "24¢");
+        assert_eq!(cost_label(0.996), "$1.00");
+        assert_eq!(cost_label(1.2), "$1.20");
     }
 }

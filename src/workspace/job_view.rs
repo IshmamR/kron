@@ -636,11 +636,7 @@ impl JobView {
             .py_3()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(job_header(
-                job,
-                self.shown_version().map(|version| version.generated_at),
-                cx,
-            ))
+            .child(job_header(job, self.shown_version(), cx))
             .child(
                 h_flex()
                     .flex_wrap()
@@ -1018,6 +1014,7 @@ impl JobView {
                 Err(error) => Err(error.to_string()),
             };
             let claims = draft.as_ref().map_or(0, |draft| draft.claims.len());
+            let cost = reply.as_ref().ok().and_then(|reply| reply.cost);
             let saved = cx.update(|_, cx| {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
@@ -1056,13 +1053,20 @@ impl JobView {
                 }
             };
             let message = match saved {
-                Ok(Ok(())) => Notification::success(match claims {
-                    0 => "Wrote the résumé.".to_owned(),
-                    1 => "Wrote the résumé. 1 claim your facts don't back was left out.".to_owned(),
-                    claims => format!(
-                        "Wrote the résumé. {claims} claims your facts don't back were left out."
-                    ),
-                }),
+                Ok(Ok(())) => {
+                    let mut message = match claims {
+                        0 => "Wrote the résumé.".to_owned(),
+                        1 => "Wrote the résumé. 1 claim your facts don't back was left out."
+                            .to_owned(),
+                        claims => format!(
+                            "Wrote the résumé. {claims} claims your facts don't back were left out."
+                        ),
+                    };
+                    if let Some(cost) = cost {
+                        message.push_str(&format!(" It cost {}.", llm::cost_label(cost)));
+                    }
+                    Notification::success(message)
+                }
                 Ok(Err(problem)) => {
                     Notification::error(format!("Couldn't write the résumé: {problem}"))
                 }
@@ -1470,19 +1474,25 @@ fn paper_menu(current: Paper) -> impl IntoElement {
         })
 }
 
-/// `generated_at` is the résumé version's on screen.
+/// `version` is the résumé version on screen.
 fn job_header(
     job: &Application,
-    generated_at: Option<DateTime<Utc>>,
+    version: Option<&Version>,
     cx: &Context<JobView>,
 ) -> impl IntoElement {
     let (heading, title_length) = heading(&job.title, &job.company);
     let mut details = vec![application_view::status_label(job, Utc::now())];
-    if let Some(generated_at) = generated_at {
+    if let Some(version) = version {
         details.push(format!(
             "Generated {}",
-            generated_at.with_timezone(&Local).format("%b %-d, %H:%M")
+            version
+                .generated_at
+                .with_timezone(&Local)
+                .format("%b %-d, %H:%M")
         ));
+        if let Some(cost) = version.cost {
+            details.push(format!("cost {}", llm::cost_label(cost)));
+        }
     }
 
     h_flex()
@@ -1609,6 +1619,8 @@ struct Version {
     generated_at: DateTime<Utc>,
     template: &'static Template,
     paper: Paper,
+    /// What writing it cost, when every call was priced.
+    cost: Option<f64>,
 }
 
 impl Versions {
@@ -1619,11 +1631,17 @@ impl Versions {
                 generated_at: DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default(),
                 template: typeset::template_of_version(row.get(2)?),
                 paper: Paper::from_stored(row.get::<_, Option<String>>(3)?.as_deref()),
+                cost: row.get(4)?,
             })
         };
+        // A version's cost is left out when a call wasn't priced: the total
+        // would only be a lower bound.
         let current = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id, paper FROM generations
+                "SELECT id, generated_at, template_version_id, paper,
+                        (SELECT CASE WHEN sum(unpriced_calls) > 0 THEN NULL ELSE sum(cost) END
+                         FROM llm_runs WHERE generation_id = generations.id)
+                 FROM generations
                  WHERE job_id = ?1 AND kind = 'resume' AND deleted_at IS NULL
                  ORDER BY generated_at DESC, id DESC LIMIT 1",
             )?
@@ -1631,7 +1649,10 @@ impl Versions {
             .optional()?;
         let sent = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id, paper FROM generations
+                "SELECT id, generated_at, template_version_id, paper,
+                        (SELECT CASE WHEN sum(unpriced_calls) > 0 THEN NULL ELSE sum(cost) END
+                         FROM llm_runs WHERE generation_id = generations.id)
+                 FROM generations
                  WHERE id = (
                      SELECT resume_id FROM events
                      WHERE job_id = ?1 AND kind = 'applied' AND resume_id IS NOT NULL
@@ -1933,6 +1954,39 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn a_version_costs_what_its_runs_did_unless_one_was_unpriced() -> Result<(), Error> {
+        let mut writer = sample::written()?;
+        let cost = |writer: &crate::database::Writer| -> Result<Option<f64>, Error> {
+            let connection = writer.kron();
+            let job = sample::job(connection, "Ledgerly")?;
+            Ok(Versions::read(connection, job)?
+                .current
+                .and_then(|version| version.cost))
+        };
+        assert_eq!(cost(&writer)?, None, "the sample's weren't run");
+        let run = |cost: f64, unpriced: i64| {
+            format!(
+                "INSERT INTO llm_runs (id, task, started_at, duration, outcome, provider, vendor,
+                                       model, calls, input_tokens, cached_input_tokens,
+                                       cache_written_tokens, output_tokens, reasoning_tokens,
+                                       cost, unpriced_calls, job_id, generation_id)
+                 SELECT randomblob(16), 'generate_resume', 0, 0, 'done', 'OpenAI', 'openai',
+                        'gpt-5.4-mini', 1, 0, 0, 0, 0, 0, {cost}, {unpriced}, jobs.id,
+                        generations.id
+                 FROM generations JOIN jobs ON jobs.id = generations.job_id
+                 WHERE jobs.company = 'Ledgerly' AND generations.kind = 'resume'
+                 ORDER BY generated_at DESC LIMIT 1"
+            )
+        };
+        writer.execute(|write| write.seed(&run(0.03, 0)))?;
+        writer.execute(|write| write.seed(&run(0.01, 0)))?;
+        assert_eq!(cost(&writer)?.map(|cost| (cost * 100.).round()), Some(4.));
+        writer.execute(|write| write.seed(&run(0., 1)))?;
+        assert_eq!(cost(&writer)?, None, "a lower bound isn't shown");
         Ok(())
     }
 
