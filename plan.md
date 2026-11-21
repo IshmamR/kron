@@ -16,9 +16,10 @@ Every fix gets a regression test.
 - **Free credits:** an anonymous allowance for each install, and more after an
   optional email sign-up. Asking for an email up front would undercut the
   privacy pitch and lose people at the verification step.
-- **The relay comes before Sign in with ChatGPT.** ChatGPT sign-in ships only
-  through OpenAI's official route, with Kron's own client identity. Don't use
-  rig's `providers::chatgpt`, because it signs in as Codex.
+- **Sign in with ChatGPT comes before the relay** (changed 2026-11-21). It
+  needs no server, and the relay may come last. It ships only through OpenAI's
+  official route, with Kron's own client identity. Don't use rig's
+  `providers::chatgpt`, because it signs in as Codex.
 - **The default dark palette is Moss.** Linen & Sage stays the light default.
 - **Extraction worst case is about 200K tokens per run.** The relay caps each
   request: input at 100K, so Haiku's above-100K price never applies, and output
@@ -32,10 +33,12 @@ Every fix gets a regression test.
   least it takes", "a few cents").
 - [ ] **Find what pushes an extraction toward 200K tokens:** long documents,
   retries, or the prompt itself. A two-page CV is about 2K tokens.
-- [ ] **Confirm Sign in with ChatGPT access** in OpenAI's developer docs.
+- [x] **Confirm Sign in with ChatGPT access** in OpenAI's developer docs
+  (checked 2026-11-21). There's a self-serve route for "open-source projects,
+  personal projects that run locally": see phase 1's ChatGPT section.
 - [ ] **Decide the licence.**
 
-## Phase 1: The first two minutes (Track A), done
+## Phase 1: The first two minutes (Track A)
 
 **Goal:** a new user sees the "Left out" moment before being asked for
 anything, and gets their first résumé without opening Settings.
@@ -67,10 +70,68 @@ Still open:
 - [ ] Once the relay ships, "Start free" goes first on the AI step and the own
   key moves under Advanced.
 
+### Sign in with ChatGPT (moved from phase 2, not started)
+
+Lets a user with a paid ChatGPT plan use Kron with no API key. It runs inside
+Kron, with no server of ours. From OpenAI's docs, read 2026-11-21:
+[open-source overview](https://developers.openai.com/siwc/token-sharing-open-source),
+[cookbook](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt),
+[models and inference](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference),
+[errors](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery),
+[preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations),
+[help article](https://help.openai.com/en/articles/20001542-using-your-chatgpt-plan-in-other-apps-and-sites).
+
+What the docs say:
+- **Eligibility:** self-serve for "open-source projects, personal projects that
+  run locally, and selected private apps". "Paid or remotely hosted" apps join
+  a waitlist instead. Kron fits; whether paid relay credits later would change
+  that isn't stated.
+- **No registration step:** the first sign-in uses
+  `client_id=dynamic_agent_client` with an app name and a host ID Kron makes
+  and keeps; OpenAI issues a client ID (`oaiapp_…`) to save and reuse. No
+  client secret, no API key.
+- **The flow:** OAuth with PKCE (S256), state and nonce, and a redirect to
+  `http://127.0.0.1:<port>/…` (not `localhost`; only the port may vary). Code
+  exchange at `auth.openai.com`, with `resource=https://api.openai.com/v1`.
+- **Scopes:** `openid profile email offline_access resource.invoke
+  chatgpt.tokens.use.direct`. Signing in alone doesn't grant plan use: check
+  the granted scopes, and offer an API key if the user declined.
+- **Tokens:** about an hour, with a rotating refresh token, kept in the
+  keyring.
+- **Requests:** `POST /v1/responses` with the token, `store: false` and
+  `stream: true`. Models come from `GET /v1/models`, not a hardcoded name.
+  `temperature`, `max_output_tokens` and a system-role message are rejected:
+  Kron sets the first two today, so this provider leaves them out, and the
+  preamble goes in `instructions`.
+- **Plans:** Go, Plus, Pro and Business (the cookbook says Plus and Pro). The
+  user sets a weekly cap for each app in ChatGPT's settings.
+- **Errors to handle:** `subscription_sharing_usage_limit_exceeded` (429: say
+  so, and link to ChatGPT settings → Usage), `…_user_not_eligible` (403),
+  `…_usage_unavailable` (503: retry later), `…_unsupported_capability` (400),
+  and refresh errors that mean signing in again.
+- **The UI:** a "Continue with ChatGPT" button following OpenAI's branding
+  guidelines, and "Using ChatGPT plan" with a "Manage usage" link while it's
+  in use.
+- **Not stated:** whether request content is kept or used for training, and
+  any preview or end date.
+
+To do:
+- [ ] Sign-in: browser, loopback listener, PKCE, client ID and host ID kept,
+  tokens in the keyring, quiet refresh.
+- [ ] A ChatGPT provider: Responses API with streaming, models from the
+  account, without the rejected fields. Check whether rig's OpenAI Responses
+  client can do this, or call it directly.
+- [ ] "Continue with ChatGPT" first on the AI setup step, with the key guide
+  second.
+- [ ] The errors above, in words a user can act on; "Using ChatGPT plan" in
+  place of a cost.
+- [ ] Before shipping: read OpenAI's terms for this route and the branding
+  guidelines.
+
 **Done when:** a fresh install reaches the example in under 30 seconds, and its
 own first résumé without visiting Settings.
 
-## Phase 2: AI without a key (Track A)
+## Phase 2: Free credits without a key (Track A; may move last)
 
 - [ ] **The Kron relay and free credits.**
   - An open-source relay that forwards redacted text and stores only token
@@ -82,13 +143,10 @@ own first résumé without visiting Settings.
     them on a new device. If reinstalling for fresh credits becomes abuse, add
     a small proof-of-work step or a lower limit for each IP address.
   - A short privacy page that says exactly what passes through.
-- [ ] **Sign in with ChatGPT.**
-  - An OAuth sign-in through the browser, with tokens kept in the keyring and
-    refreshed quietly.
-  - Requests use OpenAI's Responses API with `store: false` and streaming.
-  - Redaction is unchanged.
-  - Needs a Go, Plus, Pro or Business plan.
-- [ ] **The setup screen order:** Start free, then Sign in with ChatGPT, then
+- [ ] **Check the relay doesn't cost Kron its ChatGPT route.** OpenAI's
+  self-serve route is for open-source and local apps; "paid or remotely hosted"
+  ones join a waitlist. Ask OpenAI before selling credits.
+- [ ] **The setup screen order:** Start free, then Continue with ChatGPT, then
   the user's own key (Advanced), then AI on this computer (Advanced).
 - [ ] **Hide the per-task model pickers** under Advanced until a second service
   is added.
