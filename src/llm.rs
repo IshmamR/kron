@@ -13,10 +13,10 @@ use std::time::Duration;
 use gpui_kit::{App, AppContext, Global, Task};
 use rig_core::ProviderError;
 use rig_core::catalog::Catalog;
-use rig_core::completion::{CompletionRequest, CompletionResponse};
+use rig_core::completion::{CompletionRequest, CompletionResponse, Effort, Reasoning};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
-use rig_core::providers::openai::wire::Auth;
+use rig_core::providers::openai::wire::{Auth, ResponsesContract};
 use rig_core::providers::openai::{OpenAIConfig, Route};
 use rig_core::providers::registry::{ProviderConfig, ProviderId};
 use rusqlite::{Connection, OptionalExtension};
@@ -786,9 +786,7 @@ async fn call_chatgpt(
     .await
     .map_err(Error::ChatGpt)?;
     let request = for_plan(request);
-    let model = OpenAIConfig::new(token)
-        .with_base_url(chatgpt::API)
-        .with_route(Route::Responses)
+    let model = plan_config(token)
         .client()
         .completion(&assigned.model)
         .erase();
@@ -815,9 +813,24 @@ async fn call_chatgpt(
     })
 }
 
+/// The plan's endpoint, on rig's wire for ChatGPT plans: always streamed,
+/// nothing stored, and a reply that names no content type accepted, as the
+/// plan's don't. Only the wire: the endpoint, token and client are Kron's.
+fn plan_config(token: String) -> OpenAIConfig {
+    let mut config = OpenAIConfig::new(token)
+        .with_base_url(chatgpt::API)
+        .with_route(Route::Responses);
+    config.dialect.quirks.responses.contract = ResponsesContract::Codex;
+    config
+}
+
 /// The request as the plan takes it: no temperature or output cap, which it
-/// rejects, and nothing kept on OpenAI's side.
+/// rejects, and nothing kept on OpenAI's side. Its models can't turn
+/// reasoning off, so the least they offer stands in.
 fn for_plan(mut request: CompletionRequest) -> CompletionRequest {
+    if request.options.reasoning == Some(Reasoning::Off) {
+        request.options.reasoning = Some(Reasoning::Effort(Effort::Low));
+    }
     request.temperature = None;
     request.max_tokens = None;
     request.additional_params = Some(serde_json::json!({ "store": false }));
@@ -925,8 +938,25 @@ mod tests {
         assert_eq!(request.temperature, None);
         assert_eq!(request.max_tokens, None);
         assert_eq!(
+            request.options.reasoning,
+            Some(Reasoning::Effort(Effort::Low)),
+            "gpt-6.2-sol refuses effort none"
+        );
+        assert_eq!(
             request.additional_params,
             Some(serde_json::json!({ "store": false }))
+        );
+    }
+
+    #[test]
+    fn the_plan_is_called_at_openais_api_on_the_wire_that_reads_its_replies() {
+        let config = plan_config("token".to_owned());
+        assert_eq!(config.base_url, chatgpt::API);
+        assert_eq!(config.route, Some(Route::Responses));
+        assert_eq!(
+            config.dialect.quirks.responses.contract,
+            ResponsesContract::Codex,
+            "the plan's streamed replies name no content type"
         );
     }
 

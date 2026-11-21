@@ -70,7 +70,7 @@ Still open:
 - [ ] Once the relay ships, "Start free" goes first on the AI step and the own
   key moves under Advanced.
 
-### Sign in with ChatGPT (moved from phase 2; built, not tried with a real account yet)
+### Sign in with ChatGPT (moved from phase 2; built and tried with a real account)
 
 Lets a user with a paid ChatGPT plan use Kron with no API key. It runs inside
 Kron, with no server of ours. From OpenAI's docs, read 2026-11-21:
@@ -125,8 +125,12 @@ To do:
   second; in Settings too, with Manage usage and Sign out.
 - [x] The errors above, in words a user can act on; "Using your ChatGPT
   plan" on its row, and no cost shown.
-- [ ] Try it with a real ChatGPT account: sign in, read a CV, write a résumé,
-  sign out.
+- [x] Try it with a real ChatGPT account: sign in, read a CV, write a résumé,
+  sign out. (2026-11-21: facts in 11.6 s, a résumé in 7.7 s, on GPT-6.2-Sol,
+  the account's first model. The plan's models refuse reasoning effort
+  `none`, and its streamed replies name no content type; both fixed.)
+- [ ] Pick a faster default than the account's first model for finding
+  facts, once there's a way to tell them apart.
 - [ ] Before shipping: read OpenAI's terms for this route and the branding
   guidelines.
 
