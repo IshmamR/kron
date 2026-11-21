@@ -37,10 +37,14 @@ Every fix gets a regression test.
   a cent or two, and writing a résumé less than a cent".
 - [x] **What pushes an extraction toward 200K tokens:** not a CV. The largest
   real one took 2.2K in, so 200K needs a much longer document or retries.
-- [ ] **A Figma CV reads as no text.** Figma's PDF export maps one character to
+- [x] **A Figma CV read as no text.** Figma's PDF export maps one character to
   an empty string in its ToUnicode CMap (`<65> <>`); hayro-cmap (0.1.0 and the
   latest 0.1.1) rejects the entry and with it the whole map, so every glyph
-  comes without text and the import fails with `NoText`. 1 of the 33 real CVs.
+  came without text and the import failed with `NoText`. 1 of the 33 real CVs.
+  Fixed in a patched copy, `vendor/hayro-cmap` (see its `KRON.md`); it now
+  gives 33 facts.
+- [ ] **Report the empty CMap entry to hayro** (github.com/LaurenzV/hayro) with
+  a minimal PDF, then drop `vendor/hayro-cmap` once a release skips them.
 - [x] **Confirm Sign in with ChatGPT access** in OpenAI's developer docs
   (checked 2026-11-21). There's a self-serve route for "open-source projects,
   personal projects that run locally": see phase 1's ChatGPT section.

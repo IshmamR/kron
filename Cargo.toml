@@ -74,3 +74,9 @@ opt-level = 2
 [dev-dependencies]
 # Headless windows for UI tests: simulated keys, clicks and actions.
 gpui-kit = { version = "0.7.1", features = ["test-support"] }
+
+# hayro-cmap with one fix: a ToUnicode entry that maps to nothing, as Figma's
+# PDF export writes, no longer throws the whole map away (which left a Figma
+# CV with no text). See vendor/hayro-cmap/KRON.md; remove once hayro fixes it.
+[patch.crates-io]
+hayro-cmap = { path = "vendor/hayro-cmap" }

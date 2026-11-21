@@ -660,7 +660,8 @@ mod tests {
 
     /// A PDF whose pages each draw their content, with their annotations.
     /// They can draw in Helvetica as `/F1`, which the PDF names but doesn't
-    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`, and
+    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`, whose
+    /// map to Unicode also maps "c" to nothing, as Figma's do; and
     /// in one that draws them without saying what they are as `/F4`; and a
     /// grey image as `/Image`.
     fn pdf(pages: &[(&str, &str)]) -> Vec<u8> {
@@ -695,6 +696,7 @@ mod tests {
                 "/CIDInit /ProcSet findresource begin 12 dict begin begincmap \
                  1 begincodespacerange <00> <FF> endcodespacerange \
                  1 beginbfrange <61> <62> <0061> endbfrange \
+                 1 beginbfchar <63> <> endbfchar \
                  endcmap CMapName currentdict /CMap defineresource pop end end",
             ),
             "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] \
@@ -1013,6 +1015,14 @@ mod tests {
                 .any(|line| line.starts_with("Shipped offline-first transfers")),
             "{lines:#?}"
         );
+    }
+
+    /// Figma's Type 3 fonts map a character to nothing, which hayro-cmap
+    /// took to spoil the whole map, so a Figma CV read as no text.
+    #[test]
+    fn a_font_mapping_a_character_to_nothing_still_reads() {
+        let document = pdf(&[("BT /F3 10 Tf 72 700 Td (ab) Tj ET", "")]);
+        assert_eq!(lines(&reading(&document)), ["ab"]);
     }
 
     #[test]
