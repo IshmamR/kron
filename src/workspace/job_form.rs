@@ -34,6 +34,12 @@ pub struct JobForm {
     description: Entity<TextareaState>,
     /// Why the job couldn't be added.
     problem: Option<SharedString>,
+    /// Why it can't be added yet, said beside the button.
+    waiting: Option<SharedString>,
+    /// Said above the fields.
+    intro: &'static str,
+    add_label: &'static str,
+    cancel_label: &'static str,
     task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -46,7 +52,8 @@ impl Render for JobForm {
         let filled = |input: &Entity<InputState>| !input.read(cx).value().trim().is_empty();
         let ready = filled(&self.title)
             && filled(&self.company)
-            && !self.description.read(cx).value().trim().is_empty();
+            && !self.description.read(cx).value().trim().is_empty()
+            && self.waiting.is_none();
         let label = |text: &'static str| {
             div()
                 .text_sm()
@@ -55,10 +62,7 @@ impl Render for JobForm {
         };
         v_flex()
             .gap_4()
-            .child(caption(
-                "Add the role you're interested in and the posting it belongs to.",
-                cx,
-            ))
+            .child(caption(self.intro, cx))
             .child(
                 h_flex()
                     .gap_3()
@@ -106,17 +110,21 @@ impl Render for JobForm {
                     .border_t_1()
                     .border_color(theme.border)
                     .justify_end()
+                    .items_center()
                     .gap_2()
+                    .when_some(self.waiting.clone(), |this, waiting| {
+                        this.child(div().flex_1().min_w_0().child(caption(waiting, cx)))
+                    })
                     .child(
                         Button::new("cancel-job")
-                            .label("Cancel")
+                            .label(self.cancel_label)
                             .ghost()
                             .small()
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(JobFormEvent::Cancelled))),
                     )
                     .child(
                         Button::new("add-job")
-                            .label("Add job")
+                            .label(self.add_label)
                             .primary()
                             .small()
                             .disabled(!ready)
@@ -156,8 +164,29 @@ impl JobForm {
             link,
             description,
             problem: None,
+            waiting: None,
+            intro: "Add the role you're interested in and the posting it belongs to.",
+            add_label: "Add job",
+            cancel_label: "Cancel",
             task: Task::ready(()),
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// What it says above the fields and on its buttons, for a form used
+    /// other than to add a job.
+    pub fn labels(mut self, intro: &'static str, add: &'static str, cancel: &'static str) -> Self {
+        self.intro = intro;
+        self.add_label = add;
+        self.cancel_label = cancel;
+        self
+    }
+
+    /// Holds the job back from being added, saying why, until it's `None`.
+    pub fn set_waiting(&mut self, waiting: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.waiting != waiting {
+            self.waiting = waiting;
+            cx.notify();
         }
     }
 
@@ -167,13 +196,37 @@ impl JobForm {
         self.title.update(cx, |title, cx| title.focus(window, cx));
     }
 
-    fn add(&mut self, cx: &mut Context<Self>) {
+    /// Fills the fields, as the user would.
+    #[cfg(test)]
+    pub fn fill(
+        &self,
+        title: &str,
+        company: &str,
+        description: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for (input, value) in [(&self.title, title), (&self.company, company)] {
+            input.update(cx, |input, cx| {
+                input.set_value(value.to_owned(), window, cx)
+            });
+        }
+        self.description.update(cx, |input, cx| {
+            input.set_value(description.to_owned(), window, cx)
+        });
+    }
+
+    pub(super) fn add(&mut self, cx: &mut Context<Self>) {
         let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
         let title = value(&self.title);
         let company = value(&self.company);
         let link = value(&self.link);
         let description = self.description.read(cx).value().trim().to_owned();
-        if title.is_empty() || company.is_empty() || description.is_empty() {
+        if title.is_empty()
+            || company.is_empty()
+            || description.is_empty()
+            || self.waiting.is_some()
+        {
             return;
         }
         let too_long = [
@@ -306,5 +359,36 @@ mod tests {
                 "wishlisted".to_owned(),
             ))
         );
+    }
+
+    #[test]
+    fn a_job_waits_while_the_form_says_why() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_empty(&mut app);
+        let (form, cx) = app.add_window_view({
+            let database = database.clone();
+            |window, cx| JobForm::new(database, window, cx)
+        });
+        let added = Rc::new(Cell::new(false));
+        cx.update(|_, cx| {
+            let added = added.clone();
+            cx.subscribe(&form, move |_, event: &JobFormEvent, _| {
+                added.set(matches!(event, JobFormEvent::Added(_)))
+            })
+            .detach();
+        });
+        form.update_in(cx, |form, window, cx| {
+            form.fill("Rust Engineer", "Cinder Labs", "Rust.", window, cx);
+            form.set_waiting(Some("Finding the facts.".into()), cx);
+            form.add(cx);
+        });
+        testing::settle(cx, &database);
+        assert!(!added.get(), "not while waiting");
+        form.update(cx, |form, cx| {
+            form.set_waiting(None, cx);
+            form.add(cx);
+        });
+        testing::settle(cx, &database);
+        assert!(added.get());
     }
 }

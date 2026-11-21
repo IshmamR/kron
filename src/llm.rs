@@ -5,16 +5,18 @@
 // client needs one and GPUI doesn't run one. Nothing here logs what's sent or
 // answered.
 
+pub mod chatgpt;
+
 use std::fmt;
 use std::time::Duration;
 
 use gpui_kit::{App, AppContext, Global, Task};
 use rig_core::ProviderError;
 use rig_core::catalog::Catalog;
-use rig_core::completion::{CompletionRequest, CompletionResponse};
+use rig_core::completion::{CompletionRequest, CompletionResponse, Effort, Reasoning};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
-use rig_core::providers::openai::wire::Auth;
+use rig_core::providers::openai::wire::{Auth, ResponsesContract};
 use rig_core::providers::openai::{OpenAIConfig, Route};
 use rig_core::providers::registry::{ProviderConfig, ProviderId};
 use rusqlite::{Connection, OptionalExtension};
@@ -151,6 +153,11 @@ impl Provider {
     pub fn is_compatible(&self) -> bool {
         self.base_url.is_some()
     }
+
+    /// Signed in with ChatGPT: runs on the user's plan, with no API key.
+    pub fn is_chatgpt(&self) -> bool {
+        self.vendor == chatgpt::VENDOR
+    }
 }
 
 /// A provider, with the model a task runs on.
@@ -198,6 +205,20 @@ pub enum Error {
     TimedOut,
     /// The runtime didn't start, or the call's task stopped.
     Runtime(String),
+    ChatGpt(chatgpt::Error),
+    /// The ChatGPT plan refused the call, with OpenAI's code for why.
+    Plan(String),
+}
+
+/// OpenAI's code for a ChatGPT plan, or Kron's share of it, used up.
+const USAGE_LIMIT: &str = "subscription_sharing_usage_limit_exceeded";
+
+impl Error {
+    /// The ChatGPT plan's limit, or Kron's, is reached: the way on is in
+    /// ChatGPT's usage settings, not in Kron.
+    pub fn is_usage_limit(&self) -> bool {
+        matches!(self, Self::Plan(code) if code == USAGE_LIMIT)
+    }
 }
 
 impl fmt::Display for Error {
@@ -244,6 +265,30 @@ impl fmt::Display for Error {
             }
             Self::TimedOut => write!(formatter, "The model took too long to answer."),
             Self::Runtime(error) => write!(formatter, "The call couldn't run: {error}."),
+            Self::ChatGpt(error) => write!(formatter, "{error}"),
+            Self::Plan(code) => match code.as_str() {
+                USAGE_LIMIT => write!(
+                    formatter,
+                    "ChatGPT usage limit reached. Review your plan or Kron's limit in \
+                     ChatGPT settings."
+                ),
+                "subscription_sharing_user_not_eligible" => write!(
+                    formatter,
+                    "Your ChatGPT account can't share its plan with other apps. Add a \
+                     provider with an API key instead."
+                ),
+                "subscription_sharing_usage_unavailable"
+                | "subscription_sharing_user_unavailable" => {
+                    write!(
+                        formatter,
+                        "ChatGPT couldn't check your plan's usage. Try again in a few minutes."
+                    )
+                }
+                "subscription_sharing_invalid_user" => {
+                    write!(formatter, "{}", chatgpt::Error::SignInAgain)
+                }
+                code => write!(formatter, "ChatGPT refused the request ({code})."),
+            },
         }
     }
 }
@@ -534,6 +579,120 @@ pub fn complete(
     })
 }
 
+/// Starts signing in with ChatGPT: the link for the browser to open, and the
+/// sign-in, finished once the browser comes back, with the models the
+/// account can use.
+pub fn sign_in_with_chatgpt(
+    registration: &chatgpt::Registration,
+    cx: &App,
+) -> Result<(String, Task<Result<ChatGptSignIn, Error>>), String> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Err(Error::Runtime("no runtime".into()).to_string());
+    };
+    let handle = runtime.0.handle().clone();
+    let attempt = chatgpt::start(registration).map_err(|error| error.to_string())?;
+    let url = attempt.url.clone();
+    let finished = cx.background_spawn(async move {
+        handle
+            .spawn(async move {
+                let signed_in = chatgpt::finish(attempt).await.map_err(Error::ChatGpt)?;
+                let models = match signed_in.plan {
+                    true => chatgpt::models(signed_in.access_token())
+                        .await
+                        .map_err(Error::ChatGpt)?,
+                    false => Vec::new(),
+                };
+                Ok(ChatGptSignIn { signed_in, models })
+            })
+            .await
+            .map_err(|error| Error::Runtime(error.to_string()))?
+    });
+    Ok((url, finished))
+}
+
+/// A finished sign-in with ChatGPT.
+pub struct ChatGptSignIn {
+    pub signed_in: chatgpt::SignedIn,
+    /// (slug, display name), in OpenAI's order; empty without the plan.
+    pub models: Vec<(String, String)>,
+}
+
+/// Keeps a sign-in's access token for the provider it was added as, so its
+/// first call doesn't spend a refresh.
+pub fn remember_chatgpt(provider: Uuid, signed_in: chatgpt::SignedIn, cx: &App) -> Task<()> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(());
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        if let Err(error) = handle
+            .spawn(async move { chatgpt::remember(provider, &signed_in).await })
+            .await
+        {
+            eprintln!("chatgpt: couldn't keep the access token: {error}");
+        }
+    })
+}
+
+/// The models a signed-in ChatGPT provider's account can use.
+pub fn chatgpt_models(provider: Uuid, cx: &App) -> Task<Result<Vec<(String, String)>, Error>> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(Err(Error::Runtime("no runtime".into())));
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        let stored = key(provider).map_err(Error::Keyring)?.ok_or(Error::NoKey)?;
+        let credentials = chatgpt::Credentials::from_stored(&stored).map_err(Error::ChatGpt)?;
+        handle
+            .spawn(async move {
+                let token = chatgpt::access_token(provider, credentials, |rotated| {
+                    set_key(provider, Some(&rotated.stored()))
+                })
+                .await
+                .map_err(Error::ChatGpt)?;
+                chatgpt::models(&token).await.map_err(Error::ChatGpt)
+            })
+            .await
+            .map_err(|error| Error::Runtime(error.to_string()))?
+    })
+}
+
+/// Signs a ChatGPT provider out: ends its session at OpenAI, then removes
+/// its tokens from the keyring whether or not OpenAI confirmed. `Ok(false)`:
+/// it didn't, so the user can disconnect Kron in ChatGPT's settings.
+pub fn sign_out_of_chatgpt(provider: Uuid, cx: &App) -> Task<Result<bool, Error>> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(Err(Error::Runtime("no runtime".into())));
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        let stored = key(provider).map_err(Error::Keyring)?;
+        let credentials = stored.and_then(|stored| chatgpt::Credentials::from_stored(&stored).ok());
+        let revoked = match credentials {
+            Some(credentials) => {
+                let revoked = handle
+                    .spawn(async move { chatgpt::sign_out(provider, &credentials).await })
+                    .await;
+                match revoked {
+                    Ok(Ok(())) => true,
+                    Ok(Err(error)) => {
+                        eprintln!("chatgpt: couldn't end the session at OpenAI: {error}");
+                        false
+                    }
+                    Err(error) => {
+                        eprintln!("chatgpt: couldn't end the session at OpenAI: {error}");
+                        false
+                    }
+                }
+            }
+            // Nothing to end.
+            None => true,
+        };
+        set_key(provider, None).map_err(Error::Keyring)?;
+        Ok(revoked)
+    })
+}
+
 /// Asks the OpenAI-compatible server at `base_url` which models it serves,
 /// by id. Only such servers are asked: a vendor's models are rig's catalog's.
 pub fn served_models(
@@ -575,6 +734,9 @@ pub async fn call(
     mut request: CompletionRequest,
 ) -> Result<Reply, Error> {
     let provider = &assigned.provider;
+    if provider.is_chatgpt() {
+        return call_chatgpt(assigned, key, request).await;
+    }
     if provider.vendor == "deepseek" && provider.base_url.is_none() {
         // DeepSeek's JSON mode. Other vendors name theirs differently, and
         // compatible servers don't all have one: they're given the shape the
@@ -618,6 +780,73 @@ pub async fn call(
 
 /// The provider's `model`, called with `key`; `None` for a vendor rig
 /// doesn't know.
+/// `call`, on the user's ChatGPT plan. The plan takes no temperature or
+/// output cap and keeps nothing, and its replies are streamed. It's paid for
+/// by the plan, so there's no cost to record.
+async fn call_chatgpt(
+    assigned: &Assigned,
+    stored: String,
+    request: CompletionRequest,
+) -> Result<Reply, Error> {
+    let provider = assigned.provider.id;
+    let credentials = chatgpt::Credentials::from_stored(&stored).map_err(Error::ChatGpt)?;
+    let token = chatgpt::access_token(provider, credentials, |rotated| {
+        set_key(provider, Some(&rotated.stored()))
+    })
+    .await
+    .map_err(Error::ChatGpt)?;
+    let request = for_plan(request);
+    let model = plan_config(token)
+        .client()
+        .completion(&assigned.model)
+        .erase();
+    let streamed = async { model.stream(request)?.finish().await };
+    let response = tokio::time::timeout(TIMEOUT, streamed)
+        .await
+        .map_err(|_| Error::TimedOut)?
+        .map_err(|error| {
+            let code = match &error {
+                ProviderError::ProviderResponse(response)
+                | ProviderError::InvalidAuthentication(response) => {
+                    chatgpt::error_code(response.body.as_bytes())
+                }
+                _ => None,
+            };
+            match code {
+                Some(code) => Error::Plan(code),
+                None => Error::Provider(error),
+            }
+        })?;
+    Ok(Reply {
+        response,
+        cost: None,
+    })
+}
+
+/// The plan's endpoint, on rig's wire for ChatGPT plans: always streamed,
+/// nothing stored, and a reply that names no content type accepted, as the
+/// plan's don't. Only the wire: the endpoint, token and client are Kron's.
+fn plan_config(token: String) -> OpenAIConfig {
+    let mut config = OpenAIConfig::new(token)
+        .with_base_url(chatgpt::API)
+        .with_route(Route::Responses);
+    config.dialect.quirks.responses.contract = ResponsesContract::Codex;
+    config
+}
+
+/// The request as the plan takes it: no temperature or output cap, which it
+/// rejects, and nothing kept on OpenAI's side. Its models can't turn
+/// reasoning off, so the least they offer stands in.
+fn for_plan(mut request: CompletionRequest) -> CompletionRequest {
+    if request.options.reasoning == Some(Reasoning::Off) {
+        request.options.reasoning = Some(Reasoning::Effort(Effort::Low));
+    }
+    request.temperature = None;
+    request.max_tokens = None;
+    request.additional_params = Some(serde_json::json!({ "store": false }));
+    request
+}
+
 fn completion_model(provider: &Provider, key: String, model: &str) -> Option<DynModel<Completion>> {
     if let Some(base_url) = &provider.base_url {
         return Some(compatible(base_url, key).client().completion(model).erase());
@@ -652,6 +881,18 @@ fn assignment_of(
         .prepare_device("SELECT provider_id, model FROM llm_assignments WHERE task = ?1")?
         .query_row([task_key(task)], |row| Ok((row.get(0)?, row.get(1)?)))
         .optional()?)
+}
+
+/// What a run cost, as the user reads it: "under 1¢", "3¢", "$1.20".
+pub fn cost_label(cost: f64) -> String {
+    let cents = (cost * 100.).round();
+    if cents < 1. {
+        "under 1¢".to_owned()
+    } else if cents < 100. {
+        format!("{cents}¢")
+    } else {
+        format!("${:.2}", cents / 100.)
+    }
 }
 
 /// Records a call: what it took and cost, never what was sent or answered.
@@ -696,10 +937,74 @@ pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
     )
 }
 
+/// For the live tests: what `purpose` runs on in the development data, with
+/// its key from the keyring. `KRON_LIVE_VENDOR` picks another of its
+/// providers by vendor, and `KRON_LIVE_MODEL` another model, to compare them.
+#[cfg(test)]
+pub fn live_assigned(purpose: Purpose) -> Result<(Assigned, String), Box<dyn std::error::Error>> {
+    let device = dirs::data_dir()
+        .ok_or("no data directory")?
+        .join("kron-dev/device.sqlite");
+    let device = Connection::open_with_flags(device, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut assigned = assigned(&device, purpose)
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or("no provider set up in the development data")?;
+    if let Ok(vendor) = std::env::var("KRON_LIVE_VENDOR") {
+        assigned.provider = providers(&device)
+            .map_err(|error| format!("{error:?}"))?
+            .into_iter()
+            .find(|provider| provider.vendor == vendor)
+            .ok_or_else(|| format!("no {vendor} provider in the development data"))?;
+    }
+    if let Ok(model) = std::env::var("KRON_LIVE_MODEL") {
+        assigned.model = model;
+    }
+    let key = key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
+    println!("== on {} {}", assigned.provider.vendor, assigned.model);
+    Ok((assigned, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::database::Writer;
+
+    #[test]
+    fn the_plan_is_sent_no_temperature_or_cap_and_keeps_nothing() {
+        let request = for_plan(crate::model::extraction::request("A résumé."));
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(
+            request.options.reasoning,
+            Some(Reasoning::Effort(Effort::Low)),
+            "gpt-6.2-sol refuses effort none"
+        );
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({ "store": false }))
+        );
+    }
+
+    #[test]
+    fn a_used_up_plan_is_told_apart_and_points_to_chatgpts_settings() {
+        let limit = Error::Plan(USAGE_LIMIT.to_owned());
+        assert!(limit.is_usage_limit());
+        assert!(limit.to_string().contains("ChatGPT settings"));
+        assert!(!Error::Plan("subscription_sharing_user_not_eligible".to_owned()).is_usage_limit());
+        assert!(!Error::TimedOut.is_usage_limit());
+    }
+
+    #[test]
+    fn the_plan_is_called_at_openais_api_on_the_wire_that_reads_its_replies() {
+        let config = plan_config("token".to_owned());
+        assert_eq!(config.base_url, chatgpt::API);
+        assert_eq!(config.route, Some(Route::Responses));
+        assert_eq!(
+            config.dialect.quirks.responses.contract,
+            ResponsesContract::Codex,
+            "the plan's streamed replies name no content type"
+        );
+    }
 
     fn deepseek(write: &mut Write) -> Result<Uuid, database::Error> {
         add_provider(write, "DeepSeek", "deepseek", None, "deepseek-flash")
@@ -965,5 +1270,14 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn costs_read_in_cents_under_a_dollar() {
+        assert_eq!(cost_label(0.0004), "under 1¢");
+        assert_eq!(cost_label(0.012), "1¢");
+        assert_eq!(cost_label(0.237), "24¢");
+        assert_eq!(cost_label(0.996), "$1.00");
+        assert_eq!(cost_label(1.2), "$1.20");
     }
 }

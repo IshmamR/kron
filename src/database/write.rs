@@ -387,9 +387,8 @@ impl Write<'_> {
         Ok(())
     }
 
-    /// Runs `sql` as written, for the development sample. Like
-    /// `erase_everything`, not a sync change: nothing goes in the outbox.
-    #[cfg(any(debug_assertions, test))]
+    /// Runs `sql` as written, for the sample. Like `erase_everything`, not a
+    /// sync change: nothing goes in the outbox.
     pub fn seed(&mut self, sql: &str) -> Result<(), Error> {
         // Checked at commit, so the tables can be written in any order.
         self.transaction
@@ -399,7 +398,6 @@ impl Write<'_> {
         Ok(())
     }
 
-    #[cfg(any(debug_assertions, test))]
     fn touch_every_table(&mut self) {
         // An empty key matches no row: views that show any of a table hear
         // of it through `Changed::touches`.

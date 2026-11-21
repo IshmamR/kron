@@ -1406,17 +1406,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_extraction() -> Result<(), Box<dyn std::error::Error>> {
-        let device = dirs::data_dir()
-            .ok_or("no data directory")?
-            .join("kron-dev/device.sqlite");
-        let device = rusqlite::Connection::open_with_flags(
-            device,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::ExtractFacts)
-            .map_err(|error| format!("{error:?}"))?
-            .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::ExtractFacts)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;

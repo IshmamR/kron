@@ -1,5 +1,8 @@
 mod ai_settings;
+mod ai_setup;
 mod application_view;
+mod continue_with_chatgpt;
+mod example;
 mod fact_list;
 mod facts_page;
 mod import_page;
@@ -45,7 +48,7 @@ use crate::model::settings::{self, DeviceSettings, LastPage};
 use crate::model::{Application, DocumentId, FactId, JobId, LineId};
 use crate::window;
 use facts_page::FactsPage;
-use import_page::ImportPage;
+use import_page::{FactsFound, ImportPage};
 use job_form::{JobForm, JobFormEvent};
 use job_view::{JobView, JobViewEvent};
 use onboarding::{Onboarding, OnboardingEvent};
@@ -293,6 +296,12 @@ impl Workspace {
                             this.onboarding = None;
                             this.open_resumes(window, cx);
                         }
+                        OnboardingEvent::FirstJob(job) => {
+                            this.onboarding = None;
+                            this.open_job(*job, window, cx);
+                            this.job_view
+                                .update(cx, |job_view, cx| job_view.write_first_resume(window, cx));
+                        }
                     },
                 ));
                 Some(onboarding)
@@ -536,6 +545,9 @@ impl Workspace {
     }
 
     fn open_job(&mut self, job: JobId, window: &mut Window, cx: &mut Context<Self>) {
+        if window.root::<Root>().flatten().is_some() {
+            window.remove_notification::<FactsFound>(cx);
+        }
         self.settings_page = None;
         self.page = Page::Job;
         self.job_view
@@ -1012,7 +1024,7 @@ mod tests {
         open.cx.run_until_parked();
         assert!(open.read(|workspace, _| workspace.settings_page.is_some()));
         open.cx
-            .update(|window, cx| window.click("close-settings", cx));
+            .update(|window, cx| window.click("leave-settings", cx));
         open.cx.run_until_parked();
         assert_eq!(
             open.read(|workspace, cx| (
@@ -1032,6 +1044,54 @@ mod tests {
             (true, Page::Facts),
             "Esc closes it too"
         );
+    }
+
+    #[test]
+    fn opening_a_job_closes_the_facts_found_notification() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        let mut workspace = None;
+        // Notifications are drawn by the kit's Root, as in the app.
+        let (_, cx) = app.add_window_view(|window, cx| {
+            let view = cx.new(|cx| Workspace::new(database.clone(), window, cx));
+            workspace = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let Some(workspace) = workspace else {
+            panic!("the window built no workspace");
+        };
+        cx.run_until_parked();
+        let document = DocumentId(uuid::Uuid::now_v7());
+        cx.update(|window, cx| {
+            window.push_notification(
+                import_page::facts_found("Found 3 facts.".to_owned(), document),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| assert!(window.try_find("show-facts").is_some()));
+
+        let job = database.read_with(cx, |database, _| {
+            database.connection().query_row(
+                "SELECT id FROM jobs WHERE company = 'Ledgerly'",
+                [],
+                |row| row.get(0),
+            )
+        });
+        let job = match job {
+            Ok(job) => JobId(job),
+            Err(error) => panic!("no Ledgerly job: {error}"),
+        };
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.open_job(job, window, cx)
+        });
+        // Past its exit animation.
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, _| assert!(window.try_find("show-facts").is_none()));
     }
 
     #[test]

@@ -21,6 +21,8 @@ const KRON_DB: &str = "kron.sqlite";
 const DEVICE_DB: &str = "device.sqlite";
 /// Imported files and templates, by hash, in the data directory.
 const FILES_DIRECTORY: &str = "files";
+/// The example's databases, inside the user's data directory.
+const EXAMPLE_DIRECTORY: &str = "example";
 /// The folder in the platform's data directory. Debug builds use their own,
 /// so development never touches real data and resets by deleting it.
 #[cfg(not(debug_assertions))]
@@ -32,6 +34,19 @@ const DATA_DIRECTORY: &str = "kron-dev";
 /// writer thread.
 pub fn open(cx: &mut App) -> Result<Entity<Database>, Error> {
     let opened = Opened::open(&data_directory()?)?;
+    Ok(cx.new(|cx| Database::new(opened, cx)))
+}
+
+/// Opens databases for the example, empty, in `directory`
+/// (`Database::example_directory`): nothing done in the example reaches the
+/// user's data. What an example opened before left there is removed first.
+pub fn open_example(directory: PathBuf, cx: &mut App) -> Result<Entity<Database>, Error> {
+    match std::fs::remove_dir_all(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::Directory(directory, error)),
+    }
+    let opened = Opened::open(&directory)?;
     Ok(cx.new(|cx| Database::new(opened, cx)))
 }
 
@@ -51,6 +66,8 @@ pub struct Database {
     /// device.sqlite, read-only too.
     device_reader: Connection,
     device_id: Uuid,
+    /// Where both databases and the files are.
+    directory: PathBuf,
     writer: WriterThread,
     _changes: Task<()>,
     _quit: Subscription,
@@ -66,6 +83,7 @@ impl Database {
             reader: opened.reader,
             device_reader: opened.device_reader,
             device_id: opened.device_id,
+            directory: opened.directory,
             writer,
             _changes: cx.spawn(async move |this, cx| {
                 while let Some(event) = changed.next().await {
@@ -90,6 +108,12 @@ impl Database {
     /// For queries of this device's tables, like `device_settings`.
     pub fn device_connection(&self) -> &Connection {
         &self.device_reader
+    }
+
+    /// Where `open_example` opens the example's databases: a folder of their
+    /// own inside this one's.
+    pub fn example_directory(&self) -> PathBuf {
+        self.directory.join(EXAMPLE_DIRECTORY)
     }
 
     pub fn device_id(&self) -> Uuid {
@@ -235,6 +259,7 @@ struct Opened {
     device_reader: Connection,
     writer: Writer,
     device_id: Uuid,
+    directory: PathBuf,
 }
 
 impl Opened {
@@ -258,6 +283,7 @@ impl Opened {
             device_reader: open_connection(&device_path, read_only)?,
             writer: Writer::new(kron, device, Some(directory.join(FILES_DIRECTORY)))?,
             device_id,
+            directory: directory.to_path_buf(),
         })
     }
 }

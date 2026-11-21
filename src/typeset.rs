@@ -1180,6 +1180,66 @@ mod tests {
     }
 
     #[test]
+    fn skills_with_no_label_start_where_the_rest_of_the_page_does() {
+        let line = |text: &str| Line {
+            id: LineId::new(),
+            generated: text.to_owned(),
+            text: text.to_owned(),
+            cites: Vec::new(),
+        };
+        let title = line("Backend Engineer");
+        let items = line("Go, PostgreSQL, Temporal");
+        let typesetter = Typesetter::new();
+        // The sidebar template sets skills in its strip, away from entries.
+        for template in TEMPLATES
+            .iter()
+            .filter(|template| template.key != "sidebar")
+        {
+            let resume = Resume {
+                template: template.key,
+                sections: vec![
+                    Section {
+                        kind: SectionKind::Experience,
+                        title: "Experience".to_owned(),
+                        blocks: vec![Block::Entry(Box::new(EntryBlock {
+                            title: title.clone(),
+                            organization: None,
+                            dates: None,
+                            location: None,
+                            stack: None,
+                            bullets: Vec::new(),
+                        }))],
+                    },
+                    Section {
+                        kind: SectionKind::Skills,
+                        title: "Skills".to_owned(),
+                        blocks: vec![Block::Skills {
+                            label: None,
+                            items: items.clone(),
+                        }],
+                    },
+                ],
+            };
+            let typeset = typeset(&typesetter, &resume);
+            let left = |id: LineId| {
+                typeset
+                    .layout
+                    .boxes_of(id)
+                    .next()
+                    .map(|line_box| line_box.left)
+            };
+            let (Some(title_left), Some(items_left)) = (left(title.id), left(items.id)) else {
+                panic!("in {:?}, a line wasn't laid out", template.key);
+            };
+            assert!(
+                (items_left - title_left).abs() < 1.0,
+                "in {:?}, skills start at {items_left}, entries at {title_left}",
+                template.key
+            );
+        }
+    }
+
+    #[test]
     fn an_unknown_template_falls_back_to_the_default() {
         assert_eq!(template("gone").key, DEFAULT_TEMPLATE);
     }

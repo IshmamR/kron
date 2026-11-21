@@ -3,7 +3,6 @@ pub mod commands;
 pub mod extraction;
 pub mod generation;
 pub mod redaction;
-#[cfg(any(debug_assertions, test))]
 pub mod sample;
 mod section;
 pub mod settings;

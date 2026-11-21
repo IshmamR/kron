@@ -140,6 +140,20 @@ pub fn set_palette(write: &mut Write, palette: Palette) -> Result<(), Error> {
     write.set(column, 1, &palette.stored())
 }
 
+/// Whether the user knows a résumé's lines open the facts they came from.
+pub fn resume_lines_explained(connection: &Connection) -> Result<bool, Error> {
+    Ok(
+        connection.query_row("SELECT resume_lines_explained FROM settings", [], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
+/// Records that the user knows.
+pub fn set_resume_lines_explained(write: &mut Write) -> Result<(), Error> {
+    write.set(settings::RESUME_LINES_EXPLAINED, 1, &true)
+}
+
 /// The made-up name sent to models in place of the user's.
 pub fn stand_in_name(connection: &Connection) -> Result<String, Error> {
     Ok(connection.query_row("SELECT stand_in_name FROM settings", [], |row| row.get(0))?)

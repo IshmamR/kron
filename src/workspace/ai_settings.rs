@@ -16,9 +16,11 @@ use gpui_kit::{
 };
 use uuid::Uuid;
 
+use super::continue_with_chatgpt::ContinueWithChatGpt;
 use super::parts::text_field;
 use crate::database::schema::{LlmAssignments, LlmProviders};
 use crate::database::{Changed, Database};
+use crate::llm::chatgpt::{self, Registration};
 use crate::llm::{self, Provider, Purpose, Vendor};
 
 /// Wide enough for a key to show it's all there.
@@ -61,6 +63,12 @@ pub struct AiSettings {
     /// By address, so a list fetched while adding a server isn't fetched
     /// again when the page rereads its providers.
     served: HashMap<String, Vec<String>>,
+    /// The models each ChatGPT provider's account can use, as (slug, name).
+    plan_models: HashMap<Uuid, Vec<(String, String)>>,
+    /// Signing in with ChatGPT, and what came of it.
+    signing_in: SigningIn,
+    /// Waiting for the browser; dropped, it stops.
+    sign_in: Task<()>,
     /// One per entry of `TASKS`.
     pickers: Vec<Entity<SelectState<Models>>>,
     /// The vendor picked in the dialog to add.
@@ -147,6 +155,9 @@ impl AiSettings {
             providers: Vec::new(),
             keys: HashMap::new(),
             served: HashMap::new(),
+            plan_models: HashMap::new(),
+            signing_in: SigningIn::Idle,
+            sign_in: Task::ready(()),
             pickers,
             picked: None,
             confirming: None,
@@ -173,14 +184,51 @@ impl AiSettings {
     /// add a server.
     pub fn render_add(&mut self, cx: &mut Context<Self>) -> Div {
         let all_added = self.vendors_left().next().is_none();
-        h_flex()
+        let signed_in = self.providers.iter().any(Provider::is_chatgpt);
+        let waiting = self.signing_in == SigningIn::Waiting;
+        let theme = cx.theme();
+        let status = match &self.signing_in {
+            SigningIn::Idle => None,
+            SigningIn::Waiting => Some((
+                SharedString::from("Sign in in your browser, then come back here."),
+                theme.muted_foreground,
+            )),
+            SigningIn::Said(message) => Some((message.clone(), theme.muted_foreground)),
+            SigningIn::Failed(message) => Some((message.clone(), theme.danger)),
+        };
+        let buttons = h_flex()
             .flex_wrap()
             .gap_2()
+            .when(!signed_in, |this| {
+                this.child(
+                    ContinueWithChatGpt::new("continue-with-chatgpt")
+                        .small()
+                        .label(match waiting {
+                            true => "Waiting for the browser…",
+                            false => "Continue with ChatGPT",
+                        })
+                        .disabled(waiting)
+                        .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
+                )
+            })
+            .when(waiting, |this| {
+                this.child(
+                    Button::new("cancel-sign-in")
+                        .label("Cancel")
+                        .ghost()
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.sign_in = Task::ready(());
+                            this.signing_in = SigningIn::Idle;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Button::new("add-provider")
                     .icon(IconName::Plus)
                     .label("Add provider")
-                    .primary()
+                    .outline()
                     .small()
                     .disabled(all_added)
                     .when(all_added, |this| this.tooltip("Every provider is added."))
@@ -197,7 +245,33 @@ impl AiSettings {
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_editor(Editor::Server(None), window, cx)
                     })),
-            )
+            );
+        v_flex()
+            .gap_2()
+            .child(buttons)
+            .when_some(status, |this, (text, color)| {
+                this.child(div().text_xs().text_color(color).child(text))
+            })
+    }
+
+    /// Signs in with ChatGPT in the browser and adds it as a provider.
+    fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.signing_in = SigningIn::Waiting;
+        let database = self.database.clone();
+        self.sign_in = cx.spawn_in(window, async move |this, cx| {
+            let signed_in = sign_in_with_chatgpt(&database, cx).await;
+            let updated = this.update_in(cx, |this, window, cx| {
+                match signed_in {
+                    Ok(added) => this.signed_in(added, window, cx),
+                    Err(problem) => this.signing_in = SigningIn::Failed(problem.into()),
+                }
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ai settings: {error}");
+            }
+        });
+        cx.notify();
     }
 
     /// A saved provider's row: whether its key is saved, and buttons to
@@ -227,6 +301,9 @@ impl AiSettings {
         let id = provider.id;
         if self.confirming == Some(id) {
             return self.render_confirm_remove(&provider, cx);
+        }
+        if provider.is_chatgpt() {
+            return self.render_chatgpt(id, status.clone(), cx);
         }
         h_flex()
             .flex_wrap()
@@ -268,13 +345,80 @@ impl AiSettings {
             )
     }
 
+    /// A sign-in added its provider. The row was read from the keyring as
+    /// soon as the provider was saved, before its tokens were, so it's marked
+    /// signed in here, and that read is dropped before it can say otherwise.
+    fn signed_in(&mut self, added: PlanProvider, window: &mut Window, cx: &mut Context<Self>) {
+        self.signing_in = SigningIn::Idle;
+        self.reading = Task::ready(());
+        self.keys.insert(added.provider, KeyStatus::Saved);
+        self.plan_models.insert(added.provider, added.models);
+        self.refresh_pickers(window, cx);
+        if added.first {
+            confirm_plan_use(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// A ChatGPT provider's row: it runs on the user's plan, with a link to
+    /// what apps have used of it, and signing out in place of removing.
+    fn render_chatgpt(&mut self, id: Uuid, status: KeyStatus, cx: &mut Context<Self>) -> Div {
+        let theme = cx.theme();
+        let working = matches!(status, KeyStatus::Checking | KeyStatus::Working);
+        let (text, color) = match status {
+            KeyStatus::Checking => ("Checking the keyring…".into(), theme.muted_foreground),
+            KeyStatus::Working => ("Signing out…".into(), theme.muted_foreground),
+            // OpenAI's wording, beside the models it applies to.
+            KeyStatus::Saved => ("Using ChatGPT plan".into(), theme.muted_foreground),
+            KeyStatus::Missing => (
+                SharedString::from(
+                    "Not signed in. Sign out, then continue with ChatGPT to sign in again.",
+                ),
+                theme.danger,
+            ),
+            KeyStatus::Failed(message) => (message, theme.danger),
+        };
+        h_flex()
+            .flex_wrap()
+            .justify_end()
+            .gap_3()
+            .child(div().text_xs().text_color(color).child(text))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(SharedString::from(format!("usage-{id}")))
+                            .label("Manage usage")
+                            .outline()
+                            .small()
+                            .on_click(|_, _, cx| cx.open_url(chatgpt::USAGE_SETTINGS)),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("remove-{id}")))
+                            .label("Sign out")
+                            .ghost()
+                            .small()
+                            .disabled(working)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.confirming = Some(id);
+                                cx.notify();
+                            })),
+                    ),
+            )
+    }
+
     /// Asked before removing, in the row: the key goes from the keyring
     /// for good, and can't be shown to copy first.
     fn render_confirm_remove(&mut self, provider: &Provider, cx: &mut Context<Self>) -> Div {
         let id = provider.id;
-        let question = match provider.is_compatible() {
-            true => format!("Remove {}?", provider.name),
-            false => format!("Remove {} and its key?", provider.name),
+        let question = match (provider.is_chatgpt(), provider.is_compatible()) {
+            (true, _) => "Sign out of ChatGPT?".to_owned(),
+            (false, true) => format!("Remove {}?", provider.name),
+            (false, false) => format!("Remove {} and its key?", provider.name),
+        };
+        let confirm = match provider.is_chatgpt() {
+            true => "Sign out",
+            false => "Remove",
         };
         h_flex()
             .flex_wrap()
@@ -296,7 +440,7 @@ impl AiSettings {
                     )
                     .child(
                         Button::new(SharedString::from(format!("confirm-remove-{id}")))
-                            .label("Remove")
+                            .label(confirm)
                             // The palette's danger is a text color checked
                             // against the page; the kit's danger button tints
                             // its fill red too, which loses the contrast.
@@ -373,7 +517,12 @@ impl AiSettings {
             })
             .collect();
         for (picker, choice) in self.pickers.iter().zip(&assigned) {
-            let models = Models::new(models(&self.providers, &self.served, &assigned));
+            let models = Models::new(models(
+                &self.providers,
+                &self.served,
+                &self.plan_models,
+                &assigned,
+            ));
             picker.update(cx, |picker, cx| {
                 picker.set_items(models, window, cx);
                 match choice {
@@ -411,8 +560,17 @@ impl AiSettings {
                 keys.insert(id, (status, key));
             }
             let mut listings = Vec::new();
+            let mut plan_listings = Vec::new();
             let updated = this.update(cx, |this, cx| {
                 for provider in &providers {
+                    if provider.is_chatgpt() {
+                        let signed_in =
+                            matches!(keys.get(&provider.id), Some((KeyStatus::Saved, _)));
+                        if signed_in && !this.plan_models.contains_key(&provider.id) {
+                            plan_listings.push((provider.id, llm::chatgpt_models(provider.id, cx)));
+                        }
+                        continue;
+                    }
                     let Some(base_url) = provider.base_url.clone() else {
                         continue;
                     };
@@ -431,6 +589,24 @@ impl AiSettings {
             if let Err(error) = updated {
                 eprintln!("ai settings: {error}");
                 return;
+            }
+            for (provider, listing) in plan_listings {
+                let listed = listing.await;
+                if let Err(error) = this.update_in(cx, |this, window, cx| {
+                    match listed {
+                        Ok(models) => {
+                            this.plan_models.insert(provider, models);
+                            this.refresh_pickers(window, cx);
+                        }
+                        Err(error) => {
+                            this.keys
+                                .insert(provider, KeyStatus::Failed(error.to_string().into()));
+                        }
+                    }
+                    cx.notify();
+                }) {
+                    eprintln!("ai settings: {error}");
+                }
             }
             for (base_url, listing) in listings {
                 let models = match listing.await {
@@ -807,14 +983,44 @@ impl AiSettings {
     }
 
     /// Removes the provider's key, then the provider: the other way, a key
-    /// the keyring kept would be left with nothing naming it.
+    /// the keyring kept would be left with nothing naming it. A ChatGPT
+    /// provider's session is ended at OpenAI first.
     fn remove(&mut self, provider: Uuid, cx: &mut Context<Self>) {
         self.keys.insert(provider, KeyStatus::Working);
-        let removed = cx.background_spawn(async move { llm::set_key(provider, None) });
+        let chatgpt = self
+            .providers
+            .iter()
+            .any(|saved| saved.id == provider && saved.is_chatgpt());
+        let removed: Task<Result<bool, String>> = match chatgpt {
+            true => {
+                let signed_out = llm::sign_out_of_chatgpt(provider, cx);
+                cx.background_spawn(
+                    async move { signed_out.await.map_err(|error| error.to_string()) },
+                )
+            }
+            false => cx.background_spawn(async move {
+                llm::set_key(provider, None)
+                    .map(|()| true)
+                    .map_err(|error| format!("Couldn't remove the key from the keyring: {error}."))
+            }),
+        };
         let database = self.database.clone();
         self.task = cx.spawn(async move |this, cx| {
             let failed = match removed.await {
-                Ok(()) => {
+                Ok(confirmed) => {
+                    if !confirmed
+                        && let Err(error) = this.update(cx, |this, cx| {
+                            this.signing_in = SigningIn::Said(
+                                "Signed out of Kron, but OpenAI didn't confirm it. To stop \
+                                 Kron using your plan, disconnect it in ChatGPT's settings, \
+                                 under Security and login."
+                                    .into(),
+                            );
+                            cx.notify();
+                        })
+                    {
+                        eprintln!("ai settings: {error}");
+                    }
                     let removed = cx.update(|cx| {
                         database
                             .read(cx)
@@ -825,9 +1031,7 @@ impl AiSettings {
                         .err()
                         .map(|error| format!("Couldn't remove it: {error}."))
                 }
-                Err(error) => Some(format!(
-                    "Couldn't remove the key from the keyring: {error}."
-                )),
+                Err(problem) => Some(problem),
             };
             if let Some(message) = failed
                 && let Err(error) = this.update(cx, |this, cx| {
@@ -861,6 +1065,15 @@ enum KeyStatus {
     Saved,
     Missing,
     Working,
+    Failed(SharedString),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SigningIn {
+    Idle,
+    Waiting,
+    /// Something to know, after signing in or out.
+    Said(SharedString),
     Failed(SharedString),
 }
 
@@ -909,12 +1122,16 @@ impl SearchableListItem for ModelItem {
 fn models(
     providers: &[Provider],
     served: &HashMap<String, Vec<String>>,
+    plan_models: &HashMap<Uuid, Vec<(String, String)>>,
     assigned: &[Option<(Uuid, String)>],
 ) -> Vec<SearchableGroup<ModelItem>> {
     providers
         .iter()
         .map(|provider| {
             let mut listed: Vec<(String, String)> = match provider.is_compatible() {
+                _ if provider.is_chatgpt() => {
+                    plan_models.get(&provider.id).cloned().unwrap_or_default()
+                }
                 true => provider
                     .base_url
                     .as_ref()
@@ -946,10 +1163,127 @@ fn models(
         .collect()
 }
 
+/// A ChatGPT sign-in, added as a provider.
+pub(super) struct PlanProvider {
+    pub provider: Uuid,
+    /// The account's models, as (slug, display name).
+    pub models: Vec<(String, String)>,
+    /// The first sign-in on this computer, which OpenAI asks be followed by
+    /// saying the plan is in use.
+    pub first: bool,
+}
+
+/// Signs in with ChatGPT in the browser, then adds it as a provider running
+/// every task on the first model the account lists, unless a provider is set
+/// already.
+pub(super) async fn sign_in_with_chatgpt(
+    database: &Entity<Database>,
+    cx: &mut gpui_kit::AsyncWindowContext,
+) -> Result<PlanProvider, String> {
+    let mut first = false;
+    let started = cx.update(|_, cx| {
+        let registration = Registration::read(database.read(cx).device_connection())
+            .map_err(|error| format!("Couldn't read this computer's sign-in: {error}."))?;
+        first = registration.client_id.is_none();
+        let (url, finishing) = llm::sign_in_with_chatgpt(&registration, cx)?;
+        cx.open_url(&url);
+        Ok::<_, String>(finishing)
+    });
+    let finishing = started.map_err(|error| error.to_string())??;
+    let llm::ChatGptSignIn { signed_in, models } =
+        finishing.await.map_err(|error| error.to_string())?;
+    let (host_id, client_id) = (
+        signed_in.host_id.clone(),
+        signed_in.credentials.client_id.clone(),
+    );
+    let registered = cx.update(|_, cx| {
+        database.read(cx).write(cx, move |write| {
+            Registration::save(write, &host_id, &client_id)
+        })
+    });
+    if let Err(error) = registered.map_err(|error| error.to_string())?.await {
+        eprintln!("ai settings: couldn't keep this computer's ChatGPT registration: {error}");
+    }
+    if !signed_in.plan {
+        return Err(
+            "You signed in, but didn't let Kron use your ChatGPT plan. Continue with ChatGPT \
+             again and allow it, or add a provider with an API key."
+                .into(),
+        );
+    }
+    let Some((model, _)) = models.first().cloned() else {
+        return Err("Your ChatGPT account has no models Kron can use.".into());
+    };
+    // OpenAI asks that the account in use is shown.
+    let name = match &signed_in.email {
+        Some(email) => format!("ChatGPT ({email})"),
+        None => "ChatGPT".to_owned(),
+    };
+    let added = cx.update(|_, cx| {
+        database.read(cx).write(cx, move |write| {
+            llm::add_provider(write, &name, chatgpt::VENDOR, None, &model)
+        })
+    });
+    let provider = added
+        .map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| format!("Couldn't save the provider: {error}."))?;
+    let stored = signed_in.credentials.stored();
+    save_key(provider, stored, true, database, cx).await?;
+    let remembered = cx.update(|_, cx| llm::remember_chatgpt(provider, signed_in, cx));
+    if let Ok(remembered) = remembered {
+        remembered.await;
+    }
+    Ok(PlanProvider {
+        provider,
+        models,
+        first,
+    })
+}
+
+/// Says the plan is in use, after the first sign-in on this computer, as
+/// OpenAI's guidelines for Sign in with ChatGPT ask.
+pub(super) fn confirm_plan_use(window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, |dialog, _, _| {
+        dialog
+            .title("You're using your ChatGPT plan")
+            .w(px(420.))
+            .content(|content, _, _| {
+                content.child(
+                    v_flex()
+                        .gap_4()
+                        .child(div().text_sm().child(
+                            "Kron's AI requests use your ChatGPT plan. Manage usage in your \
+                             ChatGPT settings.",
+                        ))
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("plan-usage")
+                                        .label("Manage usage")
+                                        .outline()
+                                        .small()
+                                        .on_click(|_, _, cx| cx.open_url(chatgpt::USAGE_SETTINGS)),
+                                )
+                                .child(
+                                    Button::new("got-it")
+                                        .label("Got it")
+                                        .primary()
+                                        .small()
+                                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                                ),
+                        ),
+                )
+            })
+    });
+}
+
 /// Saves `key` for the provider. If the keyring refuses it, a provider
 /// just `added` is taken back out, so none is left without the key it was
 /// added with.
-async fn save_key(
+pub(super) async fn save_key(
     provider: Uuid,
     key: String,
     added: bool,
@@ -1260,6 +1594,111 @@ mod tests {
     }
 
     #[test]
+    fn a_chatgpt_sign_in_offers_usage_and_sign_out_and_no_second_sign_in() {
+        let mut app = TestAppContext::single();
+        let (settings, mut cx, _directory) = open(&mut app);
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            let button = window.find("continue-with-chatgpt");
+            assert!(button.visible(), "offered first");
+            assert_eq!(
+                button.bounds().size.height,
+                window.find("add-provider").bounds().size.height,
+                "as big as the buttons beside it"
+            );
+        });
+        let id = Uuid::now_v7();
+        settings.update(&mut cx, |settings, cx| {
+            settings.providers = vec![Provider {
+                id,
+                name: "ChatGPT (user@example.com)".to_owned(),
+                vendor: chatgpt::VENDOR.to_owned(),
+                format: None,
+                base_url: None,
+            }];
+            settings.keys.insert(id, KeyStatus::Saved);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window.try_find("continue-with-chatgpt").is_none(),
+                "one account at a time"
+            );
+            assert!(
+                window
+                    .find(SharedString::from(format!("usage-{id}")))
+                    .visible()
+            );
+            assert!(
+                window
+                    .try_find(SharedString::from(format!("key-{id}")))
+                    .is_none()
+            );
+            window.click(SharedString::from(format!("remove-{id}")), cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            assert!(
+                window
+                    .find(SharedString::from(format!("confirm-remove-{id}")))
+                    .visible()
+            );
+        });
+    }
+
+    #[test]
+    fn a_finished_sign_in_shows_signed_in_though_the_keyring_was_read_before_its_tokens() {
+        let mut app = TestAppContext::single();
+        let (settings, mut cx, _directory) = open(&mut app);
+        let id = Uuid::now_v7();
+        settings.update_in(&mut cx, |settings, window, cx| {
+            settings.providers = vec![Provider {
+                id,
+                name: "ChatGPT".to_owned(),
+                vendor: chatgpt::VENDOR.to_owned(),
+                format: None,
+                base_url: None,
+            }];
+            // As the read made when the provider was saved found it.
+            settings.keys.insert(id, KeyStatus::Missing);
+            settings.signed_in(
+                PlanProvider {
+                    provider: id,
+                    models: vec![("gpt-plan".to_owned(), "GPT Plan".to_owned())],
+                    first: false,
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let status = settings.read_with(&cx, |settings, _| settings.keys.get(&id).cloned());
+        assert_eq!(status, Some(KeyStatus::Saved));
+    }
+
+    #[test]
+    fn a_chatgpt_provider_offers_the_models_its_account_listed() {
+        let id = Uuid::now_v7();
+        let provider = Provider {
+            id,
+            name: "ChatGPT".to_owned(),
+            vendor: chatgpt::VENDOR.to_owned(),
+            format: None,
+            base_url: None,
+        };
+        let listed = HashMap::from([(id, vec![("gpt-plan".to_owned(), "GPT Plan".to_owned())])]);
+        let groups = models(&[provider], &HashMap::new(), &listed, &[]);
+        let names: Vec<SharedString> = groups
+            .iter()
+            .flat_map(|group| group.items.iter().map(|item| item.name.clone()))
+            .collect();
+        assert_eq!(names, vec![SharedString::from("GPT Plan")]);
+    }
+
+    #[test]
     fn the_pickers_offer_each_providers_models_and_what_tasks_are_set_to() {
         let vendor = Provider {
             id: Uuid::now_v7(),
@@ -1281,7 +1720,12 @@ mod tests {
         )]);
         // A model the catalog dropped since it was picked.
         let assigned = [Some((vendor.id, "deepseek-chat".to_owned())), None, None];
-        let groups = models(&[vendor.clone(), server.clone()], &served, &assigned);
+        let groups = models(
+            &[vendor.clone(), server.clone()],
+            &served,
+            &HashMap::new(),
+            &assigned,
+        );
         let listed = |group: &SearchableGroup<ModelItem>| {
             group
                 .items
