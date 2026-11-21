@@ -267,12 +267,6 @@ fn parse_bf_char<F>(
         let dst = scanner.parse_string().ok()?;
         dst.decode_into(&mut ctx.buf).ok()?;
 
-        // Kron: an entry that maps to nothing (`<65> <>`, as Figma writes
-        // them) is skipped, not taken to spoil the whole map.
-        if ctx.buf.is_empty() {
-            continue;
-        }
-
         entries.push(BfRange {
             range: Range {
                 start: code,
@@ -304,11 +298,6 @@ fn parse_bf_range<F>(
             Object::String(s) => {
                 s.decode_into(&mut ctx.buf).ok()?;
 
-                // Kron: as in `parse_bf_char`.
-                if ctx.buf.is_empty() {
-                    continue;
-                }
-
                 entries.push(BfRange {
                     range: Range { start, end },
                     dst_base: decode_be(&ctx.buf)?,
@@ -320,11 +309,6 @@ fn parse_bf_range<F>(
                 for code in start..=end {
                     let s = array_scanner.parse_string().ok()?;
                     s.decode_into(&mut ctx.buf).ok()?;
-
-                    // Kron: as in `parse_bf_char`.
-                    if ctx.buf.is_empty() {
-                        continue;
-                    }
 
                     entries.push(BfRange {
                         range: Range {
@@ -342,8 +326,10 @@ fn parse_bf_range<F>(
 
 /// Convert the buffer into native-endian u16, so that we can use `String::from_utf16`.
 fn decode_be(bytes: &[u8]) -> Option<Vec<u16>> {
+    // Kron: an entry that maps to nothing (`<65> <>`, as Figma writes them)
+    // maps to an empty string; it used to spoil the whole map.
     if bytes.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
 
     let mut out = Vec::with_capacity(bytes.len().div_ceil(2));

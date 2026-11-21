@@ -473,6 +473,10 @@ impl CMap {
             let offset = u16::try_from(code - entry.range.start).ok()?;
 
             fn decode_utf16(units: &[u16]) -> Option<BfString> {
+                // Kron: a code mapped to nothing reads as nothing.
+                if units.is_empty() {
+                    return Some(BfString::String(String::new()));
+                }
                 let mut iter = core::char::decode_utf16(units.iter().copied());
                 let first = iter.next()?.ok()?;
 

@@ -206,6 +206,11 @@ impl<'a> Device<'a> for Drawn {
             Some(BfString::String(text)) => Some(text),
             None => None,
         };
+        // Mapped to nothing, as Figma maps glyphs that draw nothing: neither
+        // a letter lost nor a space.
+        if text.as_deref() == Some("") {
+            return;
+        }
         let has_text = text.is_some();
         // A glyph without text of its own, as Chrome draws the en dash it
         // sets between digits, may have it in the span it's drawn in.
@@ -660,8 +665,8 @@ mod tests {
 
     /// A PDF whose pages each draw their content, with their annotations.
     /// They can draw in Helvetica as `/F1`, which the PDF names but doesn't
-    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`, whose
-    /// map to Unicode also maps "c" to nothing, as Figma's do; and
+    /// embed; in a Type 3 font that draws blank "a" and "b" as `/F3`, with
+    /// a "c" that its map to Unicode maps to nothing, as Figma's do; and
     /// in one that draws them without saying what they are as `/F4`; and a
     /// grey image as `/Image`.
     fn pdf(pages: &[(&str, &str)]) -> Vec<u8> {
@@ -687,9 +692,9 @@ mod tests {
              /BitsPerComponent 8 /Length 1 >>\nstream\n0\nendstream"
                 .to_owned(),
             "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 500 700] \
-             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 6 0 R /b 6 0 R >> \
-             /Encoding << /Type /Encoding /Differences [97 /a /b] >> \
-             /FirstChar 97 /LastChar 98 /Widths [500 500] /ToUnicode 7 0 R >>"
+             /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs << /a 6 0 R /b 6 0 R /c 6 0 R >> \
+             /Encoding << /Type /Encoding /Differences [97 /a /b /c] >> \
+             /FirstChar 97 /LastChar 99 /Widths [500 500 500] /ToUnicode 7 0 R >>"
                 .to_owned(),
             stream("500 0 d0"),
             stream(
@@ -1017,12 +1022,14 @@ mod tests {
         );
     }
 
-    /// Figma's Type 3 fonts map a character to nothing, which hayro-cmap
-    /// took to spoil the whole map, so a Figma CV read as no text.
+    /// Figma's Type 3 fonts map glyphs that draw nothing to nothing, which
+    /// hayro-cmap took to spoil the whole map, so a Figma CV read as no
+    /// text; and then each was taken for a lost letter.
     #[test]
     fn a_font_mapping_a_character_to_nothing_still_reads() {
-        let document = pdf(&[("BT /F3 10 Tf 72 700 Td (ab) Tj ET", "")]);
-        assert_eq!(lines(&reading(&document)), ["ab"]);
+        let document = reading(&pdf(&[("BT /F3 10 Tf 72 700 Td (acb) Tj ET", "")]));
+        assert_eq!(lines(&document), ["ab"]);
+        assert_eq!(document.warnings, []);
     }
 
     #[test]

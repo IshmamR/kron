@@ -7,11 +7,14 @@ through `[patch.crates-io]`.
 
 ## The change
 
-`src/parse.rs`: a `bfchar` or `bfrange` entry whose destination is an empty
-string (`<65> <>`) is skipped. Before, it made the whole CMap fail to parse.
-Figma's PDF export writes such an entry in the ToUnicode CMap of its Type 3
-fonts, so a CV made in Figma read as having no text at all. The changed lines
-are marked `// Kron:`.
+A `bfchar` or `bfrange` entry whose destination is an empty string
+(`<65> <>`) maps its code to an empty string (`src/parse.rs`, `decode_be`),
+and looking it up gives `BfString::String("")` (`src/lib.rs`,
+`decode_utf16`). Before, such an entry made the whole CMap fail to parse.
+Figma's PDF export writes them in the ToUnicode CMaps of its Type 3 fonts,
+for glyphs that draw nothing, so a CV made in Figma read as having no text at
+all. Kron's PDF reader skips a glyph mapped to nothing. The changed lines are
+marked `// Kron:`.
 
 The latest release, 0.1.1, has the same code. Delete this folder and the
 `[patch.crates-io]` entry once a hayro-cmap release skips such entries.
