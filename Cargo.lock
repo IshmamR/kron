@@ -4568,10 +4568,13 @@ dependencies = [
 name = "kron"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
  "blake3",
  "chrono",
  "dirs 7.0.0",
  "futures",
+ "getrandom 0.3.4",
  "gpui-kit",
  "hayro-interpret",
  "hayro-syntax",
@@ -4580,11 +4583,13 @@ dependencies = [
  "kurbo 0.13.1",
  "markdown",
  "regex",
+ "reqwest",
  "rig-core",
  "rusqlite",
  "rust-stemmers",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "stop-words",
  "sysinfo 0.39.6",
  "text2num",
@@ -4594,6 +4599,7 @@ dependencies = [
  "typst-layout",
  "typst-pdf",
  "typst-render",
+ "url",
  "uuid",
  "x11rb",
 ]

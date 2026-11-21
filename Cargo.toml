@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# rustls's own, already built: checks the signature on ChatGPT's ID tokens.
+aws-lc-rs = { version = "1.19.0", default-features = false, features = ["aws-lc-sys", "prebuilt-nasm"] }
+# Already built for rig; ChatGPT sign-in's PKCE and ID tokens.
+base64 = "0.22.1"
 blake3 = "1.8.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "7.0.0"
 futures = "0.3.34"
+# Already built; ChatGPT sign-in's random state, nonce and PKCE verifier.
+getrandom = "0.3.4"
 # Pins the gpui snapshot (gpui-pre) that gpui-component is built on, and
 # re-exports gpui, gpui-base, gpui-component and the Lucide icons.
 gpui-kit = "0.7.1"
@@ -25,6 +31,9 @@ kurbo = "0.13.1"
 markdown = "1.0.0"
 # Already built for gpui and Typst; finds contact details to redact.
 regex = "1.13.1"
+# rig's HTTP client, with its features: ChatGPT sign-in's calls to OpenAI's
+# auth server, which rig doesn't make.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 # Calls to AI models, with usage and the catalog's prices (ARCHITECTURE.md).
 rig-core = { version = "0.44.0", features = ["reqwest"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "uuid"] }
@@ -32,6 +41,8 @@ rust-stemmers = "1.2.0"
 # Extraction's answers, read from the model's JSON.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Already built; ChatGPT sign-in's PKCE challenge.
+sha2 = "0.10.9"
 # NLTK's English list: the Snowball project's, matching rust-stemmers.
 stop-words = { version = "0.10.1", default-features = false, features = ["nltk"] }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
@@ -43,6 +54,8 @@ typst-kit = { version = "0.15.1", features = ["scan-fonts", "embedded-fonts"] }
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"
 typst-render = "0.15.1"
+# Already built; ChatGPT sign-in's authorize link and callback.
+url = "2.5.8"
 uuid = { version = "1.28.0", features = ["v7"] }
 
 [build-dependencies]

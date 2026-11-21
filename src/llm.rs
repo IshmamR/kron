@@ -5,6 +5,8 @@
 // client needs one and GPUI doesn't run one. Nothing here logs what's sent or
 // answered.
 
+pub mod chatgpt;
+
 use std::fmt;
 use std::time::Duration;
 
@@ -151,6 +153,11 @@ impl Provider {
     pub fn is_compatible(&self) -> bool {
         self.base_url.is_some()
     }
+
+    /// Signed in with ChatGPT: runs on the user's plan, with no API key.
+    pub fn is_chatgpt(&self) -> bool {
+        self.vendor == chatgpt::VENDOR
+    }
 }
 
 /// A provider, with the model a task runs on.
@@ -198,6 +205,9 @@ pub enum Error {
     TimedOut,
     /// The runtime didn't start, or the call's task stopped.
     Runtime(String),
+    ChatGpt(chatgpt::Error),
+    /// The ChatGPT plan refused the call, with OpenAI's code for why.
+    Plan(String),
 }
 
 impl fmt::Display for Error {
@@ -244,6 +254,29 @@ impl fmt::Display for Error {
             }
             Self::TimedOut => write!(formatter, "The model took too long to answer."),
             Self::Runtime(error) => write!(formatter, "The call couldn't run: {error}."),
+            Self::ChatGpt(error) => write!(formatter, "{error}"),
+            Self::Plan(code) => match code.as_str() {
+                "subscription_sharing_usage_limit_exceeded" => write!(
+                    formatter,
+                    "Kron has used what your ChatGPT plan allows it this week. You can \
+                     raise its limit in ChatGPT's settings, under Usage."
+                ),
+                "subscription_sharing_user_not_eligible" => write!(
+                    formatter,
+                    "Your ChatGPT plan can't be used in other apps. It takes Go, Plus, Pro \
+                     or Business."
+                ),
+                "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => {
+                    write!(
+                        formatter,
+                        "ChatGPT couldn't check your plan's usage. Try again in a few minutes."
+                    )
+                }
+                "subscription_sharing_invalid_user" => {
+                    write!(formatter, "{}", chatgpt::Error::SignInAgain)
+                }
+                code => write!(formatter, "ChatGPT refused the request ({code})."),
+            },
         }
     }
 }
@@ -575,6 +608,9 @@ pub async fn call(
     mut request: CompletionRequest,
 ) -> Result<Reply, Error> {
     let provider = &assigned.provider;
+    if provider.is_chatgpt() {
+        return call_chatgpt(assigned, key, request).await;
+    }
     if provider.vendor == "deepseek" && provider.base_url.is_none() {
         // DeepSeek's JSON mode. Other vendors name theirs differently, and
         // compatible servers don't all have one: they're given the shape the
@@ -618,6 +654,60 @@ pub async fn call(
 
 /// The provider's `model`, called with `key`; `None` for a vendor rig
 /// doesn't know.
+/// `call`, on the user's ChatGPT plan. The plan takes no temperature or
+/// output cap and keeps nothing, and its replies are streamed. It's paid for
+/// by the plan, so there's no cost to record.
+async fn call_chatgpt(
+    assigned: &Assigned,
+    stored: String,
+    request: CompletionRequest,
+) -> Result<Reply, Error> {
+    let provider = assigned.provider.id;
+    let credentials = chatgpt::Credentials::from_stored(&stored).map_err(Error::ChatGpt)?;
+    let token = chatgpt::access_token(provider, credentials, |rotated| {
+        set_key(provider, Some(&rotated.stored()))
+    })
+    .await
+    .map_err(Error::ChatGpt)?;
+    let request = for_plan(request);
+    let model = OpenAIConfig::new(token)
+        .with_base_url(chatgpt::API)
+        .with_route(Route::Responses)
+        .client()
+        .completion(&assigned.model)
+        .erase();
+    let streamed = async { model.stream(request)?.finish().await };
+    let response = tokio::time::timeout(TIMEOUT, streamed)
+        .await
+        .map_err(|_| Error::TimedOut)?
+        .map_err(|error| {
+            let code = match &error {
+                ProviderError::ProviderResponse(response)
+                | ProviderError::InvalidAuthentication(response) => {
+                    chatgpt::error_code(response.body.as_bytes())
+                }
+                _ => None,
+            };
+            match code {
+                Some(code) => Error::Plan(code),
+                None => Error::Provider(error),
+            }
+        })?;
+    Ok(Reply {
+        response,
+        cost: None,
+    })
+}
+
+/// The request as the plan takes it: no temperature or output cap, which it
+/// rejects, and nothing kept on OpenAI's side.
+fn for_plan(mut request: CompletionRequest) -> CompletionRequest {
+    request.temperature = None;
+    request.max_tokens = None;
+    request.additional_params = Some(serde_json::json!({ "store": false }));
+    request
+}
+
 fn completion_model(provider: &Provider, key: String, model: &str) -> Option<DynModel<Completion>> {
     if let Some(base_url) = &provider.base_url {
         return Some(compatible(base_url, key).client().completion(model).erase());
@@ -712,6 +802,17 @@ pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
 mod tests {
     use super::*;
     use crate::database::Writer;
+
+    #[test]
+    fn the_plan_is_sent_no_temperature_or_cap_and_keeps_nothing() {
+        let request = for_plan(crate::model::extraction::request("A résumé."));
+        assert_eq!(request.temperature, None);
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(
+            request.additional_params,
+            Some(serde_json::json!({ "store": false }))
+        );
+    }
 
     fn deepseek(write: &mut Write) -> Result<Uuid, database::Error> {
         add_provider(write, "DeepSeek", "deepseek", None, "deepseek-flash")
