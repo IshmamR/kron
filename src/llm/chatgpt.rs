@@ -272,6 +272,12 @@ pub async fn finish(attempt: Attempt) -> Result<SignedIn, Error> {
     })
 }
 
+impl SignedIn {
+    pub fn access_token(&self) -> &str {
+        &self.access.token
+    }
+}
+
 /// Keeps a sign-in's access token for `provider`'s calls.
 pub async fn remember(provider: Uuid, signed_in: &SignedIn) {
     ACCESS
@@ -743,7 +749,10 @@ mod tests {
         };
         let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
         assert_eq!(params.get("client_id").map(String::as_str), Some(REGISTER));
-        assert_eq!(params.get("agent_name_hint").map(String::as_str), Some(APP_NAME));
+        assert_eq!(
+            params.get("agent_name_hint").map(String::as_str),
+            Some(APP_NAME)
+        );
         assert!(params["ext_agent_host_id"].starts_with("urn:uuid:"));
         assert!(params["redirect_uri"].starts_with("http://127.0.0.1:"));
         assert!(params["redirect_uri"].ends_with(CALLBACK_PATH));
@@ -767,7 +776,10 @@ mod tests {
             Err(error) => panic!("{error}"),
         };
         assert_eq!(params["client_id"], "oaiapp_kron");
-        assert_eq!(params["ext_agent_host_id"], registration.host_id.unwrap_or_default());
+        assert_eq!(
+            params["ext_agent_host_id"],
+            registration.host_id.unwrap_or_default()
+        );
         assert!(!params.contains_key("agent_name_hint"));
     }
 
@@ -855,7 +867,10 @@ mod tests {
             Err(error) => panic!("{error}"),
         };
         let (modulus, exponent) = modulus_and_exponent(key.public_key().as_ref());
-        let (modulus, exponent) = (URL_SAFE_NO_PAD.encode(modulus), URL_SAFE_NO_PAD.encode(exponent));
+        let (modulus, exponent) = (
+            URL_SAFE_NO_PAD.encode(modulus),
+            URL_SAFE_NO_PAD.encode(exponent),
+        );
         let sign = |claims: serde_json::Value| -> String {
             let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","kid":"k"}"#);
             let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
@@ -896,7 +911,10 @@ mod tests {
     #[test]
     fn the_registration_is_kept_on_this_device() -> Result<(), database::Error> {
         let mut writer = crate::database::Writer::open_in_memory()?;
-        assert_eq!(Registration::read(writer.device())?, Registration::default());
+        assert_eq!(
+            Registration::read(writer.device())?,
+            Registration::default()
+        );
         writer.execute(|write| Registration::save(write, "urn:uuid:host", "oaiapp_kron"))?;
         assert_eq!(
             Registration::read(writer.device())?,

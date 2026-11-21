@@ -258,15 +258,17 @@ impl fmt::Display for Error {
             Self::Plan(code) => match code.as_str() {
                 "subscription_sharing_usage_limit_exceeded" => write!(
                     formatter,
-                    "Kron has used what your ChatGPT plan allows it this week. You can \
-                     raise its limit in ChatGPT's settings, under Usage."
+                    "You've reached your ChatGPT plan's usage limit. It resets after a \
+                     while; ChatGPT's settings, under Usage, show what's used and each \
+                     app's limit."
                 ),
                 "subscription_sharing_user_not_eligible" => write!(
                     formatter,
-                    "Your ChatGPT plan can't be used in other apps. It takes Go, Plus, Pro \
-                     or Business."
+                    "Your ChatGPT account can't share its plan with other apps. Add a \
+                     provider with an API key instead."
                 ),
-                "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => {
+                "subscription_sharing_usage_unavailable"
+                | "subscription_sharing_user_unavailable" => {
                     write!(
                         formatter,
                         "ChatGPT couldn't check your plan's usage. Try again in a few minutes."
@@ -564,6 +566,120 @@ pub fn complete(
             .spawn(async move { call(&assigned, key, request).await })
             .await
             .map_err(|error| Error::Runtime(error.to_string()))?
+    })
+}
+
+/// Starts signing in with ChatGPT: the link for the browser to open, and the
+/// sign-in, finished once the browser comes back, with the models the
+/// account can use.
+pub fn sign_in_with_chatgpt(
+    registration: &chatgpt::Registration,
+    cx: &App,
+) -> Result<(String, Task<Result<ChatGptSignIn, Error>>), String> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Err(Error::Runtime("no runtime".into()).to_string());
+    };
+    let handle = runtime.0.handle().clone();
+    let attempt = chatgpt::start(registration).map_err(|error| error.to_string())?;
+    let url = attempt.url.clone();
+    let finished = cx.background_spawn(async move {
+        handle
+            .spawn(async move {
+                let signed_in = chatgpt::finish(attempt).await.map_err(Error::ChatGpt)?;
+                let models = match signed_in.plan {
+                    true => chatgpt::models(signed_in.access_token())
+                        .await
+                        .map_err(Error::ChatGpt)?,
+                    false => Vec::new(),
+                };
+                Ok(ChatGptSignIn { signed_in, models })
+            })
+            .await
+            .map_err(|error| Error::Runtime(error.to_string()))?
+    });
+    Ok((url, finished))
+}
+
+/// A finished sign-in with ChatGPT.
+pub struct ChatGptSignIn {
+    pub signed_in: chatgpt::SignedIn,
+    /// (slug, display name), in OpenAI's order; empty without the plan.
+    pub models: Vec<(String, String)>,
+}
+
+/// Keeps a sign-in's access token for the provider it was added as, so its
+/// first call doesn't spend a refresh.
+pub fn remember_chatgpt(provider: Uuid, signed_in: chatgpt::SignedIn, cx: &App) -> Task<()> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(());
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        if let Err(error) = handle
+            .spawn(async move { chatgpt::remember(provider, &signed_in).await })
+            .await
+        {
+            eprintln!("chatgpt: couldn't keep the access token: {error}");
+        }
+    })
+}
+
+/// The models a signed-in ChatGPT provider's account can use.
+pub fn chatgpt_models(provider: Uuid, cx: &App) -> Task<Result<Vec<(String, String)>, Error>> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(Err(Error::Runtime("no runtime".into())));
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        let stored = key(provider).map_err(Error::Keyring)?.ok_or(Error::NoKey)?;
+        let credentials = chatgpt::Credentials::from_stored(&stored).map_err(Error::ChatGpt)?;
+        handle
+            .spawn(async move {
+                let token = chatgpt::access_token(provider, credentials, |rotated| {
+                    set_key(provider, Some(&rotated.stored()))
+                })
+                .await
+                .map_err(Error::ChatGpt)?;
+                chatgpt::models(&token).await.map_err(Error::ChatGpt)
+            })
+            .await
+            .map_err(|error| Error::Runtime(error.to_string()))?
+    })
+}
+
+/// Signs a ChatGPT provider out: ends its session at OpenAI, then removes
+/// its tokens from the keyring whether or not OpenAI confirmed. `Ok(false)`:
+/// it didn't, so the user can disconnect Kron in ChatGPT's settings.
+pub fn sign_out_of_chatgpt(provider: Uuid, cx: &App) -> Task<Result<bool, Error>> {
+    let Some(runtime) = cx.try_global::<Runtime>() else {
+        return Task::ready(Err(Error::Runtime("no runtime".into())));
+    };
+    let handle = runtime.0.handle().clone();
+    cx.background_spawn(async move {
+        let stored = key(provider).map_err(Error::Keyring)?;
+        let credentials = stored.and_then(|stored| chatgpt::Credentials::from_stored(&stored).ok());
+        let revoked = match credentials {
+            Some(credentials) => {
+                let revoked = handle
+                    .spawn(async move { chatgpt::sign_out(provider, &credentials).await })
+                    .await;
+                match revoked {
+                    Ok(Ok(())) => true,
+                    Ok(Err(error)) => {
+                        eprintln!("chatgpt: couldn't end the session at OpenAI: {error}");
+                        false
+                    }
+                    Err(error) => {
+                        eprintln!("chatgpt: couldn't end the session at OpenAI: {error}");
+                        false
+                    }
+                }
+            }
+            // Nothing to end.
+            None => true,
+        };
+        set_key(provider, None).map_err(Error::Keyring)?;
+        Ok(revoked)
     })
 }
 

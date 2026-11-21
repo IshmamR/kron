@@ -1380,6 +1380,16 @@ mod tests {
         open.act(|page, window, cx| page.save(window, cx));
         testing::settle(open.cx, &open.database);
         assert_eq!(open.shown(), Shown::SetUpAi);
+        open.cx.update(|window, cx| {
+            use gpui_kit::test::TestWindowExt;
+            window.render_frame(cx);
+            let chatgpt = window.find("continue-with-chatgpt").bounds();
+            let key = window.find("save-key").bounds();
+            assert!(
+                chatgpt.top() < key.top(),
+                "the ChatGPT plan is offered first"
+            );
+        });
         // As in Settings, which "Use another provider" opens.
         testing::run(open.cx, &open.database, add_provider);
         assert_eq!(

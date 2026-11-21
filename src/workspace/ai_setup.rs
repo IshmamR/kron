@@ -1,6 +1,6 @@
 // Asks for an AI provider on import, when none is set up, before the text is
-// checked: one provider recommended, how to get its key, and what it costs.
-// The others are in Settings, which it opens.
+// checked: the user's ChatGPT plan first, then one provider's API key, how to
+// get it and what it costs. The others are in Settings, which it opens.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -12,13 +12,13 @@ use gpui_kit::{
 };
 
 use super::SetUpAi;
-use super::ai_settings::save_key;
+use super::ai_settings::{save_key, sign_in_with_chatgpt};
 use super::parts::{caption, notice, text_field};
 use crate::database::schema::LlmAssignments;
 use crate::database::{Changed, Database};
 use crate::llm::{self, Purpose, Vendor};
 
-/// Recommended to a new user: the name they know from ChatGPT, and its API
+/// The API key offered after ChatGPT: the name a new user knows, and its API
 /// isn't used for training unless the user opts in.
 const RECOMMENDED: &str = "openai";
 
@@ -29,6 +29,10 @@ pub struct AiSetup {
     problem: Option<SharedString>,
     saving: Task<()>,
     working: bool,
+    /// Waiting for the browser to sign in with ChatGPT.
+    signing_in: bool,
+    /// Why signing in with ChatGPT didn't finish.
+    sign_in_problem: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -69,11 +73,13 @@ impl Render for AiSetup {
                     )
                     .child(caption(
                         "Next you'll choose what to hide. The rest goes to an AI model, which \
-                         finds the facts of your work in it. Kron uses your own key, so you pay \
-                         the provider only for what you use.",
+                         finds the facts of your work in it. It runs on your ChatGPT plan, or on \
+                         your own API key, so you pay the provider only for what you use.",
                         cx,
                     )),
             )
+            .child(self.render_chatgpt(cx))
+            .child(caption("Or use an API key", cx))
             .child(self.render_recommended(vendor, empty, cx))
             .child(
                 h_flex()
@@ -114,7 +120,7 @@ impl AiSetup {
             }),
             // Set up in Settings instead.
             cx.subscribe(&database, |this, database, changed: &Changed, cx| {
-                if changed.touches(LlmAssignments) && !this.working {
+                if changed.touches(LlmAssignments) && !this.working && !this.signing_in {
                     match llm::assigned(
                         database.read(cx).device_connection(),
                         Purpose::ExtractFacts,
@@ -132,6 +138,8 @@ impl AiSetup {
             problem: None,
             saving: Task::ready(()),
             working: false,
+            signing_in: false,
+            sign_in_problem: None,
             _subscriptions: subscriptions,
         }
     }
@@ -143,7 +151,7 @@ impl AiSetup {
         let Some(vendor) = llm::vendor(RECOMMENDED) else {
             return;
         };
-        if key.is_empty() || self.working {
+        if key.is_empty() || self.working || self.signing_in {
             return;
         }
         self.working = true;
@@ -173,6 +181,80 @@ impl AiSetup {
             }
         });
         cx.notify();
+    }
+
+    /// Signs in with ChatGPT in the browser; done, the import goes on.
+    fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.signing_in || self.working {
+            return;
+        }
+        self.signing_in = true;
+        self.sign_in_problem = None;
+        let database = self.database.clone();
+        self.saving = cx.spawn_in(window, async move |this, cx| {
+            let signed_in = sign_in_with_chatgpt(&database, cx).await;
+            let updated = this.update(cx, |this, cx| {
+                this.signing_in = false;
+                match signed_in {
+                    Ok(_) => cx.emit(AiSetupEvent::Ready),
+                    Err(problem) => this.sign_in_problem = Some(problem.into()),
+                }
+                cx.notify();
+            });
+            if let Err(error) = updated {
+                eprintln!("ai setup: {error}");
+            }
+        });
+        cx.notify();
+    }
+
+    fn render_chatgpt(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .p_4()
+            .gap_3()
+            .rounded(theme.radius_lg)
+            .border_1()
+            .border_color(theme.border)
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("ChatGPT"))
+            .child(div().text_sm().child(
+                "Sign in with your ChatGPT account, and Kron runs on your plan, with no key \
+                 to pay for. What it uses counts toward your plan's limits.",
+            ))
+            .children(
+                self.sign_in_problem
+                    .clone()
+                    .map(|problem| notice(problem, theme.danger)),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("continue-with-chatgpt")
+                            .label(match self.signing_in {
+                                true => "Waiting for the browser…",
+                                false => "Continue with ChatGPT",
+                            })
+                            .primary()
+                            .small()
+                            .loading(self.signing_in)
+                            .disabled(self.signing_in || self.working)
+                            .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
+                    )
+                    .when(self.signing_in, |this| {
+                        this.child(
+                            Button::new("cancel-sign-in")
+                                .label("Cancel")
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.saving = Task::ready(());
+                                    this.signing_in = false;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
     }
 
     fn render_recommended(
@@ -205,8 +287,7 @@ impl AiSetup {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child(vendor.name))
-                    .child(caption("Recommended", cx)),
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(vendor.name)),
             )
             .child(
                 v_flex()
@@ -245,10 +326,10 @@ impl AiSetup {
                     .child(
                         Button::new("save-key")
                             .label("Save key")
-                            .primary()
+                            .outline()
                             .small()
                             .loading(self.working)
-                            .disabled(empty || self.working)
+                            .disabled(empty || self.working || self.signing_in)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
             )

@@ -70,7 +70,7 @@ Still open:
 - [ ] Once the relay ships, "Start free" goes first on the AI step and the own
   key moves under Advanced.
 
-### Sign in with ChatGPT (moved from phase 2, not started)
+### Sign in with ChatGPT (moved from phase 2; built, not tried with a real account yet)
 
 Lets a user with a paid ChatGPT plan use Kron with no API key. It runs inside
 Kron, with no server of ours. From OpenAI's docs, read 2026-11-21:
@@ -116,15 +116,17 @@ What the docs say:
   any preview or end date.
 
 To do:
-- [ ] Sign-in: browser, loopback listener, PKCE, client ID and host ID kept,
-  tokens in the keyring, quiet refresh.
-- [ ] A ChatGPT provider: Responses API with streaming, models from the
-  account, without the rejected fields. Check whether rig's OpenAI Responses
-  client can do this, or call it directly.
-- [ ] "Continue with ChatGPT" first on the AI setup step, with the key guide
-  second.
-- [ ] The errors above, in words a user can act on; "Using ChatGPT plan" in
-  place of a cost.
+- [x] Sign-in: browser, loopback listener, PKCE, client ID and host ID kept,
+  tokens in the keyring, quiet refresh. (`src/llm/chatgpt.rs`)
+- [x] A ChatGPT provider: Responses API with streaming, models from the
+  account, without the rejected fields. rig's OpenAI client does it, on its
+  Responses route.
+- [x] "Continue with ChatGPT" first on the AI setup step, with the key guide
+  second; in Settings too, with Manage usage and Sign out.
+- [x] The errors above, in words a user can act on; "Using your ChatGPT
+  plan" on its row, and no cost shown.
+- [ ] Try it with a real ChatGPT account: sign in, read a CV, write a résumé,
+  sign out.
 - [ ] Before shipping: read OpenAI's terms for this route and the branding
   guidelines.
 
