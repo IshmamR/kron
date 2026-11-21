@@ -153,6 +153,14 @@ To do:
 **Done when:** a fresh install reaches the example in under 30 seconds, and its
 own first résumé without visiting Settings.
 
+Checked 2026-11-21 on a release build with an empty data folder: the example
+was on screen 0.75 s after launch. With the CV pasted, a ChatGPT sign-in, the
+privacy review, the name and a pasted job, the first résumé came 2 min 20 s
+later without visiting Settings: 40 s of it signing in, 36 s finding 67 facts
+(filled in by the job step meanwhile) and 20 s writing. Every line was backed.
+The first attempt failed as the computer's DNS dropped for a moment, so
+requests that never reached OpenAI are now retried.
+
 ## Phase 2: Free credits without a key (Track A; may move last)
 
 - [ ] **The Kron relay and free credits.**
