@@ -54,12 +54,15 @@
   if block.bullets.len() > 0 { list(..block.bullets) }
 }
 
-#let skills(block) = grid(
-  columns: (8em, 1fr),
-  column-gutter: 0.5em,
-  if block.label != none { text(weight: "semibold", block.label) },
-  block.items,
-)
+// Without a label, the items take the label's column too.
+#let skills(block) = if block.label == none { block.items } else {
+  grid(
+    columns: (8em, 1fr),
+    column-gutter: 0.5em,
+    text(weight: "semibold", block.label),
+    block.items,
+  )
+}
 
 #let render(resume) = {
   for section in resume.sections {
