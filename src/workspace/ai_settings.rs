@@ -261,16 +261,10 @@ impl AiSettings {
         self.sign_in = cx.spawn_in(window, async move |this, cx| {
             let signed_in = sign_in_with_chatgpt(&database, cx).await;
             let updated = this.update_in(cx, |this, window, cx| {
-                this.signing_in = match signed_in {
-                    Ok(added) => {
-                        this.plan_models.insert(added.provider, added.models);
-                        if added.first {
-                            confirm_plan_use(window, cx);
-                        }
-                        SigningIn::Idle
-                    }
-                    Err(problem) => SigningIn::Failed(problem.into()),
-                };
+                match signed_in {
+                    Ok(added) => this.signed_in(added, window, cx),
+                    Err(problem) => this.signing_in = SigningIn::Failed(problem.into()),
+                }
                 cx.notify();
             });
             if let Err(error) = updated {
@@ -351,6 +345,21 @@ impl AiSettings {
             )
     }
 
+    /// A sign-in added its provider. The row was read from the keyring as
+    /// soon as the provider was saved, before its tokens were, so it's marked
+    /// signed in here, and that read is dropped before it can say otherwise.
+    fn signed_in(&mut self, added: PlanProvider, window: &mut Window, cx: &mut Context<Self>) {
+        self.signing_in = SigningIn::Idle;
+        self.reading = Task::ready(());
+        self.keys.insert(added.provider, KeyStatus::Saved);
+        self.plan_models.insert(added.provider, added.models);
+        self.refresh_pickers(window, cx);
+        if added.first {
+            confirm_plan_use(window, cx);
+        }
+        cx.notify();
+    }
+
     /// A ChatGPT provider's row: it runs on the user's plan, with a link to
     /// what apps have used of it, and signing out in place of removing.
     fn render_chatgpt(&mut self, id: Uuid, status: KeyStatus, cx: &mut Context<Self>) -> Div {
@@ -362,7 +371,9 @@ impl AiSettings {
             // OpenAI's wording, beside the models it applies to.
             KeyStatus::Saved => ("Using ChatGPT plan".into(), theme.muted_foreground),
             KeyStatus::Missing => (
-                SharedString::from("Signed out. Sign out here, then continue with ChatGPT again."),
+                SharedString::from(
+                    "Not signed in. Sign out, then continue with ChatGPT to sign in again.",
+                ),
                 theme.danger,
             ),
             KeyStatus::Failed(message) => (message, theme.danger),
@@ -1636,6 +1647,36 @@ mod tests {
                     .visible()
             );
         });
+    }
+
+    #[test]
+    fn a_finished_sign_in_shows_signed_in_though_the_keyring_was_read_before_its_tokens() {
+        let mut app = TestAppContext::single();
+        let (settings, mut cx, _directory) = open(&mut app);
+        let id = Uuid::now_v7();
+        settings.update_in(&mut cx, |settings, window, cx| {
+            settings.providers = vec![Provider {
+                id,
+                name: "ChatGPT".to_owned(),
+                vendor: chatgpt::VENDOR.to_owned(),
+                format: None,
+                base_url: None,
+            }];
+            // As the read made when the provider was saved found it.
+            settings.keys.insert(id, KeyStatus::Missing);
+            settings.signed_in(
+                PlanProvider {
+                    provider: id,
+                    models: vec![("gpt-plan".to_owned(), "GPT Plan".to_owned())],
+                    first: false,
+                },
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let status = settings.read_with(&cx, |settings, _| settings.keys.get(&id).cloned());
+        assert_eq!(status, Some(KeyStatus::Saved));
     }
 
     #[test]
