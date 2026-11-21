@@ -11,7 +11,8 @@ use super::parts::notify;
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
-    Generations, Jobs, LineCitations, Lines, Sections, UnsupportedClaims,
+    Generations, Jobs, LineCitations, Lines, Sections, Settings as SettingsTable,
+    UnsupportedClaims,
 };
 use crate::database::{Changed, Database, Error};
 use crate::llm::{self, Purpose};
@@ -146,9 +147,9 @@ pub struct JobView {
     /// Writing a résumé with the model, which runs on while the user looks
     /// elsewhere.
     generating: bool,
-    /// The user's first résumé: says how to read it, until a line is
-    /// selected or it's closed.
-    first_resume_hint: bool,
+    /// Says how to read a résumé until the user has selected a line once, or
+    /// closed the note: saved, so it lasts until they have.
+    explain_lines: bool,
     generation: Task<()>,
     /// Saving the résumé shown as a PDF, from asking where to writing it.
     export: Task<()>,
@@ -162,9 +163,6 @@ impl EventEmitter<JobViewEvent> for JobView {}
 impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read(cx);
-        if self.selected.is_some() {
-            self.first_resume_hint = false;
-        }
         self.sync_line_editor(window, cx);
         let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
         let shown = self.shown_id();
@@ -245,6 +243,7 @@ impl JobView {
         cx: &mut Context<Self>,
     ) -> Self {
         let application = cx.new(|cx| ApplicationView::new(database.clone(), window, cx));
+        let explain_lines = !lines_explained(&database, cx);
         let line_editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 10)
@@ -264,7 +263,11 @@ impl JobView {
                         InputEvent::Change | InputEvent::Focus => {}
                     },
                 ),
-                cx.subscribe(&database, |this, _, changed: &Changed, cx| {
+                cx.subscribe(&database, |this, database, changed: &Changed, cx| {
+                    if changed.touches(SettingsTable) {
+                        this.explain_lines = !lines_explained(&database, cx);
+                        cx.notify();
+                    }
                     if shows(changed) {
                         this.summary = None;
                         this.versions = None;
@@ -307,7 +310,7 @@ impl JobView {
             page_bounds: Rc::default(),
             scroll_pending: false,
             generating: false,
-            first_resume_hint: false,
+            explain_lines,
             generation: Task::ready(()),
             export: Task::ready(()),
             _instructions_form: None,
@@ -323,16 +326,19 @@ impl JobView {
         &self.database
     }
 
+    #[cfg(test)]
+    pub fn explains_lines(&self) -> bool {
+        self.explain_lines
+    }
+
     /// Writes the job's résumé, the user's first, without asking for
-    /// instructions, and says how to read it once it's there.
+    /// instructions.
     pub fn write_first_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.first_resume_hint = true;
         self.generate(None, window, cx);
     }
 
     pub fn set_job(&mut self, job: JobId, cx: &mut Context<Self>) {
         if self.job != Some(job) {
-            self.first_resume_hint = false;
             self.job = Some(job);
             self.tab = Tab::Resume;
             self.showing_sent = None;
@@ -356,6 +362,7 @@ impl JobView {
         self.showing_sent = None;
         self.selected = Some(line);
         self.scroll_pending = true;
+        self.lines_now_explained(cx);
         cx.notify();
     }
 
@@ -491,6 +498,7 @@ impl JobView {
         if let Some(&next) = next {
             self.selected = Some(next);
             self.scroll_to_selected();
+            self.lines_now_explained(cx);
             cx.notify();
         }
     }
@@ -832,9 +840,19 @@ impl JobView {
         )
     }
 
-    /// How to read a first résumé: where its lines come from, and why some
-    /// were left out.
-    fn first_resume_notice(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// Saves that the user knows how to read a résumé, the first time.
+    fn lines_now_explained(&mut self, cx: &mut Context<Self>) {
+        if self.explain_lines {
+            self.explain_lines = false;
+            self.database
+                .read(cx)
+                .queue(settings::set_resume_lines_explained);
+        }
+    }
+
+    /// How to read a résumé: where its lines come from, and why some were
+    /// left out.
+    fn lines_notice(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         h_flex()
             .flex_none()
@@ -851,16 +869,16 @@ impl JobView {
                     .text_color(theme.muted_foreground),
             )
             .child(div().flex_1().min_w_0().child(
-                "Your first résumé. Click any line to see the facts it came from. Left out \
-                 lists what your facts don't back, so it isn't on the page.",
+                "Click any line to see the facts it came from. Left out lists what your \
+                 facts don't back, so it isn't on the page.",
             ))
             .child(
-                Button::new("close-first-resume-notice")
+                Button::new("close-lines-notice")
                     .icon(IconName::Close)
                     .ghost()
                     .xsmall()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.first_resume_hint = false;
+                        this.lines_now_explained(cx);
                         cx.notify();
                     })),
             )
@@ -1116,8 +1134,8 @@ impl JobView {
                                 shown.and_then(|resume| self.outdated_notice(resume, cx)),
                                 |this, notice| this.child(notice),
                             )
-                            .when(self.first_resume_hint && shown.is_some(), |this| {
-                                this.child(self.first_resume_notice(cx))
+                            .when(self.explain_lines && shown.is_some(), |this| {
+                                this.child(self.lines_notice(cx))
                             })
                         })
                         .child(self.render_resume(shown.map(Rc::as_ref), render, cx)),
@@ -1741,6 +1759,15 @@ impl ShownResume {
     }
 }
 
+/// Whether the user knows a résumé's lines open their facts. Unreadable,
+/// they're taken to know, rather than shown the note for good.
+fn lines_explained(database: &Entity<Database>, cx: &App) -> bool {
+    settings::resume_lines_explained(database.read(cx).connection()).unwrap_or_else(|error| {
+        eprintln!("job view: couldn't read whether lines were explained: {error}");
+        true
+    })
+}
+
 /// Whether the change is to anything the view or its inspector shows.
 fn shows(changed: &Changed) -> bool {
     changed.touches(Jobs)
@@ -2260,23 +2287,67 @@ mod tests {
     }
 
     #[test]
-    fn the_first_resume_says_how_to_read_it_until_a_line_is_selected() {
+    fn how_to_read_a_resume_is_said_until_a_line_is_selected_even_after_a_restart() {
         let mut app = TestAppContext::single();
         let mut view = open(&mut app, "Ledgerly");
-        // As `write_first_resume` leaves it, once the résumé is written.
-        view.update(|view, cx| {
-            view.first_resume_hint = true;
-            cx.notify();
+        assert!(view.read(|view| view.explain_lines), "a new user is told");
+
+        let other = view.database.read_with(view.cx, |database, _| {
+            database.connection().query_row(
+                "SELECT id FROM jobs WHERE company = 'Cinder Labs'",
+                [],
+                |row| row.get(0),
+            )
         });
-        view.cx.run_until_parked();
-        assert!(view.read(|view| view.first_resume_hint));
-        let line = view.shown().lines.first().map(|line| line.id);
-        let Some(line) = line else {
-            panic!("the résumé has no lines");
+        let other = match other {
+            Ok(job) => JobId(job),
+            Err(error) => panic!("no Cinder Labs job: {error}"),
         };
-        view.update(|view, cx| view.select_line(line, cx));
-        view.cx.run_until_parked();
-        assert!(!view.read(|view| view.first_resume_hint));
+        view.update(|view, cx| view.set_job(other, cx));
+        assert!(
+            view.read(|view| view.explain_lines),
+            "on another résumé too"
+        );
+
+        // As the next start would open it.
+        let reopened = |view: &mut View| {
+            let database = view.database.clone();
+            view.cx.update(|window, cx| {
+                let previews = cx.new(|cx| Previews::new(database.clone(), cx));
+                cx.new(|cx| JobView::new(database, previews, window, cx))
+            })
+        };
+        let restarted = reopened(&mut view);
+        assert!(restarted.read_with(view.cx, |view, _| view.explain_lines));
+
+        view.keys("down");
+        assert!(!view.read(|view| view.explain_lines));
+        let saved = view.database.read_with(view.cx, |database, _| {
+            settings::resume_lines_explained(database.connection())
+        });
+        assert!(matches!(saved, Ok(true)));
+        assert!(
+            !restarted.read_with(view.cx, |view, _| view.explain_lines),
+            "an open view hears it"
+        );
+        let restarted = reopened(&mut view);
+        assert!(!restarted.read_with(view.cx, |view, _| view.explain_lines));
+    }
+
+    #[test]
+    fn closing_the_note_saves_that_lines_were_explained() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        view.cx
+            .update(|window, cx| window.click("close-lines-notice", cx));
+        view.settle();
+        assert!(!view.read(|view| view.explain_lines));
+        let saved = view.database.read_with(view.cx, |database, _| {
+            settings::resume_lines_explained(database.connection())
+        });
+        assert!(matches!(saved, Ok(true)));
     }
 
     #[test]

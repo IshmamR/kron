@@ -76,6 +76,8 @@ pub fn write_example(write: &mut Write) -> Result<JobId, database::Error> {
     crate::typeset::install_templates(write)?;
     write_sample(write)?;
     write.seed(EXAMPLE_AS_GENERATED)?;
+    // Its own banner says how to read it.
+    crate::model::settings::set_resume_lines_explained(write)?;
     Ok(JobId(
         write
             .prepare("SELECT id FROM jobs WHERE company = ?1")?

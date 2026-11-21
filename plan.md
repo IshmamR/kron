@@ -57,11 +57,13 @@ Branch `phase-1-first-minutes`:
   priced.
 
 Still open:
-- [ ] Check the first-résumé note on a real generation, with a real key.
+- [x] Checked end to end with a real DeepSeek key: finding facts and writing a
+  résumé took about 2 seconds and cost under 1¢ each.
 - [ ] "Show in Facts" does nothing inside the example. Make it show the
   example's own facts, or hide the button.
-- [ ] Remember that the first-résumé note was seen, instead of tying it to the
-  job created during onboarding.
+- [x] The note on how to read a résumé shows on any of the user's résumés,
+  after restarts too, until they select a line or close it. It's saved in
+  `settings`, so it syncs with the rest of the user's data.
 - [ ] Once the relay ships, "Start free" goes first on the AI step and the own
   key moves under Advanced.
 

@@ -735,6 +735,12 @@ mod tests {
                 .ok()
         });
         assert_eq!(company.as_deref(), Some("Cinder Labs"));
+        assert!(
+            !example.read_with(open.cx, |example, cx| {
+                example.job_view().read(cx).explains_lines()
+            }),
+            "the example's banner says how to read it, not the note"
+        );
         let still_new = open
             .database
             .read_with(open.cx, |database, _| is_new(database.connection()));
