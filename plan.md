@@ -129,8 +129,16 @@ To do:
   sign out. (2026-11-21: facts in 11.6 s, a résumé in 7.7 s, on GPT-6.2-Sol,
   the account's first model. The plan's models refuse reasoning effort
   `none`, and its streamed replies name no content type; both fixed.)
-- [ ] Pick a faster default than the account's first model for finding
-  facts, once there's a way to tell them apart.
+- [x] Compare models (2026-11-21, the four test CVs and one résumé each).
+  Every ChatGPT model took 33–47 s per CV and 19–36 s per résumé; DeepSeek
+  Flash took 4–5 s and 3 s. On the plan the speed is the route's, not the
+  model's: the fastest (GPT-6.1 Terra, GPT-6-Luna, GPT-6-Sol) save about 5 s on
+  GPT-6.2-Sol, so the account's first model stays the default. Recall was
+  95–100% on every ChatGPT model and 98–100% on DeepSeek Flash and V4 Flash;
+  DeepSeek V4 Pro was slower and missed more (89–100%). No résumé made a claim
+  its facts didn't back. GPT-5.6-Terra once answered in JSON Kron couldn't
+  read. Re-run with `KRON_LIVE_VENDOR=… KRON_LIVE_MODEL=… cargo test
+  live_extraction -- --ignored --nocapture`.
 - [x] Read OpenAI's guidelines (2026-11-21): the SIWC UI/UX guidelines, the
   brand guidelines, and the help article on using a plan in other apps. There
   are no terms for this route beyond OpenAI's general ones. Done from them: the

@@ -937,6 +937,33 @@ pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
     )
 }
 
+/// For the live tests: what `purpose` runs on in the development data, with
+/// its key from the keyring. `KRON_LIVE_VENDOR` picks another of its
+/// providers by vendor, and `KRON_LIVE_MODEL` another model, to compare them.
+#[cfg(test)]
+pub fn live_assigned(purpose: Purpose) -> Result<(Assigned, String), Box<dyn std::error::Error>> {
+    let device = dirs::data_dir()
+        .ok_or("no data directory")?
+        .join("kron-dev/device.sqlite");
+    let device = Connection::open_with_flags(device, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut assigned = assigned(&device, purpose)
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or("no provider set up in the development data")?;
+    if let Ok(vendor) = std::env::var("KRON_LIVE_VENDOR") {
+        assigned.provider = providers(&device)
+            .map_err(|error| format!("{error:?}"))?
+            .into_iter()
+            .find(|provider| provider.vendor == vendor)
+            .ok_or_else(|| format!("no {vendor} provider in the development data"))?;
+    }
+    if let Ok(model) = std::env::var("KRON_LIVE_MODEL") {
+        assigned.model = model;
+    }
+    let key = key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
+    println!("== on {} {}", assigned.provider.vendor, assigned.model);
+    Ok((assigned, key))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

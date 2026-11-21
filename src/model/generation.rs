@@ -1441,17 +1441,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_generation() -> Result<(), Box<dyn std::error::Error>> {
-        let device = dirs::data_dir()
-            .ok_or("no data directory")?
-            .join("kron-dev/device.sqlite");
-        let device = rusqlite::Connection::open_with_flags(
-            device,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
-            .map_err(|error| format!("{error:?}"))?
-            .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::GenerateResume)?;
         let writer = sample::written().map_err(|error| error.to_string())?;
         let job = sample::job(writer.kron(), "Cinder Labs").map_err(|error| error.to_string())?;
         let (title, company, description): (String, String, String) = writer.kron().query_row(
@@ -1527,17 +1517,7 @@ mod tests {
             ("columns", include_bytes!("extraction/columns.pdf")),
             ("linkedin", include_bytes!("extraction/linkedin.pdf")),
         ];
-        let device = dirs::data_dir()
-            .ok_or("no data directory")?
-            .join("kron-dev/device.sqlite");
-        let device = rusqlite::Connection::open_with_flags(
-            device,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        let assigned = crate::llm::assigned(&device, crate::llm::Purpose::GenerateResume)
-            .map_err(|error| format!("{error:?}"))?
-            .ok_or("no provider set up in the development data")?;
-        let key = crate::llm::key(assigned.provider.id)?.ok_or("no key saved for the provider")?;
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::GenerateResume)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
