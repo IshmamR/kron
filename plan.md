@@ -131,8 +131,16 @@ To do:
   `none`, and its streamed replies name no content type; both fixed.)
 - [ ] Pick a faster default than the account's first model for finding
   facts, once there's a way to tell them apart.
-- [ ] Before shipping: read OpenAI's terms for this route and the branding
-  guidelines.
+- [x] Read OpenAI's guidelines (2026-11-21): the SIWC UI/UX guidelines, the
+  brand guidelines, and the help article on using a plan in other apps. There
+  are no terms for this route beyond OpenAI's general ones. Done from them: the
+  approved button (black with the white logo, or white with the black logo on
+  dark), "You're using your ChatGPT plan" once after the first sign-in, "Using
+  ChatGPT plan" with Manage usage, and Manage usage as the action on a
+  usage-limit error. Not applicable yet: plan pages (Kron has no paid plans)
+  and the banner for users signed in another way (Kron has no accounts).
+- [ ] Before adding paid relay credits: OpenAI's docs say paid or remotely
+  hosted apps use the interest form, not this open-source route.
 
 **Done when:** a fresh install reaches the example in under 30 seconds, and its
 own first résumé without visiting Settings.

@@ -7,7 +7,7 @@ use super::SetUpAi;
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
-use super::parts::notify;
+use super::parts::{call_failed, notify};
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
@@ -1031,6 +1031,7 @@ impl JobView {
                     }),
                 Err(error) => Err(error.to_string()),
             };
+            let usage_limit = reply.as_ref().is_err_and(llm::Error::is_usage_limit);
             let claims = draft.as_ref().map_or(0, |draft| draft.claims.len());
             let cost = reply.as_ref().ok().and_then(|reply| reply.cost);
             let saved = cx.update(|_, cx| {
@@ -1086,7 +1087,7 @@ impl JobView {
                     Notification::success(message)
                 }
                 Ok(Err(problem)) => {
-                    Notification::error(format!("Couldn't write the résumé: {problem}"))
+                    call_failed(format!("Couldn't write the résumé: {problem}"), usage_limit)
                 }
                 Err(error) => {
                     eprintln!("job view: couldn't save the résumé: {error}");

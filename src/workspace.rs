@@ -1,6 +1,7 @@
 mod ai_settings;
 mod ai_setup;
 mod application_view;
+mod continue_with_chatgpt;
 mod example;
 mod fact_list;
 mod facts_page;

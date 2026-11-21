@@ -12,7 +12,8 @@ use gpui_kit::{
 };
 
 use super::SetUpAi;
-use super::ai_settings::{save_key, sign_in_with_chatgpt};
+use super::ai_settings::{confirm_plan_use, save_key, sign_in_with_chatgpt};
+use super::continue_with_chatgpt::ContinueWithChatGpt;
 use super::parts::{caption, notice, text_field};
 use crate::database::schema::LlmAssignments;
 use crate::database::{Changed, Database};
@@ -193,10 +194,15 @@ impl AiSetup {
         let database = self.database.clone();
         self.saving = cx.spawn_in(window, async move |this, cx| {
             let signed_in = sign_in_with_chatgpt(&database, cx).await;
-            let updated = this.update(cx, |this, cx| {
+            let updated = this.update_in(cx, |this, window, cx| {
                 this.signing_in = false;
                 match signed_in {
-                    Ok(_) => cx.emit(AiSetupEvent::Ready),
+                    Ok(added) => {
+                        if added.first {
+                            confirm_plan_use(window, cx);
+                        }
+                        cx.emit(AiSetupEvent::Ready)
+                    }
                     Err(problem) => this.sign_in_problem = Some(problem.into()),
                 }
                 cx.notify();
@@ -230,14 +236,11 @@ impl AiSetup {
                 h_flex()
                     .gap_2()
                     .child(
-                        Button::new("continue-with-chatgpt")
+                        ContinueWithChatGpt::new("continue-with-chatgpt")
                             .label(match self.signing_in {
                                 true => "Waiting for the browser…",
                                 false => "Continue with ChatGPT",
                             })
-                            .primary()
-                            .small()
-                            .loading(self.signing_in)
                             .disabled(self.signing_in || self.working)
                             .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
                     )

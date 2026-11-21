@@ -210,6 +210,17 @@ pub enum Error {
     Plan(String),
 }
 
+/// OpenAI's code for a ChatGPT plan, or Kron's share of it, used up.
+const USAGE_LIMIT: &str = "subscription_sharing_usage_limit_exceeded";
+
+impl Error {
+    /// The ChatGPT plan's limit, or Kron's, is reached: the way on is in
+    /// ChatGPT's usage settings, not in Kron.
+    pub fn is_usage_limit(&self) -> bool {
+        matches!(self, Self::Plan(code) if code == USAGE_LIMIT)
+    }
+}
+
 impl fmt::Display for Error {
     /// What went wrong, for the user. A provider's reply body is left out:
     /// it can quote what was sent.
@@ -256,11 +267,10 @@ impl fmt::Display for Error {
             Self::Runtime(error) => write!(formatter, "The call couldn't run: {error}."),
             Self::ChatGpt(error) => write!(formatter, "{error}"),
             Self::Plan(code) => match code.as_str() {
-                "subscription_sharing_usage_limit_exceeded" => write!(
+                USAGE_LIMIT => write!(
                     formatter,
-                    "You've reached your ChatGPT plan's usage limit. It resets after a \
-                     while; ChatGPT's settings, under Usage, show what's used and each \
-                     app's limit."
+                    "ChatGPT usage limit reached. Review your plan or Kron's limit in \
+                     ChatGPT settings."
                 ),
                 "subscription_sharing_user_not_eligible" => write!(
                     formatter,
@@ -946,6 +956,15 @@ mod tests {
             request.additional_params,
             Some(serde_json::json!({ "store": false }))
         );
+    }
+
+    #[test]
+    fn a_used_up_plan_is_told_apart_and_points_to_chatgpts_settings() {
+        let limit = Error::Plan(USAGE_LIMIT.to_owned());
+        assert!(limit.is_usage_limit());
+        assert!(limit.to_string().contains("ChatGPT settings"));
+        assert!(!Error::Plan("subscription_sharing_user_not_eligible".to_owned()).is_usage_limit());
+        assert!(!Error::TimedOut.is_usage_limit());
     }
 
     #[test]

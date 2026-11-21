@@ -16,6 +16,7 @@ use gpui_kit::{
 };
 use uuid::Uuid;
 
+use super::continue_with_chatgpt::ContinueWithChatGpt;
 use super::parts::text_field;
 use crate::database::schema::{LlmAssignments, LlmProviders};
 use crate::database::{Changed, Database};
@@ -200,13 +201,11 @@ impl AiSettings {
             .gap_2()
             .when(!signed_in, |this| {
                 this.child(
-                    Button::new("continue-with-chatgpt")
+                    ContinueWithChatGpt::new("continue-with-chatgpt")
                         .label(match waiting {
                             true => "Waiting for the browser…",
                             false => "Continue with ChatGPT",
                         })
-                        .primary()
-                        .small()
                         .disabled(waiting)
                         .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
                 )
@@ -260,10 +259,13 @@ impl AiSettings {
         let database = self.database.clone();
         self.sign_in = cx.spawn_in(window, async move |this, cx| {
             let signed_in = sign_in_with_chatgpt(&database, cx).await;
-            let updated = this.update(cx, |this, cx| {
+            let updated = this.update_in(cx, |this, window, cx| {
                 this.signing_in = match signed_in {
-                    Ok((provider, models)) => {
-                        this.plan_models.insert(provider, models);
+                    Ok(added) => {
+                        this.plan_models.insert(added.provider, added.models);
+                        if added.first {
+                            confirm_plan_use(window, cx);
+                        }
                         SigningIn::Idle
                     }
                     Err(problem) => SigningIn::Failed(problem.into()),
@@ -356,7 +358,8 @@ impl AiSettings {
         let (text, color) = match status {
             KeyStatus::Checking => ("Checking the keyring…".into(), theme.muted_foreground),
             KeyStatus::Working => ("Signing out…".into(), theme.muted_foreground),
-            KeyStatus::Saved => ("Using your ChatGPT plan.".into(), theme.muted_foreground),
+            // OpenAI's wording, beside the models it applies to.
+            KeyStatus::Saved => ("Using ChatGPT plan".into(), theme.muted_foreground),
             KeyStatus::Missing => (
                 SharedString::from("Signed out. Sign out here, then continue with ChatGPT again."),
                 theme.danger,
@@ -996,8 +999,9 @@ impl AiSettings {
                     if !confirmed
                         && let Err(error) = this.update(cx, |this, cx| {
                             this.signing_in = SigningIn::Said(
-                                "Signed out. OpenAI didn't confirm the session ended: you can \
-                                 disconnect Kron in ChatGPT's settings, under Usage."
+                                "Signed out of Kron, but OpenAI didn't confirm it. To stop \
+                                 Kron using your plan, disconnect it in ChatGPT's settings, \
+                                 under Security and login."
                                     .into(),
                             );
                             cx.notify();
@@ -1147,16 +1151,28 @@ fn models(
         .collect()
 }
 
+/// A ChatGPT sign-in, added as a provider.
+pub(super) struct PlanProvider {
+    pub provider: Uuid,
+    /// The account's models, as (slug, display name).
+    pub models: Vec<(String, String)>,
+    /// The first sign-in on this computer, which OpenAI asks be followed by
+    /// saying the plan is in use.
+    pub first: bool,
+}
+
 /// Signs in with ChatGPT in the browser, then adds it as a provider running
 /// every task on the first model the account lists, unless a provider is set
-/// already. Gives the provider and the account's models, or what went wrong.
+/// already.
 pub(super) async fn sign_in_with_chatgpt(
     database: &Entity<Database>,
     cx: &mut gpui_kit::AsyncWindowContext,
-) -> Result<(Uuid, Vec<(String, String)>), String> {
+) -> Result<PlanProvider, String> {
+    let mut first = false;
     let started = cx.update(|_, cx| {
         let registration = Registration::read(database.read(cx).device_connection())
             .map_err(|error| format!("Couldn't read this computer's sign-in: {error}."))?;
+        first = registration.client_id.is_none();
         let (url, finishing) = llm::sign_in_with_chatgpt(&registration, cx)?;
         cx.open_url(&url);
         Ok::<_, String>(finishing)
@@ -1206,7 +1222,50 @@ pub(super) async fn sign_in_with_chatgpt(
     if let Ok(remembered) = remembered {
         remembered.await;
     }
-    Ok((provider, models))
+    Ok(PlanProvider {
+        provider,
+        models,
+        first,
+    })
+}
+
+/// Says the plan is in use, after the first sign-in on this computer, as
+/// OpenAI's guidelines for Sign in with ChatGPT ask.
+pub(super) fn confirm_plan_use(window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, |dialog, _, _| {
+        dialog
+            .title("You're using your ChatGPT plan")
+            .w(px(420.))
+            .content(|content, _, _| {
+                content.child(
+                    v_flex()
+                        .gap_4()
+                        .child(div().text_sm().child(
+                            "Kron's AI requests use your ChatGPT plan. Manage usage in your \
+                             ChatGPT settings.",
+                        ))
+                        .child(
+                            h_flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("plan-usage")
+                                        .label("Manage usage")
+                                        .outline()
+                                        .small()
+                                        .on_click(|_, _, cx| cx.open_url(chatgpt::USAGE_SETTINGS)),
+                                )
+                                .child(
+                                    Button::new("got-it")
+                                        .label("Got it")
+                                        .primary()
+                                        .small()
+                                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                                ),
+                        ),
+                )
+            })
+    });
 }
 
 /// Saves `key` for the provider. If the keyring refuses it, a provider

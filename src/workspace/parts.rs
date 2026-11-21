@@ -79,6 +79,22 @@ pub fn notice(text: impl Into<SharedString>, color: Hsla) -> impl IntoElement {
 }
 
 /// A page's name at its top, the same size on every page.
+/// A failed call's message, with Manage usage as its action when the
+/// ChatGPT plan's limit was reached, as OpenAI's guidelines ask.
+pub fn call_failed(message: String, usage_limit: bool) -> Notification {
+    let notification = Notification::error(message);
+    match usage_limit {
+        false => notification,
+        true => notification.action(|_, _, _| {
+            Button::new("manage-usage")
+                .label("Manage usage")
+                .primary()
+                .small()
+                .on_click(|_, _, cx| cx.open_url(crate::llm::chatgpt::USAGE_SETTINGS))
+        }),
+    }
+}
+
 pub fn page_title(text: impl Into<SharedString>) -> Div {
     div()
         .text_2xl()

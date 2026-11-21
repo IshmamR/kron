@@ -29,7 +29,7 @@ use gpui_kit::{
 use rusqlite::{Connection, OptionalExtension};
 
 use super::ai_setup::{AiSetup, AiSetupEvent};
-use super::parts::{caption, notice, notify, page_title, text_field};
+use super::parts::{call_failed, caption, notice, notify, page_title, text_field};
 use super::redaction_check::{RedactionCheck, RedactionCheckEvent};
 use super::{SetUpAi, ShowFacts};
 use crate::database::{Database, Error};
@@ -645,6 +645,7 @@ impl ImportPage {
                     }),
                 Err(error) => Err(error.to_string()),
             };
+            let usage_limit = reply.as_ref().is_err_and(llm::Error::is_usage_limit);
             let saved = cx.update(|_, cx| {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
@@ -701,9 +702,10 @@ impl ImportPage {
                     }
                     facts_found(message, document)
                 }
-                Ok(Err(problem)) => {
-                    Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
-                }
+                Ok(Err(problem)) => call_failed(
+                    format!("Couldn't find the facts in {label}: {problem}"),
+                    usage_limit,
+                ),
                 Err(error) => {
                     eprintln!("import page: couldn't save the facts found: {error}");
                     Notification::error(format!("Couldn't save the facts found in {label}."))
