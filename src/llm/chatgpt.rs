@@ -49,6 +49,13 @@ const PREFERRED_PORT: u16 = 1455;
 /// How long the browser has to come back.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait before each retry of a request that never reached OpenAI:
+/// a lookup or connection that failed, as a flaky network does for seconds.
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 /// Access tokens are refreshed this long before they expire, so one doesn't
 /// lapse during a call.
 const EXPIRY_MARGIN: Duration = Duration::from_secs(120);
@@ -149,7 +156,10 @@ pub enum Error {
     TimedOut,
     /// What came back wasn't this attempt's, or wasn't complete.
     Callback(String),
-    Network(String),
+    /// The details are logged where it happened; the user is told only this.
+    Network,
+    /// OpenAI answered, but not as expected.
+    Unreadable,
     /// OpenAI refused a request: its status and error code, when it gave one.
     Refused(u16, Option<String>),
     IdToken(String),
@@ -165,7 +175,11 @@ impl fmt::Display for Error {
             Self::Declined => write!(formatter, "Sign-in was cancelled in the browser."),
             Self::TimedOut => write!(formatter, "Sign-in took too long. Try again."),
             Self::Callback(problem) => write!(formatter, "Sign-in didn't finish: {problem}."),
-            Self::Network(error) => write!(formatter, "Couldn't reach OpenAI: {error}."),
+            Self::Unreadable => write!(formatter, "OpenAI's answer couldn't be read."),
+            Self::Network => write!(
+                formatter,
+                "Couldn't reach OpenAI. Check your internet connection and try again."
+            ),
             Self::Refused(status, Some(code)) => {
                 write!(formatter, "OpenAI refused the sign-in ({status}, {code}).")
             }
@@ -333,7 +347,8 @@ pub async fn sign_out(provider: Uuid, credentials: &Credentials) -> Result<(), E
     ACCESS.lock().await.remove(&provider);
     let configuration: Configuration = get_json(CONFIGURATION, None).await?;
     let Some(revocation) = configuration.revocation_endpoint else {
-        return Err(Error::Network("no revocation endpoint".into()));
+        eprintln!("chatgpt: OpenAI's configuration names no revocation endpoint");
+        return Err(Error::Unreadable);
     };
     let response = post_form(
         &revocation,
@@ -492,13 +507,14 @@ async fn post_form(url: &str, form: &[(&str, &str)]) -> Result<reqwest::Response
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(form)
         .finish();
-    client()?
-        .post(url)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(body)
-        .send()
-        .await
-        .map_err(|error| Error::Network(error.to_string()))
+    let client = client()?;
+    send(|| {
+        client
+            .post(url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body.clone())
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -511,15 +527,35 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     url: &str,
     bearer: Option<&str>,
 ) -> Result<T, Error> {
-    let mut request = client()?.get(url);
-    if let Some(token) = bearer {
-        request = request.bearer_auth(token);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|error| Error::Network(error.to_string()))?;
+    let client = client()?;
+    let response = send(|| {
+        let request = client.get(url);
+        match bearer {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    })
+    .await?;
     read_json(response).await
+}
+
+/// Sends the request, again after a pause when it never reached OpenAI. Even
+/// a one-time sign-in code is safe to resend then: OpenAI never saw it. A
+/// request that reached it isn't resent.
+async fn send(request: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response, Error> {
+    let mut delays = RETRY_DELAYS.iter();
+    loop {
+        match request().send().await {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                eprintln!("chatgpt: a request to OpenAI failed: {error}");
+                match delays.next() {
+                    Some(delay) if error.is_connect() => tokio::time::sleep(*delay).await,
+                    _ => return Err(Error::Network),
+                }
+            }
+        }
+    }
 }
 
 /// The body as `T`, or OpenAI's refusal with its error code. The body of a
@@ -531,11 +567,11 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     let body = response
         .bytes()
         .await
-        .map_err(|error| Error::Network(error.to_string()))?;
+        .map_err(|error| logged(error, Error::Network))?;
     if status != 200 {
         return Err(Error::Refused(status, error_code(&body)));
     }
-    serde_json::from_slice(&body).map_err(|error| Error::Network(error.to_string()))
+    serde_json::from_slice(&body).map_err(|error| logged(error, Error::Unreadable))
 }
 
 /// The machine-readable code in an OAuth or API error body, or in a
@@ -553,7 +589,13 @@ fn client() -> Result<reqwest::Client, Error> {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .map_err(|error| Error::Network(error.to_string()))
+        .map_err(|error| logged(error, Error::Network))
+}
+
+/// `error`, for the log, as what the user is told.
+fn logged(error: impl fmt::Display, told: Error) -> Error {
+    eprintln!("chatgpt: {error}");
+    told
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,6 +739,7 @@ mod tests {
     use aws_lc_rs::rand::SystemRandom;
     use aws_lc_rs::rsa::{KeyPair, KeySize};
     use aws_lc_rs::signature::{KeyPair as _, RSA_PKCS1_SHA256};
+    use std::io::Read as _;
 
     /// An RSA public key's modulus and exponent, from its PKCS#1 DER:
     /// SEQUENCE { INTEGER n, INTEGER e }.
@@ -959,5 +1002,47 @@ mod tests {
             Some("x")
         );
         assert_eq!(error_code(br#"{"detail":"no"}"#), None);
+    }
+
+    /// A sign-in that came back while the network was down for a moment
+    /// failed at once, with the token endpoint's URL as its message.
+    #[test]
+    fn a_request_that_never_reached_openai_is_sent_again() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            std::thread::sleep(Duration::from_millis(300));
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0; 1024];
+            let _read = stream.read(&mut request)?;
+            stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let answer: serde_json::Value = runtime
+            .block_on(get_json(&format!("http://127.0.0.1:{port}/"), None))
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(answer, serde_json::json!({}));
+        server.join().map_err(|_| "the server panicked")??;
+        Ok(())
+    }
+
+    #[test]
+    fn a_network_failure_says_so_without_the_details() {
+        let message = logged(
+            "error sending request for url (https://auth.openai.com/api/accounts/oauth/token)",
+            Error::Network,
+        )
+        .to_string();
+        assert_eq!(
+            message,
+            "Couldn't reach OpenAI. Check your internet connection and try again."
+        );
     }
 }
