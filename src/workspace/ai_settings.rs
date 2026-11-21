@@ -202,6 +202,7 @@ impl AiSettings {
             .when(!signed_in, |this| {
                 this.child(
                     ContinueWithChatGpt::new("continue-with-chatgpt")
+                        .small()
                         .label(match waiting {
                             true => "Waiting for the browser…",
                             false => "Continue with ChatGPT",
@@ -1587,9 +1588,12 @@ mod tests {
         let (settings, mut cx, _directory) = open(&mut app);
         cx.update(|window, cx| {
             window.render_frame(cx);
-            assert!(
-                window.find("continue-with-chatgpt").visible(),
-                "offered first"
+            let button = window.find("continue-with-chatgpt");
+            assert!(button.visible(), "offered first");
+            assert_eq!(
+                button.bounds().size.height,
+                window.find("add-provider").bounds().size.height,
+                "as big as the buttons beside it"
             );
         });
         let id = Uuid::now_v7();
