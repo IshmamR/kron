@@ -1020,7 +1020,7 @@ mod tests {
         open.cx.run_until_parked();
         assert!(open.read(|workspace, _| workspace.settings_page.is_some()));
         open.cx
-            .update(|window, cx| window.click("close-settings", cx));
+            .update(|window, cx| window.click("leave-settings", cx));
         open.cx.run_until_parked();
         assert_eq!(
             open.read(|workspace, cx| (

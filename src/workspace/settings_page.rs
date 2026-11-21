@@ -6,10 +6,10 @@ use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::{ActiveTheme, IconName, h_flex};
+use gpui_kit::component::{ActiveTheme, IconName};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
+    StyleRefinement, Subscription, Window, div, prelude::*, px,
 };
 
 use super::LeaveSettings;
@@ -22,6 +22,8 @@ use crate::database::{Changed, Database};
 use crate::model::settings;
 
 const KEY_CONTEXT: &str = "SettingsPage";
+/// The back button's width and a gap.
+const SEARCH_INSET: Pixels = px(40.);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", LeaveSettings, Some(KEY_CONTEXT))]);
@@ -48,6 +50,7 @@ impl Render for SettingsPage {
             .size_full()
             .child(
                 Settings::new(("settings", self.generation))
+                    .header_style(&StyleRefinement::default().pl(SEARCH_INSET))
                     .with_group_variant(GroupBoxVariant::Outline)
                     .default_selected_index(SelectIndex {
                         page_ix: self.start as usize,
@@ -57,27 +60,17 @@ impl Render for SettingsPage {
                     .page(self.ai_page(cx)),
             )
             .child(
-                // Level with the page's title, in its header.
-                h_flex()
-                    .absolute()
-                    .top(px(14.))
-                    .right_4()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Esc"),
-                    )
-                    .child(
-                        Button::new("close-settings")
-                            .ghost()
-                            .icon(IconName::Close)
-                            .tooltip_with_action("Close settings", &LeaveSettings, None)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(LeaveSettings), cx)
-                            }),
-                    ),
+                // Back is where apps put it, top left: beside the sidebar's
+                // search, which `SEARCH_INSET` moves right to make room.
+                div().absolute().top_3().left_3().child(
+                    Button::new("leave-settings")
+                        .ghost()
+                        .icon(IconName::ChevronLeft)
+                        .tooltip_with_action("Back", &LeaveSettings, None)
+                        .on_click(|_, window, cx| {
+                            window.dispatch_action(Box::new(LeaveSettings), cx)
+                        }),
+                ),
             )
     }
 }
@@ -357,6 +350,23 @@ mod tests {
                     .try_find("palette-clay")
                     .is_none_or(|element| !element.visible())
             )
+        });
+    }
+
+    #[test]
+    fn back_is_at_the_top_left() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        let (_, cx) = app.add_window_view(|window, cx| {
+            SettingsPage::new(database, SettingsSection::Appearance, window, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            let back = window.find("leave-settings").bounds();
+            assert!(
+                back.left() < px(20.) && back.top() < px(20.),
+                "back is at the top left: {back:?}"
+            );
         });
     }
 
