@@ -699,15 +699,7 @@ impl ImportPage {
                     if let Some(cost) = cost {
                         message.push_str(&format!(" It cost {}.", llm::cost_label(cost)));
                     }
-                    Notification::success(message).action(|_, _, cx| {
-                        Button::new("show-facts")
-                            .label("Show facts")
-                            .small()
-                            .on_click(cx.listener(|notification, _, window, cx| {
-                                notification.dismiss(window, cx);
-                                window.dispatch_action(Box::new(ShowFacts), cx);
-                            }))
-                    })
+                    facts_found(message, document)
                 }
                 Ok(Err(problem)) => {
                     Notification::error(format!("Couldn't find the facts in {label}: {problem}"))
@@ -1029,6 +1021,25 @@ enum Step {
 }
 
 /// A document just saved, on its way to being checked.
+/// The notification saying a document's facts were found. Its button keeps it
+/// up until closed, so it's tagged for the workspace to close once the user
+/// has moved on to a résumé.
+pub(super) struct FactsFound;
+
+pub(super) fn facts_found(message: String, document: DocumentId) -> Notification {
+    Notification::success(message)
+        .id1::<FactsFound>(document.0.to_string())
+        .action(|_, _, cx| {
+            Button::new("show-facts")
+                .label("Show facts")
+                .small()
+                .on_click(cx.listener(|notification, _, window, cx| {
+                    notification.dismiss(window, cx);
+                    window.dispatch_action(Box::new(ShowFacts), cx);
+                }))
+        })
+}
+
 struct Saved {
     document: DocumentId,
     /// Its file's name, or "your text".
