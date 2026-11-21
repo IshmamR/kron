@@ -27,12 +27,20 @@ Every fix gets a regression test.
 
 ## Phase 0: Measure (days)
 
-- [ ] **Measure the cost per new user.** Run the live extraction and generation
-  tests on two or three real-sized CVs and read `llm_runs`. This sizes the free
-  allowance, and replaces the typical figures on the AI setup step ("$5 is the
-  least it takes", "a few cents").
-- [ ] **Find what pushes an extraction toward 200K tokens:** long documents,
-  retries, or the prompt itself. A two-page CV is about 2K tokens.
+- [x] **Measure the cost per new user** (2026-11-21, `generation::tests::live_cost`
+  on 33 real CVs of 1–3 pages, 220–940 words, on DeepSeek Flash). Finding the
+  facts: 1.2–2.2K tokens in, 1.3–3.8K out (median 1.4K and 2.2K), 4–12 s.
+  The first résumé: 1.3–3K in, 0.4–1.3K out, 2–5 s. A new user's two calls cost
+  $0.002 on DeepSeek Flash (at most $0.0035), $0.016 on GPT-5.4 mini (at most
+  $0.025) and $0.018 on Claude Haiku 4.5. Output is most of it: the facts are
+  written out longer than the CV. The setup step now says "Reading a CV costs
+  a cent or two, and writing a résumé less than a cent".
+- [x] **What pushes an extraction toward 200K tokens:** not a CV. The largest
+  real one took 2.2K in, so 200K needs a much longer document or retries.
+- [ ] **A Figma CV reads as no text.** Figma's PDF export maps one character to
+  an empty string in its ToUnicode CMap (`<65> <>`); hayro-cmap (0.1.0 and the
+  latest 0.1.1) rejects the entry and with it the whole map, so every glyph
+  comes without text and the import fails with `NoText`. 1 of the 33 real CVs.
 - [x] **Confirm Sign in with ChatGPT access** in OpenAI's developer docs
   (checked 2026-11-21). There's a self-serve route for "open-source projects,
   personal projects that run locally": see phase 1's ChatGPT section.

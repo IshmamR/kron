@@ -1508,8 +1508,6 @@ mod tests {
     #[test]
     #[ignore]
     fn write_test_set() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::model::extraction;
-
         const JOBS: &str = include_str!("generation/jobs.txt");
         const CVS: [(&str, &[u8]); 4] = [
             ("junior", include_bytes!("extraction/junior.pdf")),
@@ -1550,37 +1548,8 @@ mod tests {
         );
         let mut cost = 0.;
         for (cv, pdf) in CVS {
-            let reading = crate::import::read(crate::import::Format::Pdf, pdf.to_vec())
-                .map_err(|error| format!("{error:?}"))?;
-            let guessed = crate::import::name::guess(&reading);
-            let names: Vec<&str> = guessed.as_deref().into_iter().collect();
-            let redaction = Redaction::new(
-                &reading.text,
-                &redaction::find(&reading.text, &names, &[]),
-                STAND_IN,
-            );
-            let reply = call(extraction::request(&redaction.text))?;
+            let (reply, material, listed) = find_facts(&call, pdf)?;
             cost += reply.cost.unwrap_or(0.);
-            let found = extraction::Extraction::locate(
-                extraction::Answer::parse(&reply.response.text())?,
-                &reading.text,
-                &redaction,
-            );
-            let mut writer =
-                crate::database::Writer::open_in_memory().map_err(|error| error.to_string())?;
-            writer
-                .execute(|write| {
-                    let document =
-                        crate::model::commands::import_document(write, None, &reading.text)?;
-                    extraction::save(write, document, &found)
-                })
-                .map_err(|error| error.to_string())?;
-            let material = Material::read(writer.kron()).map_err(|error| error.to_string())?;
-            let listed = Redaction::new(
-                &material.listing,
-                &redaction::find(&material.listing, &names, &[]),
-                STAND_IN,
-            );
 
             for (_, title, company, description) in jobs.iter().filter(|job| job.0 == cv) {
                 let job = Job {
@@ -1670,6 +1639,124 @@ mod tests {
         );
         std::fs::write(path, set)?;
         println!("== total ${cost:.5}");
+        Ok(())
+    }
+
+    /// Reads a CV, finds its facts with `call` as Kron does, hidden names and
+    /// all, and keeps them: the reply, the facts as generation reads them,
+    /// and their listing as it's sent.
+    fn find_facts(
+        call: &impl Fn(rig_core::completion::CompletionRequest) -> Result<crate::llm::Reply, String>,
+        pdf: &[u8],
+    ) -> Result<(crate::llm::Reply, Material, Redaction), Box<dyn std::error::Error>> {
+        use crate::model::extraction;
+
+        let reading = crate::import::read(crate::import::Format::Pdf, pdf.to_vec())
+            .map_err(|error| format!("{error:?}"))?;
+        let guessed = crate::import::name::guess(&reading);
+        let names: Vec<&str> = guessed.as_deref().into_iter().collect();
+        let redaction = Redaction::new(
+            &reading.text,
+            &redaction::find(&reading.text, &names, &[]),
+            STAND_IN,
+        );
+        let reply = call(extraction::request(&redaction.text))?;
+        let found = extraction::Extraction::locate(
+            extraction::Answer::parse(&reply.response.text())?,
+            &reading.text,
+            &redaction,
+        );
+        let mut writer =
+            crate::database::Writer::open_in_memory().map_err(|error| error.to_string())?;
+        writer
+            .execute(|write| {
+                let document = crate::model::commands::import_document(write, None, &reading.text)?;
+                extraction::save(write, document, &found)
+            })
+            .map_err(|error| error.to_string())?;
+        let material = Material::read(writer.kron()).map_err(|error| error.to_string())?;
+        let listed = Redaction::new(
+            &material.listing,
+            &redaction::find(&material.listing, &names, &[]),
+            STAND_IN,
+        );
+        Ok((reply, material, listed))
+    }
+
+    /// What a new user's first two calls take: finding the facts in each PDF
+    /// in `KRON_LIVE_CVS` (a folder), then one résumé for a typical job.
+    /// Prints the tokens, cost and time of each, for sizing free credits and
+    /// the setup step's figures. It costs money and needs the network, so it
+    /// runs only when asked:
+    /// `KRON_LIVE_CVS=dummy cargo test live_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_cost() -> Result<(), Box<dyn std::error::Error>> {
+        const DESCRIPTION: &str = "We're hiring a software engineer to build and run our \
+            web product: APIs, a React front end and the database behind them. You'll \
+            design features with product and design, write tests, review code, deploy to \
+            the cloud and keep things fast and reliable. We'd like experience with \
+            JavaScript or TypeScript, a backend language such as Node.js, Python, Go or \
+            Java, SQL databases, Git and CI, and some cloud (AWS, GCP or Azure).";
+        let folder = std::env::var("KRON_LIVE_CVS")?;
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::GenerateResume)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let call = |request| {
+            runtime
+                .block_on(crate::llm::call(&assigned, key.clone(), request))
+                .map_err(|error| error.to_string())
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(&folder)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "pdf"))
+            .collect();
+        paths.sort();
+        let job = Job {
+            title: "Software Engineer",
+            company: "Acme",
+            description: DESCRIPTION,
+        };
+        let usage = |reply: &crate::llm::Reply| {
+            let usage = &reply.response.usage;
+            format!(
+                "{:?} in, {:?} out, ${:.5}",
+                usage.input_tokens,
+                usage.output_tokens,
+                reply.cost.unwrap_or(0.)
+            )
+        };
+        // Numbered, not named: the CVs may be real people's.
+        for (number, path) in paths.iter().enumerate() {
+            let started = std::time::Instant::now();
+            let found = find_facts(&call, &std::fs::read(path)?);
+            let (reply, material, listed) = match found {
+                Ok(found) => found,
+                Err(error) => {
+                    println!("== cv {number}: finding facts failed: {error}");
+                    continue;
+                }
+            };
+            let finding = started.elapsed();
+            let started = std::time::Instant::now();
+            let written = call(request(&listed.text, &job));
+            println!(
+                "== cv {number}: {} facts; facts {}, {:.1} s; résumé {}",
+                material.facts.len(),
+                usage(&reply),
+                finding.as_secs_f64(),
+                match written {
+                    Ok(written) => format!(
+                        "{}, {:.1} s",
+                        usage(&written),
+                        started.elapsed().as_secs_f64()
+                    ),
+                    Err(error) => format!("failed: {error}"),
+                },
+            );
+        }
         Ok(())
     }
 }

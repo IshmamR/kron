@@ -304,8 +304,8 @@ impl AiSetup {
                     ))
                     .child(step(
                         "2.",
-                        "Add credit under Billing; $5 is the least it takes. Reading a CV or \
-                         writing a résumé costs a few cents."
+                        "Add credit under Billing; $5 is the least it takes. Reading a CV costs \
+                         a cent or two, and writing a résumé less than a cent."
                             .to_owned(),
                     ))
                     .child(step(
