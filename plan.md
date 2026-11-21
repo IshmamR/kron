@@ -59,8 +59,8 @@ Branch `phase-1-first-minutes`:
 Still open:
 - [x] Checked end to end with a real DeepSeek key: finding facts and writing a
   résumé took about 2 seconds and cost under 1¢ each.
-- [ ] "Show in Facts" does nothing inside the example. Make it show the
-  example's own facts, or hide the button.
+- [x] "Show in Facts" in the example opens Alex's own facts, inside the
+  example; a résumé under "Used in" opens back in the example at that line.
 - [x] The note on how to read a résumé shows on any of the user's résumés,
   after restarts too, until they select a line or close it. It's saved in
   `settings`, so it syncs with the rest of the user's data.
