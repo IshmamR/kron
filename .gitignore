@@ -24,3 +24,5 @@ Thumbs.db
 .env
 
 docs/
+# Real people's CVs for local testing; never committed
+/dummy/
