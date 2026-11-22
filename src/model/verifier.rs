@@ -809,6 +809,10 @@ mod tests {
     struct Case {
         label: &'static str,
         facts: Vec<&'static str>,
+        /// The entry each fact is from, where the case names it.
+        entries: Vec<Option<&'static str>>,
+        /// The job the line was written for, where the case gives one.
+        job: Option<&'static str>,
         line: &'static str,
     }
 
@@ -822,12 +826,25 @@ mod tests {
                 let mut case = Case {
                     label,
                     facts: Vec::new(),
+                    entries: Vec::new(),
+                    job: None,
                     line: "",
                 };
                 for line in lines {
-                    match line.split_once(": ") {
-                        Some(("fact", fact)) => case.facts.push(fact),
-                        Some(("line", text)) => case.line = text,
+                    let Some((key, text)) = line.split_once(": ") else {
+                        panic!("can't read case line {line:?}");
+                    };
+                    match key.split_once(' ') {
+                        None if key == "fact" => {
+                            case.facts.push(text);
+                            case.entries.push(None);
+                        }
+                        Some(("fact", entry)) => {
+                            case.facts.push(text);
+                            case.entries.push(Some(entry));
+                        }
+                        None if key == "job" => case.job = Some(text),
+                        None if key == "line" => case.line = text,
                         _ => panic!("can't read case line {line:?}"),
                     }
                 }
@@ -874,7 +891,49 @@ mod tests {
 
     /// Whether a line with `label` is true, and should pass.
     fn true_label(label: &str) -> bool {
-        matches!(label, "paraphrase" | "number_rewording" | "verbatim")
+        matches!(
+            label,
+            "paraphrase"
+                | "number_rewording"
+                | "verbatim"
+                | "combined"
+                | "job_wording"
+                | "kept_qualifier"
+                | "same_scope"
+        )
+    }
+
+    /// A case tests what its label says only with the parts that need: the
+    /// entries of the facts it combines, or the job it echoes.
+    #[test]
+    fn cases_have_what_their_label_tests() {
+        for case in cases(CASES) {
+            let entries: Vec<&str> = case.entries.iter().flatten().copied().collect();
+            let mut distinct = entries.clone();
+            distinct.sort();
+            distinct.dedup();
+            match case.label {
+                "combined" | "cross_entry" => {
+                    assert!(
+                        case.facts.len() > 1 && entries.len() == case.facts.len(),
+                        "{} needs facts from named entries: {:?}",
+                        case.label,
+                        case.line
+                    );
+                    let entries_wanted = if case.label == "combined" { 1 } else { 2 };
+                    assert_eq!(distinct.len(), entries_wanted, "{:?}", case.line);
+                }
+                "job_echo" | "job_wording" => {
+                    assert!(
+                        case.job.is_some(),
+                        "{} needs a job: {:?}",
+                        case.label,
+                        case.line
+                    );
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Runs every case of `set` citing all its facts, and prints, per label,

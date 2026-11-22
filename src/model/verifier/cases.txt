@@ -3,12 +3,27 @@
 # so the fabrication is the only difference.
 #
 # Labels:
-#   paraphrase, number_rewording: should pass
+#   paraphrase, number_rewording, combined, job_wording, kept_qualifier,
+#   same_scope: should pass
 #   invented_figure, invented_year, unit_swap, wrong_referent,
-#   scope_inflation, invented_term, unrelated, borrowed_figure: should fail
+#   scope_inflation, invented_term, unrelated, borrowed_figure, cross_entry,
+#   job_echo, dropped_qualifier: should fail
 #
 # borrowed_figure cases cite two facts and take a figure from the one that
 # isn't about the line.
+#
+# A fact may name the entry it's from, a job or project, as `fact E1: …`.
+# combined and cross_entry cases cite facts from one entry and from two.
+#
+# A case may give the job the résumé is for, as `job: …`. job_echo lines
+# take a word from it that their facts don't say; job_wording lines use
+# its words only where their facts say the same.
+#
+# dropped_qualifier lines drop or add a word that changes whether or how
+# far something happened: proposed, planned, started, tried, without, not.
+# scope_inflation lines claim a bigger part: assisted becomes built, built
+# becomes led, worked in a team becomes led one. same_scope lines change
+# the verb to one no higher.
 
 paraphrase
 fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
@@ -295,3 +310,183 @@ borrowed_figure
 fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
 fact: Led the migration of 12 backend services from Python to Rust.
 line: Cut p99 latency of the routing API for 12 services.
+
+combined
+fact E1: Found two capacity bottlenecks in the routing API before the 2023 peak season.
+fact E1: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Found two capacity bottlenecks in the routing API before the 2023 peak season and cut its p99 latency from 480 ms to 95 ms.
+
+combined
+fact E1: Mentored four junior engineers through their first production launches.
+fact E1: Ran the on-call rotation for the routing team and wrote the runbooks that new engineers still start from.
+line: Ran the routing team's on-call rotation and mentored four junior engineers through their first production launches.
+
+combined
+fact E1: Trained six new bar staff on cocktail prep and closing procedures.
+fact E1: Wrote the bar's closing checklist.
+line: Trained six new bar staff on cocktail prep and closing, and wrote the bar's closing checklist.
+
+combined
+fact E1: Cared for up to eight patients a shift on a cardiac ward.
+fact E1: Taught patients and families how to manage heart medication at home.
+line: Cared for up to eight patients a shift on a cardiac ward, teaching patients and families to manage heart medication at home.
+
+cross_entry
+fact E1: Cut p99 latency of the routing API from 480 ms to 95 ms.
+fact E2: Built a load-testing harness in Go for the payments service.
+line: Cut p99 latency of the routing API from 480 ms to 95 ms with a load-testing harness built in Go.
+
+cross_entry
+fact E1: Mentored four junior engineers through their first production launches.
+fact E2: Led the migration of 12 backend services from Python to Rust.
+line: Led the migration of 12 backend services from Python to Rust while mentoring four junior engineers through their first production launches.
+
+cross_entry
+fact E1: Trained six new bar staff on cocktail prep and closing procedures.
+fact E2: Managed stock ordering for a 40-seat café.
+line: Trained six new bar staff on cocktail prep and managed stock ordering for a 40-seat café.
+
+cross_entry
+fact E1: Cared for up to eight patients a shift on a cardiac ward.
+fact E2: Volunteered as a first-aid responder at city marathons.
+line: Cared for up to eight patients a shift on a cardiac ward and responded to first-aid calls at city marathons.
+
+cross_entry
+fact E1: Introduced distributed tracing across the routing services.
+fact E2: An open-source Rust crate for propagating trace context across async tasks, with about 900 GitHub stars.
+line: Introduced distributed tracing across the routing services with an open-source Rust crate for propagating trace context, with about 900 GitHub stars.
+
+cross_entry
+fact E1: Taught maths to classes of 30 Year 9 students.
+fact E2: Tutored A-level physics students one to one.
+line: Taught maths to classes of 30 Year 9 students and tutored A-level physics students one to one.
+
+job_wording
+job: Backend engineer with Rust experience to own our routing services.
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led a Rust migration of 12 backend services from Python.
+
+job_wording
+job: Bartender comfortable training new staff in a busy cocktail bar.
+fact: Trained six new bar staff on cocktail prep and closing procedures.
+line: Trained six new staff on cocktail prep and closing procedures.
+
+job_wording
+job: Front-end developer with accessibility experience on Android.
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+line: Fixed more than 40 accessibility issues flagged by TalkBack on Android and wrote the team's first accessibility checklist.
+
+job_wording
+job: Engineer to improve the latency and reliability of our APIs.
+fact: Cut p99 latency of the routing API from 480 ms to 95 ms.
+line: Improved the routing API's p99 latency from 480 ms to 95 ms.
+
+job_echo
+job: Backend engineer with Kubernetes and Terraform experience to run high-availability services.
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Led the migration of 12 backend services from Python to Rust on Kubernetes.
+
+job_echo
+job: Bartender with strong customer service skills and cocktail knowledge, comfortable in a high-volume venue.
+fact: Supported 120 enterprise customers.
+line: Delivered strong customer service to 120 enterprise customers.
+
+job_echo
+job: Front-end developer to build accessible, mobile-first React interfaces.
+fact: Wrote the team's first accessibility checklist and fixed more than 40 issues flagged by TalkBack on Android.
+line: Wrote the team's first accessibility checklist and fixed more than 40 issues in mobile-first React interfaces.
+
+job_echo
+job: We want someone who has scaled systems to millions of users in a fast-paced startup.
+fact: Rebuilt the rider sign-up flow in React Native, cutting drop-off between the phone and OTP screens from 38% to 21%.
+line: Rebuilt the rider sign-up flow in React Native at a fast-paced startup, cutting drop-off from 38% to 21%.
+
+job_echo
+job: Data analyst fluent in SQL and Tableau, building dashboards for stakeholders.
+fact: Replaced a hand-maintained spreadsheet of client reports with a self-service dashboard used by the sales team.
+line: Replaced a hand-maintained spreadsheet of client reports with a self-service Tableau dashboard used by the sales team.
+
+job_echo
+job: Senior engineer who owns services end to end, including on-call and incident response.
+fact: Wrote the runbooks for the routing team's on-call rotation.
+line: Owned incident response for the routing team and wrote its on-call runbooks.
+
+kept_qualifier
+fact: Proposed moving the routing services to a single Postgres cluster.
+line: Proposed consolidating the routing services onto one Postgres cluster.
+
+kept_qualifier
+fact: Moved the database to a new region over a weekend maintenance window.
+line: Moved the database to a new region during a weekend maintenance window.
+
+kept_qualifier
+fact: Started a part-time master's in data science at the University of Dhaka.
+line: Started a part-time data science master's at the University of Dhaka.
+
+kept_qualifier
+fact: Prototyped a recommendation feature that wasn't shipped.
+line: Prototyped a recommendation feature.
+
+dropped_qualifier
+fact: Proposed moving the routing services to a single Postgres cluster.
+line: Moved the routing services to a single Postgres cluster.
+
+dropped_qualifier
+fact: Planned the 2024 migration of the billing system to Stripe.
+line: Migrated the billing system to Stripe in 2024.
+
+dropped_qualifier
+fact: Started a part-time master's in data science at the University of Dhaka.
+line: Completed a part-time master's in data science at the University of Dhaka.
+
+dropped_qualifier
+fact: Tried to cut build times with remote caching; the change was rolled back.
+line: Cut build times with remote caching.
+
+dropped_qualifier
+fact: Moved the database to a new region over a weekend maintenance window.
+line: Moved the database to a new region without downtime.
+
+dropped_qualifier
+fact: Prototyped a recommendation feature that wasn't shipped.
+line: Shipped a recommendation feature.
+
+dropped_qualifier
+fact: Working towards the AWS Solutions Architect certification.
+line: AWS Solutions Architect certification.
+
+scope_inflation
+fact: Assisted the lead engineer in rebuilding the search index.
+line: Rebuilt the search index.
+
+scope_inflation
+fact: Worked in a team of five on the mobile app's offline mode.
+line: Led a team of five on the mobile app's offline mode.
+
+scope_inflation
+fact: Covered the bar manager's shifts for two weeks.
+line: Managed the bar for two weeks.
+
+scope_inflation
+fact: Reviewed pull requests for the payments team.
+line: Owned code quality for the payments team.
+
+scope_inflation
+fact: Shadowed senior nurses on a cardiac ward during a placement.
+line: Worked on a cardiac ward during a placement.
+
+same_scope
+fact: Led the migration of 12 backend services from Python to Rust.
+line: Headed the migration of 12 backend services from Python to Rust.
+
+same_scope
+fact: Built the trip history screen in React Native.
+line: Developed the trip history screen in React Native.
+
+same_scope
+fact: Led a team of five on the mobile app's offline mode.
+line: Worked with a team of five on the mobile app's offline mode.
+
+same_scope
+fact: Covered the bar manager's shifts for two weeks.
+line: Stood in for the bar manager for two weeks.

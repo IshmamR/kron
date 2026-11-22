@@ -201,8 +201,13 @@ requests that never reached OpenAI are now retried.
 Test set first. Each rule only adds rejections, and each is measured on
 `cases.txt` and `generated.txt` before it's trusted.
 
-- [ ] **Label new cases:** job-description echo, facts combined across jobs,
-  verb inflation, negation, and invented terms.
+- [x] **Label new cases:** job-description echo, facts combined across jobs,
+  verb inflation, negation, and invented terms. `cases.txt` now names each
+  fact's entry (`fact E1:`) and the job (`job:`), with honest counterparts
+  for each new label. Before any rule (2026-11-22), the verifier let
+  through all of them: 6 of 6 cross_entry, 6 of 6 job_echo, 7 of 7
+  dropped_qualifier, 12 of 12 scope_inflation, 6 of 6 invented_term, with
+  no false flags on the 16 honest counterparts.
 - [ ] **Combined facts must share a job or project.** A line may combine facts
   from one entry only. It's the cheapest rule, since citations already carry
   their facts.
