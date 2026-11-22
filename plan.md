@@ -229,8 +229,14 @@ Test set first. Each rule only adds rejections, and each is measured on
   add a not, no, never, without, zero or none. A fact's own negation may go.
   "Helped to" is left to the verb ladder. dropped_qualifier: 7 of 7 caught,
   no false flags on kept_qualifier or the 93 real lines (2026-11-22).
-- [ ] **The ownership-verb ladder** (assisted < built < led, owned, managed,
+- [x] **The ownership-verb ladder** (assisted < built < led, owned, managed,
   architected), and unsupported "team of N". Label the scale as Kron's own.
+  A line keeps its facts' assisted, helped, contributed or shadowed (with
+  the hedges), and says led, owned, managed, ran… only where a fact does.
+  An unsupported "team of N" is already an invented figure. scope_inflation:
+  9 of 12 caught, no false flags on same_scope or the real lines
+  (2026-11-22). Left: found → fixed, a guest lecture → a course, wrote a
+  guide → set the standards; no word list catches those.
 - [ ] **A term check against ESCO and Wikidata.**
 - [ ] **Three states in the inspector:** Checked, Reworded (with the new words
   highlighted), and Left out.

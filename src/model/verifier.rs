@@ -19,10 +19,11 @@ const CURRENCIES: [char; 6] = ['$', '€', '£', '¥', '₹', '৳'];
 /// Lone numbers under this stay words when number words are read: "one" and
 /// "first" are more often "one of the first" than a count.
 const LONE_NUMBER_WORDS_BELOW: f64 = 2.0;
-/// Words saying work was only proposed, planned, begun, tried or tested, as
-/// written: a line may reword its fact but must keep one. Matched whole, not
-/// by stem, so a "pricing plan" isn't "planned".
-const HEDGES: [&str; 31] = [
+/// Words saying work was only proposed, planned, begun, tried or tested, or
+/// only partly the person's, as written: a line may reword its fact but must
+/// keep one. Matched whole, not by stem, so a "pricing plan" isn't
+/// "planned".
+const HEDGES: [&str; 42] = [
     "proposed",
     "propose",
     "proposing",
@@ -54,6 +55,63 @@ const HEDGES: [&str; 31] = [
     "aiming to",
     "intends to",
     "hoping to",
+    "assisted",
+    "assisting",
+    "helped",
+    "helping",
+    "contributed",
+    "contributing",
+    "participated",
+    "participating",
+    "shadowed",
+    "shadowing",
+    "co-led",
+];
+/// Words claiming the work was the person's to lead, as written and in
+/// each form: a line may say one only where a fact does, so "reviewed"
+/// can't become "owned". Kron's own ladder, above doing the work.
+const LEADS: [&str; 41] = [
+    "led",
+    "lead",
+    "leads",
+    "leading",
+    "head",
+    "heads",
+    "headed",
+    "heading",
+    "own",
+    "owns",
+    "owned",
+    "owning",
+    "manage",
+    "manages",
+    "managed",
+    "managing",
+    "direct",
+    "directs",
+    "directed",
+    "directing",
+    "supervise",
+    "supervises",
+    "supervised",
+    "supervising",
+    "oversee",
+    "oversees",
+    "oversaw",
+    "overseeing",
+    "spearheaded",
+    "architected",
+    "chair",
+    "chairs",
+    "chaired",
+    "chairing",
+    "founded",
+    "co-founded",
+    "in charge",
+    "run",
+    "runs",
+    "ran",
+    "running",
 ];
 /// Words a line may not add, as "without downtime" or "no outages" claim
 /// what a fact didn't.
@@ -158,9 +216,10 @@ fn check(
 }
 
 /// Why `text` says more than `facts` by a qualifier, if it does: it keeps
-/// none of their hedges ("proposed", "planned"), or it adds a negation
-/// ("without", "no") none of them has. A fact's own negation may go: "a
-/// prototype that wasn't shipped" may be "a prototype".
+/// none of their hedges ("proposed", "helped"), or it adds a negation
+/// ("without", "no") or a lead word ("led", "owned") none of them has. A
+/// fact's own negation may go: "a prototype that wasn't shipped" may be "a
+/// prototype".
 fn qualifier(text: &str, facts: &[&str]) -> Option<UnsupportedReason> {
     let line = spoken(text);
     if !HEDGES
@@ -178,13 +237,19 @@ fn qualifier(text: &str, facts: &[&str]) -> Option<UnsupportedReason> {
         }
     }
     let facts: Vec<String> = facts.iter().map(|fact| spoken(fact)).collect();
-    NEGATIONS
+    let has = |text: &str, word: &str| text.contains(&format!(" {word} "));
+    let added = NEGATIONS
         .into_iter()
-        .find(|negation| {
-            let word = format!(" {negation} ");
-            line.contains(&word) && !facts.iter().any(|fact| fact.contains(&word))
-        })
-        .map(|negation| UnsupportedReason::AddedQualifier(negation.to_owned()))
+        .find(|negation| has(&line, negation) && !facts.iter().any(|fact| has(fact, negation)));
+    let led = || {
+        let leads = |text: &str| LEADS.into_iter().any(|lead| has(text, lead));
+        (!facts.iter().any(|fact| leads(fact)))
+            .then(|| LEADS.into_iter().find(|lead| has(&line, lead)))
+            .flatten()
+    };
+    added
+        .or_else(led)
+        .map(|word| UnsupportedReason::AddedQualifier(word.to_owned()))
 }
 
 /// `text` lowercase, as words between single spaces with one at each end,
@@ -943,7 +1008,7 @@ mod tests {
     const GENERATED: &str = include_str!("verifier/generated.txt");
     /// Labels the verifier handles: getting any of those cases wrong fails
     /// the test. The rest are only reported.
-    const HANDLED: [&str; 10] = [
+    const HANDLED: [&str; 11] = [
         "paraphrase",
         "invented_figure",
         "invented_year",
@@ -954,6 +1019,7 @@ mod tests {
         "dropped_qualifier",
         "job_wording",
         "job_echo",
+        "same_scope",
     ];
 
     struct Case {
@@ -1051,6 +1117,31 @@ mod tests {
             ),
             None,
             "wasn't is the fact's not"
+        );
+    }
+
+    #[test]
+    fn a_line_claims_to_lead_only_where_a_fact_does() {
+        let given = [fact("Reviewed pull requests for the payments team.")];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify("Owned code review for the payments team.", &cites, &given),
+            Some(UnsupportedReason::AddedQualifier("owned".to_owned()))
+        );
+        let given = [fact("Set up a weekly review I still chair.")];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify("Set up a weekly review, still chaired.", &cites, &given),
+            None,
+            "chair is chaired"
+        );
+        let given = [fact(
+            "Assisted the lead engineer in rebuilding the search index.",
+        )];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify("Rebuilt the search index.", &cites, &given),
+            Some(UnsupportedReason::DroppedQualifier("assisted".to_owned()))
         );
     }
 

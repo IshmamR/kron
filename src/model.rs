@@ -237,7 +237,8 @@ pub enum UnsupportedReason {
     /// The line leaves out a word of its facts that says the work wasn't
     /// done, or not all of it: "proposed", "planned", "started".
     DroppedQualifier(String),
-    /// The line says "without", "no" or "never" where its facts don't.
+    /// The line says "without", "no" or "never", or claims to have "led" or
+    /// "owned" the work, where its facts don't.
     AddedQualifier(String),
     /// The line takes a word from the job's ad that its facts don't say.
     JobEcho(String),
