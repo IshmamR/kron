@@ -71,6 +71,31 @@ pub fn stands(phrase: &str, new: &[String]) -> bool {
     new.iter().any(|word| phrase.contains(word.as_str()))
 }
 
+/// `phrase` without the words that only join it to the rest of its line,
+/// like "and" in "and fixed": quoted, they would read as part of the claim.
+pub fn quoted(phrase: &str) -> &str {
+    const JOINING: [&str; 5] = ["and", "or", "but", "then", "also"];
+    let mut phrase = phrase.trim_matches(|character: char| {
+        character.is_whitespace() || matches!(character, ',' | ';' | '.' | ':')
+    });
+    loop {
+        let before = phrase;
+        if let Some((first, rest)) = phrase.split_once(' ')
+            && JOINING.contains(&first.to_lowercase().as_str())
+        {
+            phrase = rest.trim_start();
+        }
+        if let Some((rest, last)) = phrase.rsplit_once(' ')
+            && JOINING.contains(&last.to_lowercase().as_str())
+        {
+            phrase = rest.trim_end_matches([' ', ',']);
+        }
+        if phrase == before {
+            return phrase;
+        }
+    }
+}
+
 /// A line the check says claims more than its facts.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Flag {
@@ -188,6 +213,16 @@ mod tests {
         );
         assert!(matches!(self::flags(r#"{"lines": []}"#, 3), Ok(flags) if flags.is_empty()));
         assert!(self::flags("not JSON", 3).is_err());
+    }
+
+    #[test]
+    fn a_quote_leaves_out_the_words_that_join_it_to_its_line() {
+        assert_eq!(quoted("and fixed"), "fixed");
+        assert_eq!(quoted("And then fixed,"), "fixed");
+        assert_eq!(quoted("fixed and"), "fixed");
+        assert_eq!(quoted("Taught a course"), "Taught a course");
+        assert_eq!(quoted("found and fixed"), "found and fixed");
+        assert_eq!(quoted("and"), "and", "a lone word stays");
     }
 
     #[test]

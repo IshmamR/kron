@@ -656,7 +656,7 @@ impl Draft {
             let Some(checked) = self.checked.get(flag.index) else {
                 continue;
             };
-            let words = redaction.restore(&flag.phrase, sent);
+            let words = meaning_check::quoted(&redaction.restore(&flag.phrase, sent)).to_owned();
             if !meaning_check::stands(&words, &checked.new) {
                 continue;
             }
@@ -1378,7 +1378,7 @@ mod tests {
             claims_before,
             "a flag on the facts' own words is passed over"
         );
-        draft.leave_out(&[flag("Led moving")], &redaction, &material.listing);
+        draft.leave_out(&[flag("and Led moving,")], &redaction, &material.listing);
         let shown = shown(&draft.sections, &material);
         assert!(
             !shown.iter().any(|line| line.starts_with("Led moving 12")),
