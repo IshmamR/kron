@@ -286,8 +286,8 @@ Test set first. Each rule only adds rejections, and each is measured on
   - Role and company are filled in from the description, for the user to
     confirm.
 - [x] **Preview zoom:** Ctrl + / − / 0, and "fit width" (2026-11-22). Zoom
-  is a vertical pill at the pages' bottom right (zoom in, actual size, zoom
-  out, fit width; the percentage is in the tooltips). The template and paper
+  is a vertical pill at the pages' bottom right (+, −, fit width, back to
+  100%; the percentage is in the tooltips). The template and paper
   menus moved from their own row into a pill at the top left, so the page
   gets that row back.
 - [ ] **Re-join broken lines** in "Check the text": join a line that doesn't end

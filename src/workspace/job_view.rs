@@ -1619,8 +1619,8 @@ fn page_menus(version: &Version, read_only: bool, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// A pill floating over the pages' bottom right corner: zoom in, back to
-/// actual size, zoom out, and fit to the width. The zoom itself is in the
+/// A pill floating over the pages' bottom right corner: zoom in, zoom out,
+/// then fit to the width and back to 100%. The zoom itself is in the
 /// tooltips: a percentage among the icons made the pill uneven.
 fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
     let divider = || div().h(px(1.)).w_4().bg(cx.theme().border);
@@ -1629,7 +1629,7 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
         .items_center()
         .child(
             Button::new("zoom-in")
-                .icon(lucide("zoom-in"))
+                .icon(IconName::Plus)
                 .ghost()
                 .small()
                 .disabled(zoom >= ZOOMS[ZOOMS.len() - 1])
@@ -1641,21 +1641,8 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(ZoomIn), cx)),
         )
         .child(
-            Button::new("actual-size")
-                .icon(IconName::Search)
-                .ghost()
-                .small()
-                .disabled(zoom == 1.)
-                .tooltip_with_action(
-                    format!("Actual size (now {percent})"),
-                    &ResetZoom,
-                    Some(KEY_CONTEXT),
-                )
-                .on_click(|_, window, cx| window.dispatch_action(Box::new(ResetZoom), cx)),
-        )
-        .child(
             Button::new("zoom-out")
-                .icon(lucide("zoom-out"))
+                .icon(IconName::Minus)
                 .ghost()
                 .small()
                 .disabled(zoom <= ZOOMS[0])
@@ -1669,11 +1656,24 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
         .child(divider())
         .child(
             Button::new("fit-width")
-                .icon(lucide("move-horizontal"))
+                .icon(lucide("maximize-2"))
                 .ghost()
                 .small()
                 .tooltip("Fit width")
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(FitWidth), cx)),
+        )
+        .child(
+            Button::new("actual-size")
+                .icon(lucide("rotate-ccw"))
+                .ghost()
+                .small()
+                .disabled(zoom == 1.)
+                .tooltip_with_action(
+                    format!("Back to 100% (now {percent})"),
+                    &ResetZoom,
+                    Some(KEY_CONTEXT),
+                )
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ResetZoom), cx)),
         )
 }
 
