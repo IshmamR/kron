@@ -620,7 +620,7 @@ fn unsupported_reason(reason: &UnsupportedReason) -> String {
         UnsupportedReason::InventedYear(year) => format!("{year} isn't in any of your facts"),
         UnsupportedReason::NoSupportingFact => "No fact supports this".into(),
         UnsupportedReason::UsesHiddenFact(_) => "Relies on a fact you hid".into(),
-        UnsupportedReason::OtherEntry => "Mixes in work from another entry".into(),
+        UnsupportedReason::OtherEntry => "Mixes in work from another job".into(),
         UnsupportedReason::DroppedQualifier(word) => {
             format!("Leaves out “{word}” from your fact")
         }

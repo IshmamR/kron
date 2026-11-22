@@ -238,13 +238,14 @@ fn qualifier(text: &str, facts: &[&str]) -> Option<UnsupportedReason> {
         .any(|hedge| line.contains(&format!(" {hedge} ")))
     {
         let dropped = facts.iter().find_map(|fact| {
-            let fact = spoken(fact);
+            let spoken = spoken(fact);
             HEDGES
                 .into_iter()
-                .find(|hedge| fact.contains(&format!(" {hedge} ")))
+                .find(|hedge| spoken.contains(&format!(" {hedge} ")))
+                .map(|hedge| as_written(fact, hedge))
         });
         if let Some(hedge) = dropped {
-            return Some(UnsupportedReason::DroppedQualifier(hedge.to_owned()));
+            return Some(UnsupportedReason::DroppedQualifier(hedge));
         }
     }
     let facts: Vec<String> = facts.iter().map(|fact| spoken(fact)).collect();
@@ -260,7 +261,26 @@ fn qualifier(text: &str, facts: &[&str]) -> Option<UnsupportedReason> {
     };
     added
         .or_else(led)
-        .map(|word| UnsupportedReason::AddedQualifier(word.to_owned()))
+        .map(|word| UnsupportedReason::AddedQualifier(as_written(text, word)))
+}
+
+/// `word` as `text` writes it, capitals kept: "Owned" for "owned". The word
+/// itself where `text` spells it another way, as "not" in "wasn't".
+fn as_written(text: &str, word: &str) -> String {
+    let in_word = |character: Option<char>| {
+        character
+            .is_some_and(|character| character.is_alphanumeric() || matches!(character, '-' | '_'))
+    };
+    text.char_indices()
+        .filter(|(start, _)| !in_word(text[..*start].chars().next_back()))
+        .find_map(|(start, _)| {
+            let end = start + word.len();
+            let found = text.get(start..end)?;
+            (found.eq_ignore_ascii_case(word) && !in_word(text[end..].chars().next()))
+                .then_some(found)
+        })
+        .unwrap_or(word)
+        .to_owned()
 }
 
 /// `text` lowercase, as words between single spaces with one at each end,
@@ -1105,7 +1125,7 @@ mod tests {
         let cites = [given[0].id];
         assert_eq!(
             verify("Rewrote the editor.", &cites, &given),
-            Some(UnsupportedReason::DroppedQualifier("planned".to_owned()))
+            Some(UnsupportedReason::DroppedQualifier("Planned".to_owned()))
         );
         assert_eq!(
             verify("Planned a rewrite of the editor.", &cites, &given),
@@ -1137,7 +1157,8 @@ mod tests {
         let cites = [given[0].id];
         assert_eq!(
             verify("Owned code review for the payments team.", &cites, &given),
-            Some(UnsupportedReason::AddedQualifier("owned".to_owned()))
+            Some(UnsupportedReason::AddedQualifier("Owned".to_owned())),
+            "quoted as the line writes it"
         );
         let given = [fact("Set up a weekly review I still chair.")];
         let cites = [given[0].id];
@@ -1152,7 +1173,7 @@ mod tests {
         let cites = [given[0].id];
         assert_eq!(
             verify("Rebuilt the search index.", &cites, &given),
-            Some(UnsupportedReason::DroppedQualifier("assisted".to_owned()))
+            Some(UnsupportedReason::DroppedQualifier("Assisted".to_owned()))
         );
     }
 
