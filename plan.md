@@ -238,8 +238,11 @@ Test set first. Each rule only adds rejections, and each is measured on
   (2026-11-22). Left: found → fixed, a guest lecture → a course, wrote a
   guide → set the standards; no word list catches those.
 - [ ] **A term check against ESCO and Wikidata.**
-- [ ] **Three states in the inspector:** Checked, Reworded (with the new words
-  highlighted), and Left out.
+- [x] **Three states in the inspector:** Checked, Reworded (with the new words
+  highlighted), and Left out. On the page, a reworded line's new words have
+  a highlight underlined darker, as Grammarly marks; it's never exported.
+  Checked has no mark and is said only in the inspector, to keep the page
+  clear (2026-11-22).
 - [ ] **Generation returns the words of each fact it used.** Optionally, limit
   bullets to a menu of edits (keep, trim, merge within an entry, a verb no
   higher on the ladder). Compare fluency against the rejection rate.

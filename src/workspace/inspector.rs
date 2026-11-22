@@ -6,7 +6,7 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, ElementId, Entity, HighlightStyle, IntoElement, SharedString, StyledText,
-    Window, div, prelude::*,
+    UnderlineStyle, Window, div, prelude::*, px,
 };
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -207,9 +207,9 @@ impl Inspector {
             })
     }
 
-    /// The line with the words its facts don't have marked, if it has any:
-    /// a fair rewording has some, so they're for the user to check, not
-    /// errors.
+    /// Whether every word of the line is in its facts, or which aren't,
+    /// marked as they are on the page: a fair rewording has some, so
+    /// they're for the user to check, not errors.
     fn new_words(&self, line: &ShownLine, cx: &App) -> Option<impl IntoElement> {
         let facts: Vec<&str> = self
             .inspection
@@ -218,21 +218,31 @@ impl Inspector {
             .filter_map(|cited| cited.fact.as_ref())
             .map(|fact| fact.text.as_str())
             .collect();
-        let new = verifier::new_words(&line.text, &facts);
-        if facts.is_empty() || new.is_empty() {
+        if facts.is_empty() {
             return None;
+        }
+        let new = verifier::new_words(&line.text, &facts);
+        if new.is_empty() {
+            return Some(
+                caption("Checked: every word of this line is in its facts.", cx).into_any_element(),
+            );
         }
         let theme = cx.theme();
         let highlight = HighlightStyle {
             color: Some(theme.foreground),
             background_color: Some(theme.warning.opacity(0.25)),
+            underline: Some(UnderlineStyle {
+                thickness: px(2.),
+                color: Some(theme.warning),
+                wavy: false,
+            }),
             ..Default::default()
         };
         Some(
             v_flex()
                 .gap_1()
                 .child(caption(
-                    "Marked: words its facts don't have. Check they're true of you.",
+                    "Reworded: the marked words aren't in its facts. Check they're true of you.",
                     cx,
                 ))
                 .child(
@@ -245,7 +255,8 @@ impl Inspector {
                             StyledText::new(line.text.clone())
                                 .with_highlights(new.into_iter().map(|range| (range, highlight))),
                         ),
-                ),
+                )
+                .into_any_element(),
         )
     }
 

@@ -19,8 +19,10 @@ use crate::llm::{self, Purpose};
 use crate::model::generation::{self, Draft, Material};
 use crate::model::redaction::{self, Redaction};
 use crate::model::settings;
-use crate::model::{self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands};
-use crate::typeset::{self, LineBox, PageSize, Paper, Template};
+use crate::model::{
+    self, Application, FactChange, FactId, JobId, LineId, ResumeId, commands, verifier,
+};
+use crate::typeset::{self, LineBox, PageSize, Paper, Template, WordBox};
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -60,6 +62,9 @@ const PAPER: u32 = 0xfafafa;
 const SELECTION: u32 = 0x497858;
 const EDITED_MARKER: u32 = 0x497858;
 const OUTDATED_MARKER: u32 = 0xbf8700;
+/// Words a line has that its facts don't: a highlight, underlined darker.
+const REWORDED: u32 = 0xf5c542;
+const REWORDED_UNDERLINE: u32 = 0xb8860b;
 
 actions!(
     job_view,
@@ -1248,7 +1253,21 @@ impl JobView {
                     .filter(|line_box| line_box.page == index)
                     .copied()
                     .collect();
-                self.render_page(index, image.clone(), *size, &boxes, &markers, cx)
+                let reworded: Vec<WordBox> = resume
+                    .lines
+                    .iter()
+                    .filter(|line| !line.reworded.is_empty())
+                    .flat_map(|line| {
+                        let words: Vec<&str> = line
+                            .reworded
+                            .iter()
+                            .filter_map(|range| line.text.get(range.clone()))
+                            .collect();
+                        pages.layout.word_boxes(line.id, &words)
+                    })
+                    .filter(|word| word.page == index)
+                    .collect();
+                self.render_page(index, image.clone(), *size, &boxes, &reworded, &markers, cx)
             });
 
         // Our own scroll handle rather than `overflow_y_scrollbar`, which
@@ -1284,6 +1303,7 @@ impl JobView {
         image: Arc<RenderImage>,
         size: PageSize,
         boxes: &[LineBox],
+        reworded: &[WordBox],
         markers: &Markers,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1310,6 +1330,19 @@ impl JobView {
             .bg(rgb(PAPER))
             .shadow_md()
             .child(img(image).absolute().size_full())
+            // Not part of the printed page either: the words a line has that
+            // its facts don't, for the user to check.
+            .children(reworded.iter().map(|word| {
+                div()
+                    .absolute()
+                    .left(px(word.left * scale - 1.))
+                    .top(px(word.top * scale))
+                    .w(px((word.right - word.left) * scale + 2.))
+                    .h(px((word.bottom - word.top) * scale))
+                    .bg(Hsla::from(rgb(REWORDED)).opacity(0.3))
+                    .border_b_2()
+                    .border_color(rgb(REWORDED_UNDERLINE))
+            }))
             .children(
                 boxes
                     .iter()
@@ -1714,6 +1747,9 @@ pub struct ShownLine {
     /// The facts it cites, in order: for one merged into another since, that
     /// one.
     pub cites: Vec<FactId>,
+    /// Where its text has words its facts don't: a rewording, for the user
+    /// to check.
+    pub reworded: Vec<std::ops::Range<usize>>,
 }
 
 impl ShownLine {
@@ -1739,6 +1775,7 @@ impl ShownResume {
                     text: row.get(1)?,
                     generated: row.get(2)?,
                     cites: Vec::new(),
+                    reworded: Vec::new(),
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -1746,6 +1783,23 @@ impl ShownResume {
         for (line, fact) in citations {
             if let Some(line) = lines.iter_mut().find(|each| each.id == line) {
                 line.cites.push(fact);
+            }
+        }
+        let mut text_of = connection
+            .prepare_cached("SELECT text FROM facts WHERE id = ?1 AND deleted_at IS NULL")?;
+        for line in &mut lines {
+            let mut facts = Vec::new();
+            for fact in &line.cites {
+                if let Some(text) = text_of
+                    .query_row([fact.0], |row| row.get::<_, String>(0))
+                    .optional()?
+                {
+                    facts.push(text);
+                }
+            }
+            if !facts.is_empty() {
+                let facts: Vec<&str> = facts.iter().map(String::as_str).collect();
+                line.reworded = verifier::new_words(&line.text, &facts);
             }
         }
         Ok(Self {

@@ -167,6 +167,31 @@ pub struct ResumeLayout {
     /// One box per line per page it's on; a line split by a page break has
     /// two.
     pub boxes: Vec<LineBox>,
+    /// Each line's text as it was set, run by run in reading order, for
+    /// finding where its words are.
+    pub runs: Vec<Run>,
+}
+
+/// A run of a line's text as set on one row of one page.
+#[derive(Clone, Debug)]
+pub struct Run {
+    pub line: LineId,
+    pub page: usize,
+    pub text: String,
+    /// Each glyph's bytes in `text`, with its left and right.
+    pub glyphs: Vec<(std::ops::Range<usize>, f32, f32)>,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// Where a word, or the part of one on a row, is on its page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WordBox {
+    pub page: usize,
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,6 +229,7 @@ impl ResumeLayout {
         for (page, contents) in document.pages().iter().enumerate() {
             collector.collect(&contents.frame, Transform::identity(), page);
         }
+        let runs = collector.runs;
         let tight = collector.boxes;
         let pages = document
             .pages()
@@ -235,7 +261,55 @@ impl ResumeLayout {
             })
             .collect();
 
-        Self { pages, boxes }
+        Self { pages, boxes, runs }
+    }
+
+    /// Where `words`, taken in order from `line`'s text, were set: a box for
+    /// each row a word is on. A word not found as set, as one the template
+    /// changed, has none.
+    pub fn word_boxes(&self, line: LineId, words: &[&str]) -> Vec<WordBox> {
+        let runs: Vec<&Run> = self.runs.iter().filter(|run| run.line == line).collect();
+        // The runs joined by a space, which a row break stands for, with
+        // where each starts.
+        let mut joined = String::new();
+        let mut starts = Vec::new();
+        for run in &runs {
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            starts.push(joined.len());
+            joined.push_str(&run.text);
+        }
+        let mut boxes = Vec::new();
+        let mut from = 0;
+        for word in words {
+            let Some(found) = find_word(&joined, word, from) else {
+                continue;
+            };
+            from = found.end;
+            for (run, &start) in runs.iter().zip(&starts) {
+                let edges: Vec<(f32, f32)> = run
+                    .glyphs
+                    .iter()
+                    .filter(|(bytes, ..)| {
+                        let (glyph_start, glyph_end) = (start + bytes.start, start + bytes.end);
+                        glyph_start < found.end && found.start < glyph_end
+                    })
+                    .map(|(_, left, right)| (*left, *right))
+                    .collect();
+                if let Some(left) = edges.iter().map(|edge| edge.0).reduce(f32::min) {
+                    let right = edges.iter().map(|edge| edge.1).fold(left, f32::max);
+                    boxes.push(WordBox {
+                        page: run.page,
+                        left,
+                        top: run.top,
+                        right,
+                        bottom: run.bottom,
+                    });
+                }
+            }
+        }
+        boxes
     }
 
     /// Where boxes overlap, as a large name's does the contacts set tight
@@ -297,6 +371,22 @@ impl ResumeLayout {
         keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         keyed.into_iter().map(|(_, _, line)| line).collect()
     }
+}
+
+/// Where `word` is in `text` at or after `from`, as a whole word: "one" isn't
+/// found in "phone".
+fn find_word(text: &str, word: &str, from: usize) -> Option<std::ops::Range<usize>> {
+    let in_word = |character: Option<char>| character.is_some_and(char::is_alphanumeric);
+    let mut at = from;
+    while let Some(offset) = text.get(at..)?.find(word) {
+        let start = at + offset;
+        let end = start + word.len();
+        if !in_word(text[..start].chars().next_back()) && !in_word(text[end..].chars().next()) {
+            return Some(start..end);
+        }
+        at = end;
+    }
+    None
 }
 
 /// Whether `other` is another line on the same row of the same page. Rows set
@@ -605,6 +695,7 @@ fn contact_link(text: &str) -> Option<String> {
 struct BoxCollector {
     open: Vec<(Location, LineId)>,
     boxes: Vec<LineBox>,
+    runs: Vec<Run>,
 }
 
 impl BoxCollector {
@@ -644,6 +735,23 @@ impl BoxCollector {
                     let (left, top) = (top_left.x.to_pt() as f32, top_left.y.to_pt() as f32);
                     let (right, bottom) =
                         (bottom_right.x.to_pt() as f32, bottom_right.y.to_pt() as f32);
+                    let mut advanced = position.x;
+                    let mut glyphs = Vec::new();
+                    for glyph in &text.glyphs {
+                        let width = glyph.x_advance.at(text.size);
+                        let edge =
+                            |x| Point::new(x, position.y).transform(transform).x.to_pt() as f32;
+                        glyphs.push((glyph.range(), edge(advanced), edge(advanced + width)));
+                        advanced += width;
+                    }
+                    self.runs.push(Run {
+                        line,
+                        page,
+                        text: text.text.to_string(),
+                        glyphs,
+                        top,
+                        bottom,
+                    });
                     self.extend(LineBox {
                         line,
                         page,
@@ -929,6 +1037,49 @@ mod tests {
             Some("https://github.com/alexr")
         );
         assert_eq!(contact_link("Dhaka, Bangladesh"), None);
+    }
+
+    #[test]
+    fn a_lines_words_are_found_inside_it_in_every_template() {
+        let (mut words, mut found) = (0, 0);
+        for (resume, typeset) in every_sample_in_every_template() {
+            for line in resume.lines() {
+                let line_words: Vec<&str> = line
+                    .text
+                    .split(|character: char| !character.is_alphanumeric())
+                    .filter(|word| !word.is_empty())
+                    .collect();
+                let line_boxes: Vec<&LineBox> = typeset.layout.boxes_of(line.id).collect();
+                for word in &line_words {
+                    let boxes = typeset.layout.word_boxes(line.id, &[word]);
+                    words += 1;
+                    found += usize::from(!boxes.is_empty());
+                    for word_box in boxes {
+                        let inside = line_boxes.iter().any(|line_box| {
+                            line_box.page == word_box.page
+                                && line_box.left - 0.5 <= word_box.left
+                                && word_box.right <= line_box.right + 0.5
+                                && line_box.top - 0.5 <= word_box.top
+                                && word_box.bottom <= line_box.bottom + 0.5
+                        });
+                        assert!(
+                            inside,
+                            "{word:?} of {:?} in {:?}",
+                            line.text, resume.template
+                        );
+                    }
+                }
+            }
+        }
+        // Templates may set a word otherwise, as small capitals; most aren't.
+        assert!(found * 10 >= words * 9, "{found} of {words} words found");
+    }
+
+    #[test]
+    fn a_word_is_found_whole() {
+        assert_eq!(find_word("phone one", "one", 0), Some(6..9));
+        assert_eq!(find_word("phone", "one", 0), None);
+        assert_eq!(find_word("one, one", "one", 1), Some(5..8));
     }
 
     #[test]
