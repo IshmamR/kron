@@ -237,7 +237,10 @@ Test set first. Each rule only adds rejections, and each is measured on
   9 of 12 caught, no false flags on same_scope or the real lines
   (2026-11-22). Left: found → fixed, a guest lecture → a course, wrote a
   guide → set the standards; no word list catches those.
-- [ ] **A term check against ESCO and Wikidata.**
+- [ ] **A term check against ESCO and Wikidata.** Left for later (2026-11-22):
+  neither gives every skill its synonyms (ESCO's are formal phrasings,
+  Wikidata's crowd-added), Kron would have to bundle an extract, and all it
+  would fix is a check mark on an alias like "Kubernetes" for "k8s".
 - [x] **Three states in the inspector:** Checked, Reworded (with the new words
   highlighted), and Left out. On the page, a reworded line's new words have
   a highlight underlined darker, as Grammarly marks; it's never exported.
