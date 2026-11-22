@@ -1239,6 +1239,19 @@ impl JobView {
                 .filter(|line| resume.is_outdated(line))
                 .map(|line| line.id)
                 .collect(),
+            reworded: resume
+                .lines
+                .iter()
+                .filter(|line| !line.reworded.is_empty())
+                .flat_map(|line| {
+                    let words: Vec<&str> = line
+                        .reworded
+                        .iter()
+                        .filter_map(|range| line.text.get(range.clone()))
+                        .collect();
+                    pages.layout.word_boxes(line.id, &words)
+                })
+                .collect(),
         };
         let page_elements = pages
             .images
@@ -1253,21 +1266,7 @@ impl JobView {
                     .filter(|line_box| line_box.page == index)
                     .copied()
                     .collect();
-                let reworded: Vec<WordBox> = resume
-                    .lines
-                    .iter()
-                    .filter(|line| !line.reworded.is_empty())
-                    .flat_map(|line| {
-                        let words: Vec<&str> = line
-                            .reworded
-                            .iter()
-                            .filter_map(|range| line.text.get(range.clone()))
-                            .collect();
-                        pages.layout.word_boxes(line.id, &words)
-                    })
-                    .filter(|word| word.page == index)
-                    .collect();
-                self.render_page(index, image.clone(), *size, &boxes, &reworded, &markers, cx)
+                self.render_page(index, image.clone(), *size, &boxes, &markers, cx)
             });
 
         // Our own scroll handle rather than `overflow_y_scrollbar`, which
@@ -1303,7 +1302,6 @@ impl JobView {
         image: Arc<RenderImage>,
         size: PageSize,
         boxes: &[LineBox],
-        reworded: &[WordBox],
         markers: &Markers,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -1332,17 +1330,23 @@ impl JobView {
             .child(img(image).absolute().size_full())
             // Not part of the printed page either: the words a line has that
             // its facts don't, for the user to check.
-            .children(reworded.iter().map(|word| {
-                div()
-                    .absolute()
-                    .left(px(word.left * scale - 1.))
-                    .top(px(word.top * scale))
-                    .w(px((word.right - word.left) * scale + 2.))
-                    .h(px((word.bottom - word.top) * scale))
-                    .bg(Hsla::from(rgb(REWORDED)).opacity(0.3))
-                    .border_b_2()
-                    .border_color(rgb(REWORDED_UNDERLINE))
-            }))
+            .children(
+                markers
+                    .reworded
+                    .iter()
+                    .filter(|word| word.page == index)
+                    .map(|word| {
+                        div()
+                            .absolute()
+                            .left(px(word.left * scale - 1.))
+                            .top(px(word.top * scale))
+                            .w(px((word.right - word.left) * scale + 2.))
+                            .h(px((word.bottom - word.top) * scale))
+                            .bg(Hsla::from(rgb(REWORDED)).opacity(0.3))
+                            .border_b_2()
+                            .border_color(rgb(REWORDED_UNDERLINE))
+                    }),
+            )
             .children(
                 boxes
                     .iter()
@@ -1437,6 +1441,8 @@ struct Markers {
     edited: Vec<LineId>,
     /// Lines citing facts that changed since the résumé was generated.
     outdated: Vec<LineId>,
+    /// Words lines have that their facts don't, on every page.
+    reworded: Vec<WordBox>,
 }
 
 fn margin_marker(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Div> {
