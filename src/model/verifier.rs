@@ -1256,6 +1256,133 @@ mod tests {
         }
     }
 
+    /// Whether the rules reject the case's line, citing all its facts.
+    fn by_rules(case: &Case) -> bool {
+        // A case's line is in the entry of its first fact.
+        let entry =
+            |name: Option<&str>| name.and_then(|name| name.trim_start_matches('E').parse().ok());
+        let given: Vec<GivenFact> = case
+            .facts
+            .iter()
+            .zip(&case.entries)
+            .map(|(text, name)| GivenFact {
+                entry: entry(*name),
+                ..fact(text)
+            })
+            .collect();
+        let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
+        let job = job_words(case.job.unwrap_or_default());
+        match given.first().and_then(|fact| fact.entry) {
+            Some(entry) => verify_bullet(case.line, entry, &cites, &given),
+            None => verify(case.line, &cites, &given),
+        }
+        .or_else(|| echo(case.line, &case.facts, &job))
+        .is_some()
+    }
+
+    /// Runs every case through the rules, then the lines they pass through
+    /// the meaning check on the AI service the résumé task runs on in the
+    /// development data, and prints per label how many each gets wrong, and
+    /// every line the check changed the verdict on, with the words it gave.
+    /// It costs money and needs the network, so it runs only when asked:
+    /// `cargo test live_meaning_check -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_meaning_check() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::model::meaning_check::{self, Checked};
+        const CHUNK: usize = 25;
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::GenerateResume)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let started = std::time::Instant::now();
+        for (name, set) in [("cases.txt", CASES), ("generated.txt", GENERATED)] {
+            let cases = cases(set);
+            let rules: Vec<bool> = cases.iter().map(by_rules).collect();
+            // As the app does: a line the rules passed, with words its facts
+            // don't have.
+            let passed: Vec<usize> = (0..cases.len())
+                .filter(|index| !rules[*index])
+                .filter(|index| {
+                    !meaning_check::new_words(cases[*index].line, &cases[*index].facts).is_empty()
+                })
+                .collect();
+            let checked: Vec<Checked> = passed
+                .iter()
+                .map(|index| Checked {
+                    line: crate::model::LineId::new(),
+                    text: cases[*index].line.to_owned(),
+                    facts: cases[*index]
+                        .facts
+                        .iter()
+                        .map(|fact| fact.to_string())
+                        .collect(),
+                    new: meaning_check::new_words(cases[*index].line, &cases[*index].facts),
+                })
+                .collect();
+            let mut ignored = Vec::new();
+            let mut phrases: Vec<Option<String>> = vec![None; cases.len()];
+            for (chunk_index, chunk) in checked.chunks(CHUNK).enumerate() {
+                let reply = runtime
+                    .block_on(crate::llm::call(
+                        &assigned,
+                        key.clone(),
+                        meaning_check::request(chunk),
+                    ))
+                    .map_err(|error| error.to_string())?;
+                for flag in meaning_check::flags(&reply.response.text(), chunk.len())? {
+                    let index = passed[chunk_index * CHUNK + flag.index];
+                    if meaning_check::stands(&flag.phrase, &chunk[flag.index].new) {
+                        phrases[index] = Some(flag.phrase);
+                    } else {
+                        ignored.push((index, flag.phrase));
+                    }
+                }
+            }
+            let mut tally: Vec<(&str, usize, usize, usize)> = Vec::new();
+            for (index, case) in cases.iter().enumerate() {
+                let checked = rules[index] || phrases[index].is_some();
+                let wrong = |flagged: bool| usize::from(flagged == true_label(case.label));
+                match tally.iter_mut().find(|(label, ..)| *label == case.label) {
+                    Some((_, total, by_rules, both)) => {
+                        *total += 1;
+                        *by_rules += wrong(rules[index]);
+                        *both += wrong(checked);
+                    }
+                    None => tally.push((case.label, 1, wrong(rules[index]), wrong(checked))),
+                }
+            }
+            println!("{name}: wrong by the rules, then with the meaning check");
+            for (label, total, by_rules, both) in &tally {
+                let kind = if true_label(label) {
+                    "false flags"
+                } else {
+                    "false passes"
+                };
+                println!("  {label:<17} {by_rules:>2} → {both:>2} of {total:>3} {kind}");
+            }
+            for (index, case) in cases.iter().enumerate() {
+                if let Some(phrase) = &phrases[index] {
+                    let verdict = if true_label(case.label) {
+                        "FALSE FLAG"
+                    } else {
+                        "caught"
+                    };
+                    println!("  {verdict} {}: {:?} ← “{phrase}”", case.label, case.line);
+                }
+            }
+            for (index, phrase) in ignored {
+                let case = &cases[index];
+                println!(
+                    "  passed over, names no new word, {}: {:?} ← “{phrase}”",
+                    case.label, case.line
+                );
+            }
+        }
+        println!("== {:.1} s", started.elapsed().as_secs_f32());
+        Ok(())
+    }
+
     /// Runs every case of `set` citing all its facts, and prints, per label,
     /// how many the verifier gets wrong: false passes for fabrications,
     /// false flags for true lines. Returns the lines it got wrong whose
@@ -1264,27 +1391,7 @@ mod tests {
         let mut tally: Vec<(&str, usize, usize)> = Vec::new();
         let mut regressions = Vec::new();
         for case in cases(set) {
-            // A case's line is in the entry of its first fact.
-            let entry = |name: Option<&str>| {
-                name.and_then(|name| name.trim_start_matches('E').parse::<usize>().ok())
-            };
-            let given: Vec<GivenFact> = case
-                .facts
-                .iter()
-                .zip(&case.entries)
-                .map(|(text, name)| GivenFact {
-                    entry: entry(*name),
-                    ..fact(text)
-                })
-                .collect();
-            let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
-            let job = job_words(case.job.unwrap_or_default());
-            let flagged = match given.first().and_then(|fact| fact.entry) {
-                Some(entry) => verify_bullet(case.line, entry, &cites, &given),
-                None => verify(case.line, &cites, &given),
-            }
-            .or_else(|| echo(case.line, &case.facts, &job))
-            .is_some();
+            let flagged = by_rules(&case);
             let wrong = flagged == true_label(case.label);
             match tally.iter_mut().find(|(label, ..)| *label == case.label) {
                 Some((.., total, wrongs)) => {

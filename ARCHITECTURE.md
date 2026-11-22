@@ -111,8 +111,11 @@ misses overstated roles ("contributed" to "led"), added terms ("on AWS"),
 negation, months, and merged facts that are each true but false together. It
 also flags some true rewordings ("2019–21", "doubled" for "2x"). The inspector
 marks the words a line has that its facts don't (`verifier::new_words`), for
-the user to check. A model-based meaning check that can only add rejections is
-planned, not built.
+the user to check. Then the meaning check (`model/meaning_check.rs`), one more
+call on the résumé's AI service, reads the passed lines that have such words
+beside their facts and names the ones that claim more; a flagged line is left
+out as `says_more`. It can only add rejections, a flag counts only if it names
+one of the line's new words, and if the call fails the rules' verdict stands.
 
 `model/verifier/cases.txt` holds labelled test lines, and `generated.txt`
 lines a model really wrote, labelled by hand; tests fail if a line that must

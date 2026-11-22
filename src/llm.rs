@@ -192,6 +192,8 @@ pub struct Run<'a> {
     pub duration: Duration,
     /// The answer, if one came.
     pub reply: Option<&'a Reply>,
+    /// The meaning check's answer, a second call, for a résumé checked.
+    pub check: Option<&'a Reply>,
     /// Whether the answer was used: one that couldn't be read wasn't.
     pub done: bool,
     /// What it ran for: a document's facts, or a job's résumé, and the
@@ -947,16 +949,29 @@ pub fn cost_label(cost: f64) -> String {
 /// A call with no price counts as unpriced, at no cost: the total is a
 /// lower bound.
 pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
-    let usage = run.reply.map(|reply| &reply.response.usage);
+    let usage = run
+        .reply
+        .iter()
+        .chain(&run.check)
+        .map(|reply| reply.response.usage)
+        .reduce(|sum, usage| sum + usage);
     let tokens = |count: fn(&rig_core::completion::Usage) -> Option<u64>| {
-        usage.and_then(count).unwrap_or(0) as i64
+        usage.as_ref().and_then(count).unwrap_or(0) as i64
     };
     let model = run
         .reply
         .and_then(|reply| reply.response.model())
         .unwrap_or(&run.assigned.model)
         .to_owned();
-    let cost = run.reply.and_then(|reply| reply.cost);
+    let costs = [
+        run.reply.map(|reply| reply.cost),
+        run.check.map(|check| check.cost),
+    ];
+    // A call with no answer, or one with no price, counts as unpriced.
+    let calls = 1 + i64::from(run.check.is_some());
+    let unpriced = costs[0].flatten().is_none() as i64
+        + run.check.is_some_and(|check| check.cost.is_none()) as i64;
+    let cost: f64 = costs.into_iter().flatten().flatten().sum();
     let duration = run.duration.as_millis() as i64;
     write.insert(
         LlmRuns,
@@ -969,15 +984,15 @@ pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
             llm_runs::PROVIDER.value(&run.assigned.provider.name),
             llm_runs::VENDOR.value(&run.assigned.provider.vendor),
             llm_runs::MODEL.value(&model),
-            llm_runs::CALLS.value(&1_i64),
+            llm_runs::CALLS.value(&calls),
             llm_runs::INPUT_TOKENS.value(&Some(tokens(|usage| usage.input_tokens))),
             llm_runs::CACHED_INPUT_TOKENS.value(&Some(tokens(|usage| usage.cached_input_tokens))),
             llm_runs::CACHE_WRITTEN_TOKENS
                 .value(&Some(tokens(|usage| usage.cache_creation_input_tokens))),
             llm_runs::OUTPUT_TOKENS.value(&Some(tokens(|usage| usage.output_tokens))),
             llm_runs::REASONING_TOKENS.value(&Some(tokens(|usage| usage.reasoning_tokens))),
-            llm_runs::COST.value(&Some(cost.unwrap_or(0.))),
-            llm_runs::UNPRICED_CALLS.value(&Some(i64::from(cost.is_none()))),
+            llm_runs::COST.value(&Some(cost)),
+            llm_runs::UNPRICED_CALLS.value(&Some(unpriced)),
             llm_runs::DOCUMENT_ID.value(&run.document),
             llm_runs::JOB_ID.value(&run.job),
             llm_runs::GENERATION_ID.value(&run.generation),
@@ -1342,6 +1357,7 @@ mod tests {
                     started_at: 1,
                     duration: Duration::from_millis(1500),
                     reply: None,
+                    check: None,
                     done: false,
                     document: Some(document.0),
                     job: None,

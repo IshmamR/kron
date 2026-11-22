@@ -520,6 +520,9 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
                 UnsupportedReason::AddedQualifier(word)
             }
             ("job_echo", ..) if let Some(word) = word.clone() => UnsupportedReason::JobEcho(word),
+            ("says_more", ..) if let Some(words) = word.clone() => {
+                UnsupportedReason::SaysMore(words)
+            }
             ("uses_hidden_fact", _, _, Some(fact)) => {
                 let fact = root(connection, fact)?;
                 hidden_fact_shown = connection
@@ -639,5 +642,6 @@ fn unsupported_reason(reason: &UnsupportedReason) -> String {
         UnsupportedReason::JobEcho(word) => {
             format!("“{word}” is from the job ad, not your facts")
         }
+        UnsupportedReason::SaysMore(words) => format!("“{words}” says more than your facts"),
     }
 }

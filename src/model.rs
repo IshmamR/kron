@@ -2,6 +2,7 @@ mod application;
 pub mod commands;
 pub mod extraction;
 pub mod generation;
+pub mod meaning_check;
 pub mod redaction;
 pub mod sample;
 mod section;
@@ -242,6 +243,9 @@ pub enum UnsupportedReason {
     AddedQualifier(String),
     /// The line takes a word from the job's ad that its facts don't say.
     JobEcho(String),
+    /// The meaning check found the line claims more than its facts, by the
+    /// words given: "Fixed" where they say found.
+    SaysMore(String),
 }
 
 /// Tells whether another fact probably says the same thing as `text`: most

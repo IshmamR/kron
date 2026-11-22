@@ -657,6 +657,7 @@ impl ImportPage {
                             started_at,
                             duration,
                             reply: reply.as_ref(),
+                            check: None,
                             done: found.is_ok(),
                             document: Some(document.0),
                             job: None,

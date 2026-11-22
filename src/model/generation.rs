@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::meaning_check::{self, Checked, Flag};
 use super::redaction::Redaction;
 use super::verifier::{self, GivenFact};
 use super::{
@@ -153,6 +154,9 @@ struct ChosenSkills {
 pub struct Draft {
     pub sections: Vec<Section>,
     pub claims: Vec<(String, UnsupportedReason)>,
+    /// The lines the model wrote and the rules passed, for the meaning
+    /// check.
+    pub checked: Vec<Checked>,
     /// The facts it was made from, as they are now.
     facts: Vec<(FactId, String)>,
 }
@@ -380,6 +384,33 @@ impl Draft {
             })
             .collect();
         let mut claims = Vec::new();
+        let mut checked = Vec::new();
+        // A line kept, with what the meaning check is to be sent of it: its
+        // text as the model wrote it, and its facts as they were sent.
+        let mut kept = |written: &Written, kept: Line| -> Option<Line> {
+            let cited: Vec<usize> = kept
+                .cites
+                .iter()
+                .filter_map(|id| material.facts.iter().position(|fact| fact.id == *id))
+                .collect();
+            let said: Vec<&str> = cited
+                .iter()
+                .map(|index| material.facts[*index].text.as_str())
+                .collect();
+            let new = meaning_check::new_words(&kept.text, &said);
+            if !new.is_empty() {
+                checked.push(Checked {
+                    line: kept.id,
+                    text: written.text.trim().to_owned(),
+                    facts: cited
+                        .iter()
+                        .filter_map(|index| sent_fact(&redaction.text, index + 1))
+                        .collect(),
+                    new,
+                });
+            }
+            Some(kept)
+        };
         let (years, dates) = material.experience();
         // A line the model wrote, if the verifier passes it: the summary,
         // or a bullet of `entry`, citing only that entry's facts. With
@@ -425,7 +456,7 @@ impl Draft {
                 };
                 let Some(reason) = verdict.or_else(|| verifier::echo(&text, &said(&cites), &job))
                 else {
-                    return Some(line(text, cites));
+                    return kept(written, line(text, cites));
                 };
                 if summary
                     && let Some(rest) = without_years_worked(&text, years)
@@ -438,7 +469,7 @@ impl Draft {
                             cites.push(id);
                         }
                     }
-                    return Some(line(text, cites));
+                    return kept(written, line(text, cites));
                 }
                 claims.push((text, reason));
                 None
@@ -611,9 +642,67 @@ impl Draft {
         Self {
             sections,
             claims,
+            checked,
             facts,
         }
     }
+
+    /// Takes the lines the meaning check flagged off the page, of those
+    /// `checked` lists, and lists each as a claim with the words it found
+    /// say more, put back as they were before `redaction` of `sent`. A flag
+    /// that doesn't name a word the line's facts don't have is passed over.
+    pub fn leave_out(&mut self, flags: &[Flag], redaction: &Redaction, sent: &str) {
+        for flag in flags {
+            let Some(checked) = self.checked.get(flag.index) else {
+                continue;
+            };
+            let words = redaction.restore(&flag.phrase, sent);
+            if !meaning_check::stands(&words, &checked.new) {
+                continue;
+            }
+            let mut taken = None;
+            for section in &mut self.sections {
+                for block in &mut section.blocks {
+                    match block {
+                        Block::Entry(entry) => {
+                            if let Some(at) = entry
+                                .bullets
+                                .iter()
+                                .position(|line| line.id == checked.line)
+                            {
+                                taken = Some(entry.bullets.remove(at));
+                            }
+                        }
+                        Block::Text(line) if line.id == checked.line => {
+                            taken = Some(line.clone());
+                        }
+                        _ => {}
+                    }
+                }
+                section
+                    .blocks
+                    .retain(|block| !matches!(block, Block::Text(line) if line.id == checked.line));
+            }
+            self.sections.retain(|section| {
+                section.kind != SectionKind::Summary || !section.blocks.is_empty()
+            });
+            if let Some(line) = taken {
+                self.claims
+                    .push((line.text, UnsupportedReason::SaysMore(words)));
+            }
+        }
+    }
+}
+
+/// The text of the `number`th fact as `redacted`, the facts as sent, has
+/// it: its line "F12 bullet: …" after the kind.
+fn sent_fact(redacted: &str, number: usize) -> Option<String> {
+    let prefix = format!("F{number} ");
+    redacted
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .and_then(|line| line.split_once(": "))
+        .map(|(_, text)| text.to_owned())
 }
 
 /// Saves `draft` as the job's current résumé, laid out with the default
@@ -685,6 +774,9 @@ pub fn save(
                 ("added_qualifier", None, None, None, Some(word.as_str()))
             }
             UnsupportedReason::JobEcho(word) => ("job_echo", None, None, None, Some(word.as_str())),
+            UnsupportedReason::SaysMore(words) => {
+                ("says_more", None, None, None, Some(words.as_str()))
+            }
         };
         write.insert(
             UnsupportedClaims,
@@ -1083,6 +1175,7 @@ fn sort_key(position: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::meaning_check::Flag;
     use crate::model::{redaction, sample};
 
     const STAND_IN: &str = "Jordan Ellis";
@@ -1246,6 +1339,58 @@ mod tests {
             ],
             "a figure no fact states, a word from the job's ad, a \"without\" no fact says, and \
              work of another job, with a fact of this one or alone"
+        );
+    }
+
+    #[test]
+    fn lines_the_meaning_check_flags_are_left_out() {
+        let writer = match sample::written() {
+            Ok(writer) => writer,
+            Err(error) => panic!("the sample: {error}"),
+        };
+        let (material, mut draft) = draft(writer.kron(), ANSWER);
+        let checked: Vec<(&str, &[String])> = draft
+            .checked
+            .iter()
+            .map(|checked| (checked.text.as_str(), checked.new.as_slice()))
+            .collect();
+        assert_eq!(
+            checked,
+            [(
+                "Led moving 12 backend services from Python to Rust, one service at a time.",
+                ["moving".to_owned()].as_slice()
+            )],
+            "only a line with words its facts don't have is checked"
+        );
+        let claims_before = draft.claims.len();
+        let redaction = Redaction::new(&material.listing, &[], STAND_IN);
+        let flag = |phrase: &str| Flag {
+            index: 0,
+            phrase: phrase.to_owned(),
+        };
+        draft.leave_out(
+            &[flag("12 backend services")],
+            &redaction,
+            &material.listing,
+        );
+        assert_eq!(
+            draft.claims.len(),
+            claims_before,
+            "a flag on the facts' own words is passed over"
+        );
+        draft.leave_out(&[flag("Led moving")], &redaction, &material.listing);
+        let shown = shown(&draft.sections, &material);
+        assert!(
+            !shown.iter().any(|line| line.starts_with("Led moving 12")),
+            "{shown:#?}"
+        );
+        assert_eq!(
+            draft.claims[claims_before..],
+            [(
+                "Led moving 12 backend services from Python to Rust, one service at a time."
+                    .to_owned(),
+                UnsupportedReason::SaysMore("Led moving".to_owned())
+            )]
         );
     }
 

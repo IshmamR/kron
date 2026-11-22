@@ -17,6 +17,7 @@ use crate::database::schema::{
 use crate::database::{Changed, Database, Error};
 use crate::llm::{self, Purpose};
 use crate::model::generation::{self, Draft, Material};
+use crate::model::meaning_check;
 use crate::model::redaction::{self, Redaction};
 use crate::model::settings;
 use crate::model::{
@@ -1027,8 +1028,7 @@ impl JobView {
         cx.notify();
         self.generation = cx.spawn_in(window, async move |this, cx| {
             let reply = call.await;
-            let duration = start.elapsed();
-            let draft = match &reply {
+            let mut draft = match &reply {
                 Ok(reply) => generation::Answer::parse(&reply.response.text())
                     .map(|answer| {
                         let ad = generation::Job {
@@ -1044,9 +1044,49 @@ impl JobView {
                     }),
                 Err(error) => Err(error.to_string()),
             };
+            // The meaning check, on the lines the rules passed. It only takes
+            // lines off: when it fails, they stay as the rules left them.
+            let check = match draft
+                .as_ref()
+                .ok()
+                .filter(|draft| !draft.checked.is_empty())
+            {
+                Some(checked) => {
+                    let request = meaning_check::request(&checked.checked);
+                    match cx.update(|_, cx| llm::complete(&assigned, request, cx)) {
+                        Ok(call) => Some(call.await),
+                        Err(error) => {
+                            eprintln!("job view: {error}");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let check = match (check, &mut draft) {
+                (Some(Ok(check)), Ok(draft)) => {
+                    match meaning_check::flags(&check.response.text(), draft.checked.len()) {
+                        Ok(flags) => draft.leave_out(&flags, &redaction, &sent),
+                        Err(error) => eprintln!(
+                            "job view: the meaning check's answer couldn't be read: {error}"
+                        ),
+                    }
+                    Some(check)
+                }
+                (Some(Err(error)), _) => {
+                    eprintln!("job view: the meaning check didn't run: {error}");
+                    None
+                }
+                _ => None,
+            };
+            let duration = start.elapsed();
             let usage_limit = reply.as_ref().is_err_and(llm::Error::is_usage_limit);
             let claims = draft.as_ref().map_or(0, |draft| draft.claims.len());
-            let cost = reply.as_ref().ok().and_then(|reply| reply.cost);
+            let cost = reply
+                .as_ref()
+                .ok()
+                .and_then(|reply| reply.cost)
+                .map(|cost| cost + check.as_ref().and_then(|check| check.cost).unwrap_or(0.));
             let saved = cx.update(|_, cx| {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
@@ -1068,6 +1108,7 @@ impl JobView {
                             started_at,
                             duration,
                             reply: reply.as_ref(),
+                            check: check.as_ref(),
                             done: resume.is_some(),
                             document: None,
                             job: Some(job.0),

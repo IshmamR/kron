@@ -249,7 +249,18 @@ Test set first. Each rule only adds rejections, and each is measured on
 - [ ] **Generation returns the words of each fact it used.** Optionally, limit
   bullets to a menu of edits (keep, trim, merge within an entry, a verb no
   higher on the ladder). Compare fluency against the rejection rate.
-- [ ] **The meaning check through the user's AI service,** last.
+- [x] **The meaning check through the user's AI service** (2026-11-22). One
+  more call after the résumé, on the same service, with the lines the rules
+  passed that have words their facts don't; a line it flags goes to Left out
+  with the words it named. It only adds rejections, and a flag stands only if
+  it names one of the line's new words. On `cases.txt` it takes the rules'
+  false passes from 16 to 2 (both figures, left to the rules) with no new
+  false flags on DeepSeek Flash, one on gpt-6.2-sol ("Stood in for" for
+  "Covered"). On `generated.txt`'s 10 summaries it flags 2 on DeepSeek
+  ("mentoring" for running a review clinic, fair; a hackathon win the fact
+  states, wrong) and 1 on gpt-6.2-sol (a job title no cited fact gives).
+  Run `cargo test live_meaning_check -- --ignored --nocapture` after changing
+  its prompt.
 
 ## Phase 4: Wording and polish (any time, low risk)
 
