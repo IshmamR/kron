@@ -43,8 +43,9 @@ Every fix gets a regression test.
   came without text and the import failed with `NoText`. 1 of the 33 real CVs.
   Fixed in a patched copy, `vendor/hayro-cmap` (see its `KRON.md`); it now
   gives 33 facts.
-- [ ] **Report the empty CMap entry to hayro** (github.com/LaurenzV/hayro) with
-  a minimal PDF, then drop `vendor/hayro-cmap` once a release skips them.
+- [ ] **Drop `vendor/hayro-cmap`** once a hayro-cmap release reads empty CMap
+  entries; check on each hayro upgrade. Not reported upstream (decided
+  2026-11-22).
 - [x] **Confirm Sign in with ChatGPT access** in OpenAI's developer docs
   (checked 2026-11-21). There's a self-serve route for "open-source projects,
   personal projects that run locally": see phase 1's ChatGPT section.
