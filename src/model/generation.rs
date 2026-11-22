@@ -358,7 +358,17 @@ impl Draft {
     /// The résumé `answer` describes, from `material`, what it sent
     /// (`sent`) redacted as `redaction`: each line the model wrote checked
     /// against the facts it cites.
-    pub fn new(answer: &Answer, material: &Material, sent: &str, redaction: &Redaction) -> Self {
+    pub fn new(
+        answer: &Answer,
+        material: &Material,
+        sent: &str,
+        redaction: &Redaction,
+        job: &Job,
+    ) -> Self {
+        let job = verifier::job_words(&format!(
+            "{}\n{}\n{}",
+            job.title, job.company, job.description
+        ));
         let given: Vec<GivenFact> = material
             .facts
             .iter()
@@ -405,12 +415,22 @@ impl Draft {
                         .is_empty()
                         .then_some(UnsupportedReason::NoSupportingFact)
                 });
-                let Some(reason) = verdict else {
+                // What the line's facts say, for the job's words it may use.
+                let said = |cites: &[FactId]| -> Vec<&str> {
+                    given
+                        .iter()
+                        .filter(|fact| cites.contains(&fact.id))
+                        .map(|fact| fact.text)
+                        .collect()
+                };
+                let Some(reason) = verdict.or_else(|| verifier::echo(&text, &said(&cites), &job))
+                else {
                     return Some(line(text, cites));
                 };
                 if summary
                     && let Some(rest) = without_years_worked(&text, years)
                     && verifier::verify(&rest, &cites, &given).is_none()
+                    && verifier::echo(&rest, &said(&cites), &job).is_none()
                 {
                     for date in &dates {
                         let id = material.facts[*date].id;
@@ -664,6 +684,7 @@ pub fn save(
             UnsupportedReason::AddedQualifier(word) => {
                 ("added_qualifier", None, None, None, Some(word.as_str()))
             }
+            UnsupportedReason::JobEcho(word) => ("job_echo", None, None, None, Some(word.as_str())),
         };
         write.insert(
             UnsupportedClaims,
@@ -1065,6 +1086,12 @@ mod tests {
     use crate::model::{redaction, sample};
 
     const STAND_IN: &str = "Jordan Ellis";
+    /// The job the test answers were written for.
+    const JOB: Job = Job {
+        title: "Rust Developer",
+        company: "Cinder Labs",
+        description: "Run our Rust services on Kubernetes.",
+    };
 
     /// The sample's material, and the draft `json` describes from it.
     fn draft(connection: &Connection, json: &str) -> (Material, Draft) {
@@ -1082,7 +1109,7 @@ mod tests {
             Ok(answer) => answer,
             Err(error) => panic!("a test answer that parses: {error}"),
         };
-        let draft = Draft::new(&answer, &material, &material.listing, &redaction);
+        let draft = Draft::new(&answer, &material, &material.listing, &redaction, &JOB);
         (material, draft)
     }
 
@@ -1117,6 +1144,8 @@ mod tests {
               {"text": "Led moving 12 backend services from Python to Rust, one service at a time.",
                "facts": ["F9", "F12", "F12", "F75"]},
               {"text": "Cut cloud costs by 40%.", "facts": ["F10"]},
+              {"text": "Led moving 12 backend services from Python to Rust on Kubernetes.",
+               "facts": ["F9"]},
               {"text": "Cut the routing API's p99 latency without downtime, from 480 ms to 95 ms.",
                "facts": ["F10"]},
               {"text": "Cut the routing API's p99 latency from 480 ms to 95 ms, for the appointment scheduling service.",
@@ -1196,6 +1225,10 @@ mod tests {
                     UnsupportedReason::InventedFigure("40%".to_owned())
                 ),
                 (
+                    "Led moving 12 backend services from Python to Rust on Kubernetes.".to_owned(),
+                    UnsupportedReason::JobEcho("Kubernetes".to_owned())
+                ),
+                (
                     "Cut the routing API's p99 latency without downtime, from 480 ms to 95 ms."
                         .to_owned(),
                     UnsupportedReason::AddedQualifier("without".to_owned())
@@ -1211,8 +1244,8 @@ mod tests {
                     UnsupportedReason::OtherEntry
                 ),
             ],
-            "a figure no fact states, a \"without\" no fact says, and work of another job, \
-             with a fact of this one or alone"
+            "a figure no fact states, a word from the job's ad, a \"without\" no fact says, and \
+             work of another job, with a fact of this one or alone"
         );
     }
 
@@ -1294,7 +1327,7 @@ mod tests {
                 Err(error) => panic!("{json}: {error}"),
             };
             let redaction = Redaction::new(&material.listing, &[], STAND_IN);
-            let draft = Draft::new(&answer, &material, &material.listing, &redaction);
+            let draft = Draft::new(&answer, &material, &material.listing, &redaction, &JOB);
             let kept = draft
                 .sections
                 .iter()
@@ -1468,7 +1501,7 @@ mod tests {
         };
         assert_eq!(
             count("SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1")?,
-            4
+            5
         );
         assert_eq!(
             count(
@@ -1528,6 +1561,7 @@ mod tests {
             &material,
             &material.listing,
             &redaction,
+            &job,
         );
         for line in shown(&draft.sections, &material) {
             println!("{line}");
@@ -1607,6 +1641,7 @@ mod tests {
                     description,
                 };
                 let reply = call(request(&listed.text, &job))?;
+                let advertised = verifier::job_words(&format!("{title}\n{company}\n{description}"));
                 cost += reply.cost.unwrap_or(0.);
                 let answer = Answer::parse(&reply.response.text())?;
                 let given: Vec<GivenFact> = material
@@ -1660,10 +1695,15 @@ mod tests {
                         Some(entry) => verifier::verify_bullet(&text, entry, &cites, &given),
                         None => verifier::verify(&text, &cites, &given),
                     };
-                    let verdict = match verdict {
-                        None => "passed".to_owned(),
-                        Some(reason) => format!("rejected: {reason:?}"),
-                    };
+                    let said: Vec<&str> = cited
+                        .iter()
+                        .map(|index| material.facts[*index].text.as_str())
+                        .collect();
+                    let verdict =
+                        match verdict.or_else(|| verifier::echo(&text, &said, &advertised)) {
+                            None => "passed".to_owned(),
+                            Some(reason) => format!("rejected: {reason:?}"),
+                        };
                     set.push_str(&format!(
                         "\n?\n# {cv}, {company}, {kind}; the verifier {verdict}\n"
                     ));

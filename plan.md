@@ -215,8 +215,13 @@ Test set first. Each rule only adds rejections, and each is measured on
   work from another entry" (`other_entry`). A cited fact the bullet takes no
   words from is still only dropped. cross_entry: 6 of 6 caught, no false
   flags on combined (2026-11-22).
-- [ ] **Job-description echo.** A word in `new_words` that also appears in the
+- [x] **Job-description echo.** A word in `new_words` that also appears in the
   job description means rejection. `verify` needs the description passed in.
+  `verifier::echo` checks every line against the job's title, company and
+  ad; a few plain verbs (improved, reduced, developed…) and "years" may be
+  taken. job_echo: 6 of 6 caught, no false flags on job_wording
+  (2026-11-22). `generated.txt` has no jobs, so real output isn't measured
+  yet: re-run `write_test_set` to see how often real lines echo.
 - [x] **Negation and modality.** Words like not, never, without, helped to and
   planned, present in a fact and missing from the line, or the other way round.
   A line must keep one of its facts' hedges (proposed, planned, started,

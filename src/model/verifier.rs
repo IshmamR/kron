@@ -58,6 +58,12 @@ const HEDGES: [&str; 31] = [
 /// Words a line may not add, as "without downtime" or "no outages" claim
 /// what a fact didn't.
 const NEGATIONS: [&str; 6] = ["not", "no", "never", "without", "zero", "none"];
+/// Stems of plain verbs a line may take from the job's ad to reword its
+/// fact, as "improved" for "cut": they claim nothing the fact doesn't. And
+/// "years", which the number rules check.
+const PLAIN_WORDS: [&str; 10] = [
+    "improv", "reduc", "increas", "develop", "creat", "use", "work", "make", "made", "year",
+];
 
 /// A fact as the generator was given it.
 pub struct GivenFact<'a> {
@@ -194,6 +200,25 @@ fn spoken(text: &str) -> String {
         .filter(|word| !word.is_empty())
         .collect();
     format!(" {} ", words.join(" "))
+}
+
+/// The words of a job's title, company and ad, by stem, for `echo`.
+pub fn job_words(job: &str) -> Vec<String> {
+    content(job, &figures(job))
+}
+
+/// Why `text` says more than `facts` by echoing the job, if it does: a word
+/// none of them has but the job's ad does (`job`, from `job_words`), as
+/// "Kubernetes" in a line whose facts say only Rust, for an ad asking for
+/// Kubernetes. A plain verb may be taken (`PLAIN_WORDS`).
+pub fn echo(text: &str, facts: &[&str], job: &[String]) -> Option<UnsupportedReason> {
+    let known: Vec<String> = facts.iter().flat_map(|fact| content(fact, &[])).collect();
+    words(text, &figures(text))
+        .into_iter()
+        .find(|(_, stem)| {
+            !known.contains(stem) && job.contains(stem) && !PLAIN_WORDS.contains(&stem.as_str())
+        })
+        .map(|(range, _)| UnsupportedReason::JobEcho(text[range].to_owned()))
 }
 
 /// Where the line `text` has words that carry meaning and none of `facts`
@@ -918,7 +943,7 @@ mod tests {
     const GENERATED: &str = include_str!("verifier/generated.txt");
     /// Labels the verifier handles: getting any of those cases wrong fails
     /// the test. The rest are only reported.
-    const HANDLED: [&str; 8] = [
+    const HANDLED: [&str; 10] = [
         "paraphrase",
         "invented_figure",
         "invented_year",
@@ -927,6 +952,8 @@ mod tests {
         "cross_entry",
         "kept_qualifier",
         "dropped_qualifier",
+        "job_wording",
+        "job_echo",
     ];
 
     struct Case {
@@ -1128,10 +1155,12 @@ mod tests {
                 })
                 .collect();
             let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
+            let job = job_words(case.job.unwrap_or_default());
             let flagged = match given.first().and_then(|fact| fact.entry) {
                 Some(entry) => verify_bullet(case.line, entry, &cites, &given),
                 None => verify(case.line, &cites, &given),
             }
+            .or_else(|| echo(case.line, &case.facts, &job))
             .is_some();
             let wrong = flagged == true_label(case.label);
             match tally.iter_mut().find(|(label, ..)| *label == case.label) {

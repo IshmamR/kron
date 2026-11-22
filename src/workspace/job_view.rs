@@ -1005,12 +1005,13 @@ impl JobView {
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         let sent = material.sent(instructions.as_deref());
         let redaction = Redaction::new(&sent, &redaction::find(&sent, &names, &[]), &stand_in);
+        let description = description.unwrap_or_default();
         let request = generation::request(
             &redaction.text,
             &generation::Job {
                 title: &title,
                 company: &company,
-                description: description.as_deref().unwrap_or_default(),
+                description: &description,
             },
         );
         let started_at = Utc::now().timestamp_millis();
@@ -1024,7 +1025,14 @@ impl JobView {
             let duration = start.elapsed();
             let draft = match &reply {
                 Ok(reply) => generation::Answer::parse(&reply.response.text())
-                    .map(|answer| Draft::new(&answer, &material, &sent, &redaction))
+                    .map(|answer| {
+                        let ad = generation::Job {
+                            title: &title,
+                            company: &company,
+                            description: &description,
+                        };
+                        Draft::new(&answer, &material, &sent, &redaction, &ad)
+                    })
                     .map_err(|error| {
                         eprintln!("job view: the model's answer isn't the JSON asked for: {error}");
                         "the model's answer couldn't be read. Try again.".to_owned()

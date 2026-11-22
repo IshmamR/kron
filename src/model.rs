@@ -239,6 +239,8 @@ pub enum UnsupportedReason {
     DroppedQualifier(String),
     /// The line says "without", "no" or "never" where its facts don't.
     AddedQualifier(String),
+    /// The line takes a word from the job's ad that its facts don't say.
+    JobEcho(String),
 }
 
 /// Tells whether another fact probably says the same thing as `text`: most
