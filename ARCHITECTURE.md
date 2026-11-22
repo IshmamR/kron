@@ -101,7 +101,14 @@ A line passes only if, in order:
    (`text2num`: "1.2M" is "1,200,000", "four" is 4, 40% isn't 40); four-digit
    numbers from 1900 to 2099 are years;
 5. the words after a count appear in a fact with that count, so "12
-   engineers" fails against "12 services" (phrases split RAKE-style).
+   engineers" fails against "12 services" (phrases split RAKE-style); a
+   number with letters glued on, like "2G" or "95ms", counts nothing;
+6. it takes no term from the job's ad that its facts don't have: a name,
+   written in capitals ("AWS"), with a capital or digit inside ("iOS",
+   "k8s"), or capitalised mid-sentence ("on Kubernetes"), or the company's
+   name. The ad's everyday words ("experience", "across", "poor
+   connections") are tailoring; whether a line claims more with them is the
+   meaning check's to say.
 
 The summary may also say how many years the person has worked ("5+ years",
 "five years") when the experience entries' dates cover that many, overlaps

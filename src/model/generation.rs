@@ -405,10 +405,7 @@ impl Draft {
         redaction: &Redaction,
         job: &Job,
     ) -> Self {
-        let job = verifier::job_words(&format!(
-            "{}\n{}\n{}",
-            job.title, job.company, job.description
-        ));
+        let job = verifier::JobWords::new(job.title, job.company, job.description);
         let given: Vec<GivenFact> = material
             .facts
             .iter()
@@ -1874,6 +1871,9 @@ mod tests {
             new_words: usize,
             quotes: usize,
             quotes_found: usize,
+            /// Lines using the job's words that their facts don't have.
+            job_worded: usize,
+            echoes: usize,
             output_tokens: u64,
             cost: f64,
             seconds: f64,
@@ -1939,6 +1939,34 @@ mod tests {
                             tally.quotes_found += usize::from(found);
                         }
                     }
+                    let advertised = verifier::JobWords::new(title, company, job.description);
+                    for line in &written {
+                        let text = listed.restore(line.text.trim(), &material.listing);
+                        let said: Vec<&str> = line
+                            .cited()
+                            .filter_map(|id| material.fact(id))
+                            .map(|index| material.facts[index].text.as_str())
+                            .collect();
+                        let from_job: Vec<&str> = verifier::new_words(&text, &said)
+                            .into_iter()
+                            .filter_map(|range| text.get(range))
+                            .filter(|word| advertised.has(&verifier::stem(word)))
+                            .collect();
+                        if from_job.is_empty() {
+                            continue;
+                        }
+                        tally.job_worded += 1;
+                        let echo = verifier::echo(&text, &said, &advertised);
+                        tally.echoes += usize::from(echo.is_some());
+                        out.push_str(&format!(
+                            "\n{} {from_job:?} ({cv}, {company})\n",
+                            if echo.is_some() { "ECHO" } else { "JOB WORDS" }
+                        ));
+                        for fact in &said {
+                            out.push_str(&format!("fact: {fact}\n"));
+                        }
+                        out.push_str(&format!("line: {text}\n"));
+                    }
                     let mut draft =
                         Draft::new(&answer, &material, &material.listing, &listed, &job);
                     tally.by_rules += draft.claims.len();
@@ -1980,14 +2008,17 @@ mod tests {
         }
         println!(
             "== {} written, {} kept, {} left out by the rules and {} by the \
-                 meaning check; {} reworded with {} new words; {} of {} quotes found in \
-                 their fact; {} tokens out, ${:.4}, {:.0} s writing",
+                 meaning check; {} reworded with {} new words; {} using the job's words, \
+                 {} of them rejected as echoes; {} of {} quotes found in their fact; {} \
+                 tokens out, ${:.4}, {:.0} s writing",
             tally.written,
             tally.kept,
             tally.by_rules,
             tally.by_meaning,
             tally.reworded,
             tally.new_words,
+            tally.job_worded,
+            tally.echoes,
             tally.quotes_found,
             tally.quotes,
             tally.output_tokens,
@@ -2071,7 +2102,7 @@ mod tests {
                     description,
                 };
                 let reply = call(request(&listed.text, &job))?;
-                let advertised = verifier::job_words(&format!("{title}\n{company}\n{description}"));
+                let advertised = verifier::JobWords::new(title, company, description);
                 cost += reply.cost.unwrap_or(0.);
                 let answer = Answer::parse(&reply.response.text())?;
                 let given: Vec<GivenFact> = material

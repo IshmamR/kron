@@ -261,13 +261,24 @@ Test set first. Each rule only adds rejections, and each is measured on
   words are saved with each citation and marked in the inspector. Bullets
   aren't limited to a menu of edits: what's left out of them is mostly the
   rules' doing (next item).
-- [ ] **The job-echo rule rejects plain words.** On real output with jobs
-  (`live_rates`), most of what GPT-6.2-Sol had left out was the rule taking
-  everyday words an ad happens to use for claims: "experience",
-  "Built", "engineers", "across", "poor", "mobile", "experiment"; and "2G
-  view" read as a count. Measure them on `generated.txt` rewritten with jobs,
-  then narrow the rule (for example, only words that name a skill, tool or
-  title).
+- [x] **The job-echo rule takes only terms** (2026-11-23). It rejected any
+  word of the ad a line's facts didn't have, so it blocked tailoring by
+  wording outright: on GPT-6.2-Sol, all 14 lines that used the ad's words
+  ("backend engineers" for "backend team", "poor connections" for "patchy
+  networks", "pricing experiment" for "pricing test"). Now only a term is an
+  echo: a name written in capitals, with a capital or digit inside, or
+  capitalised mid-sentence in the line or the ad (title-case lines, like
+  headings, don't count), and the company's name. The ad's other words are
+  left to the meaning check, which still catches a claim in them ("strong
+  customer service", "at a fast-paced startup": `job_claim` in `cases.txt`,
+  2 of 2). A number with letters glued on ("2G") counts nothing. On
+  `live_rates`, GPT left out 2 lines instead of 18 (kept 170 of 191, from
+  155), none of its 13 job-worded lines rejected, each read and honest;
+  DeepSeek, which barely rewords, 0 instead of 1. Real lines added to
+  `cases.txt` as `job_wording`.
+- [ ] **Two figure readings reject honest lines** (seen in `live_rates`):
+  "starred 600 times" is read as 600×, against "600 stars"; and "two prior
+  years" doesn't count what "two before that" does.
 - [x] **The meaning check through the user's AI service** (2026-11-22). One
   more call after the résumé, on the same service, with the lines the rules
   passed that have words their facts don't; a line it flags goes to Left out

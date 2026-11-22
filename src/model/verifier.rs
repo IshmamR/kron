@@ -127,13 +127,6 @@ const LEADS: [&str; 52] = [
 /// Words a line may not add, as "without downtime" or "no outages" claim
 /// what a fact didn't.
 const NEGATIONS: [&str; 6] = ["not", "no", "never", "without", "zero", "none"];
-/// Stems of plain verbs a line may take from the job's ad to reword its
-/// fact, as "improved" for "cut": they claim nothing the fact doesn't. And
-/// "years", which the number rules check.
-const PLAIN_WORDS: [&str; 10] = [
-    "improv", "reduc", "increas", "develop", "creat", "use", "work", "make", "made", "year",
-];
-
 /// A fact as the generator was given it.
 pub struct GivenFact<'a> {
     pub id: FactId,
@@ -298,23 +291,95 @@ fn spoken(text: &str) -> String {
     format!(" {} ", words.join(" "))
 }
 
-/// The words of a job's title, company and ad, by stem, for `echo`.
-pub fn job_words(job: &str) -> Vec<String> {
-    content(job, &figures(job))
+/// A job's words, for `echo`.
+pub struct JobWords {
+    /// Every word of its title, company and ad, by stem.
+    stems: Vec<String>,
+    /// Those that name a thing (`terms`), and its company's name.
+    terms: Vec<String>,
 }
 
-/// Why `text` says more than `facts` by echoing the job, if it does: a word
-/// none of them has but the job's ad does (`job`, from `job_words`), as
-/// "Kubernetes" in a line whose facts say only Rust, for an ad asking for
-/// Kubernetes. A plain verb may be taken (`PLAIN_WORDS`).
-pub fn echo(text: &str, facts: &[&str], job: &[String]) -> Option<UnsupportedReason> {
+impl JobWords {
+    pub fn new(title: &str, company: &str, ad: &str) -> Self {
+        let text = format!("{title}\n{company}\n{ad}");
+        let mut terms = terms(ad);
+        terms.extend(content(company, &figures(company)));
+        Self {
+            stems: content(&text, &figures(&text)),
+            terms,
+        }
+    }
+
+    pub fn has(&self, stem: &str) -> bool {
+        self.stems.iter().any(|word| word == stem)
+    }
+}
+
+/// Why `text` says more than `facts` by echoing the job, if it does: a
+/// term none of them has but the job's ad does, as "Kubernetes" in a line
+/// whose facts say only Rust, for an ad asking for Kubernetes. A term is a
+/// word written as a name in the line or the ad (`terms`), or the company's
+/// name. The ad's other words, like "experience" or "built", are how it
+/// says things, which tailoring a résumé is: whether a line claims more
+/// with them is left to the meaning check.
+pub fn echo(text: &str, facts: &[&str], job: &JobWords) -> Option<UnsupportedReason> {
     let known: Vec<String> = facts.iter().flat_map(|fact| content(fact, &[])).collect();
+    let named = terms(text);
     words(text, &figures(text))
         .into_iter()
         .find(|(_, stem)| {
-            !known.contains(stem) && job.contains(stem) && !PLAIN_WORDS.contains(&stem.as_str())
+            !known.contains(stem)
+                && job.has(stem)
+                && (job.terms.contains(stem) || named.contains(stem))
         })
         .map(|(range, _)| UnsupportedReason::JobEcho(text[range].to_owned()))
+}
+
+/// The stems of the words `text` writes as names: in capitals ("SQL"), with
+/// a capital inside ("iOS", "GitHub") or a digit ("k8s"), or capitalised
+/// other than first in a sentence ("on Kubernetes"). A line of a text in
+/// title case, like a heading or a job's title, capitalises every word, so
+/// says nothing of which are names.
+fn terms(text: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for line in text.lines() {
+        let words = words(line, &[]);
+        let capitalised =
+            |range: &Range<usize>| line[range.clone()].starts_with(char::is_uppercase);
+        if words.len() > 1
+            && words.iter().filter(|(range, _)| capitalised(range)).count() * 2 > words.len()
+        {
+            continue;
+        }
+        for (range, stem) in words {
+            let word = &line[range.clone()];
+            let mut characters = word.chars();
+            let first_upper = characters.next().is_some_and(char::is_uppercase);
+            let upper_inside = characters.clone().any(char::is_uppercase);
+            let letters = word
+                .chars()
+                .filter(|character| character.is_alphabetic())
+                .count();
+            let digit = word.chars().any(|character| character.is_ascii_digit());
+            let opens_sentence = line[..range.start]
+                .trim_end()
+                .chars()
+                .next_back()
+                .is_none_or(|before| {
+                    matches!(
+                        before,
+                        '.' | '!' | '?' | ':' | ';' | '•' | '-' | '–' | '—' | '*' | '(' | '"' | '“'
+                    )
+                });
+            let named = upper_inside && letters > 1
+                || digit && letters > 0
+                || first_upper && !opens_sentence;
+            if named && !terms.contains(&stem) {
+                terms.push(stem);
+            }
+        }
+    }
+    terms
 }
 
 /// Where the line `text` has words that carry meaning and none of `facts`
@@ -339,6 +404,9 @@ struct Figure<'a> {
     written: &'a str,
     value: Value,
     year: Option<u16>,
+    /// Written with letters glued on that aren't a scale, like "95ms" or
+    /// "2G": a measure or a name, which counts nothing.
+    glued: bool,
 }
 
 /// A number reduced so equal ones compare equal however they're written:
@@ -533,13 +601,14 @@ fn measured(
 ) -> (Figure<'_>, usize) {
     let mut end = end;
     let suffix_end = word_end(text, end);
+    let mut glued = false;
     match &text[end..suffix_end] {
         "k" | "K" => exponent += 3,
         "M" => exponent += 6,
         "B" | "bn" => exponent += 9,
         "x" | "X" => unit = Unit::Times,
         // Others, like "ms" or "th", don't change the value.
-        _ => {}
+        suffix => glued = !suffix.is_empty(),
     }
     end = suffix_end;
     if let Some(sign) = text[end..]
@@ -588,6 +657,7 @@ fn measured(
                 unit,
             },
             year,
+            glued,
         },
         end,
     )
@@ -621,11 +691,11 @@ fn word_end(text: &str, start: usize) -> usize {
 /// stop word, a mark or another figure, and where they end. "12 backend
 /// services from Python" counts "backend services". Splitting at stop words
 /// and marks is how RAKE finds phrases (Rose et al., 2010). A percentage,
-/// ratio, sum or year counts nothing.
+/// ratio, sum, year or measure ("95ms", "2G") counts nothing.
 fn counted(text: &str, figure: &Figure, figures: &[Figure]) -> (usize, Vec<String>) {
     let mut end = figure.end();
     let mut stems = Vec::new();
-    if figure.value.unit != Unit::Plain || figure.year.is_some() {
+    if figure.value.unit != Unit::Plain || figure.year.is_some() || figure.glued {
         return (end, stems);
     }
     loop {
@@ -677,7 +747,7 @@ fn stop_word(word: &str) -> bool {
 }
 
 /// `word`, lowercase, reduced to its Snowball stem: "volunteers" is "volunt".
-fn stem(word: &str) -> String {
+pub fn stem(word: &str) -> String {
     Stemmer::create(Algorithm::English)
         .stem(&word.to_lowercase())
         .into_owned()
@@ -1105,6 +1175,80 @@ mod tests {
     }
 
     #[test]
+    fn only_a_term_from_the_job_is_an_echo() {
+        let job = JobWords::new(
+            "Mobile Engineering Lead",
+            "Brixmoney",
+            "Senior Android Engineer, Payments\n\
+             Experience building mobile payments on poor connections.\n\
+             You'll lead engineers across squads, in Kotlin and on AWS.",
+        );
+        let facts = ["Shipped offline-first transfers on Android that retry safely."];
+        assert_eq!(
+            echo(
+                "Built offline-first mobile transfers that retry safely on poor connections.",
+                &facts,
+                &job
+            ),
+            None,
+            "the ad's everyday words, and its title's, are tailoring"
+        );
+        let echoed = |line| echo(line, &facts, &job);
+        assert_eq!(
+            echoed("Shipped offline-first transfers in Kotlin on Android."),
+            Some(UnsupportedReason::JobEcho("Kotlin".to_owned()))
+        );
+        assert_eq!(
+            echoed("Shipped offline-first transfers on Android and AWS."),
+            Some(UnsupportedReason::JobEcho("AWS".to_owned()))
+        );
+        assert_eq!(
+            echoed("Shipped offline-first transfers on Android at Brixmoney."),
+            Some(UnsupportedReason::JobEcho("Brixmoney".to_owned())),
+            "the company's name"
+        );
+        assert_eq!(
+            echoed("Kotlin transfers shipped offline-first on Android."),
+            Some(UnsupportedReason::JobEcho("Kotlin".to_owned())),
+            "first in the line, the ad's writing still names it"
+        );
+    }
+
+    #[test]
+    fn a_term_is_written_as_a_name() {
+        let named = terms(
+            "Requirements\n\
+             Kotlin, Jetpack Compose, Coroutines\n\
+             We run Kubernetes with SQL on AWS, ship iOS apps and k8s jobs.\n\
+             Experience with payments. Mentoring matters.",
+        );
+        let stems = |words: &[&str]| words.iter().map(|word| stem(word)).collect::<Vec<_>>();
+        assert_eq!(named, stems(&["Kubernetes", "SQL", "AWS", "iOS", "k8s"]));
+    }
+
+    #[test]
+    fn a_figure_with_letters_glued_on_counts_nothing() {
+        let given = [fact(
+            "Added offline support so riders on 2G can still see their last 50 trips.",
+        )];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify(
+                "Added offline support so riders on 2G view their last 50 trips.",
+                &cites,
+                &given
+            ),
+            None,
+            "2G is a network, not two of anything"
+        );
+        assert_eq!(
+            verify("Added offline support for 3G riders.", &cites, &given),
+            Some(UnsupportedReason::InventedFigure("3G".to_owned())),
+            "its value is still checked"
+        );
+    }
+
+    #[test]
     fn a_qualifier_is_a_whole_word() {
         let given = [fact(
             "Built a pricing plan for the no-code editor in no_std Rust.",
@@ -1271,7 +1415,7 @@ mod tests {
             })
             .collect();
         let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
-        let job = job_words(case.job.unwrap_or_default());
+        let job = JobWords::new("", "", case.job.unwrap_or_default());
         match given.first().and_then(|fact| fact.entry) {
             Some(entry) => verify_bullet(case.line, entry, &cites, &given),
             None => verify(case.line, &cites, &given),
