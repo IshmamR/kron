@@ -49,6 +49,8 @@ use rusqlite::{Connection, OptionalExtension};
 const KEY_CONTEXT: &str = "JobView";
 /// Pages are shown this wide: a bit over US Letter at 96 dpi.
 const PAGE_WIDTH: Pixels = px(640.);
+/// The zoom steps, as a share of `PAGE_WIDTH`.
+const ZOOMS: [f32; 9] = [0.5, 0.67, 0.75, 0.9, 1., 1.1, 1.25, 1.5, 2.];
 /// Between pages, and above the first and below the last.
 const PAGE_GAP: f32 = 24.;
 const INSPECTOR_WIDTH: Pixels = px(340.);
@@ -76,7 +78,11 @@ actions!(
         ShowResumeTab,
         ShowApplicationTab,
         EditLine,
-        CancelLineEdit
+        CancelLineEdit,
+        ZoomIn,
+        ZoomOut,
+        ResetZoom,
+        FitWidth
     ]
 );
 
@@ -88,6 +94,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("secondary-1", ShowResumeTab, Some(KEY_CONTEXT)),
         KeyBinding::new("secondary-2", ShowApplicationTab, Some(KEY_CONTEXT)),
         KeyBinding::new("enter", EditLine, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-=", ZoomIn, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-+", ZoomIn, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary--", ZoomOut, Some(KEY_CONTEXT)),
+        KeyBinding::new("secondary-0", ResetZoom, Some(KEY_CONTEXT)),
         // Esc in a text box does nothing of its own.
         KeyBinding::new(
             "escape",
@@ -143,6 +153,8 @@ pub struct JobView {
     scroll_handle: ScrollHandle,
     /// The inspector's width.
     layout: Entity<ResizableState>,
+    /// The pages' width as a share of `PAGE_WIDTH`.
+    zoom: f32,
     /// The pages as last drawn, to map clicks to lines and scroll to them.
     pages: Option<Arc<RenderedPages>>,
     /// Where each page was drawn in the window, written during paint.
@@ -170,13 +182,17 @@ impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.read(cx);
         self.sync_line_editor(window, cx);
-        let pixels_per_point = previews::pixels_per_point(PAGE_WIDTH, window);
+        let pixels_per_point = previews::pixels_per_point(self.page_width(), window);
         let shown = self.shown_id();
-        let render = shown.and_then(|resume| {
-            self.previews.update(cx, |previews, cx| {
-                previews.get(resume, pixels_per_point, cx)
+        let render = shown
+            .and_then(|resume| {
+                self.previews.update(cx, |previews, cx| {
+                    previews.get(resume, pixels_per_point, cx)
+                })
             })
-        });
+            // Zoomed, until the pages render at the new size: the last ones,
+            // stretched, rather than a spinner.
+            .or_else(|| self.pages.clone().map(PageRender::Ready));
         self.pages = match &render {
             Some(PageRender::Ready(pages)) => Some(pages.clone()),
             _ => None,
@@ -206,6 +222,10 @@ impl Render for JobView {
                 cx.listener(|this, _: &SelectPreviousLine, _, cx| this.move_selection(false, cx)),
             )
             .on_action(cx.listener(Self::back))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.step_zoom(true, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.step_zoom(false, cx)))
+            .on_action(cx.listener(|this, _: &ResetZoom, _, cx| this.set_zoom(1., cx)))
+            .on_action(cx.listener(|this, _: &FitWidth, _, cx| this.fit_width(cx)))
             .on_action(cx.listener(Self::edit_line))
             .on_action(cx.listener(Self::cancel_line_edit))
             .on_action(cx.listener(|this, _: &ShowResumeTab, window, cx| {
@@ -312,6 +332,7 @@ impl JobView {
             focus_handle: cx.focus_handle(),
             scroll_handle: ScrollHandle::new(),
             layout: cx.new(|_| ResizableState::default()),
+            zoom: 1.,
             pages: None,
             page_bounds: Rc::default(),
             scroll_pending: false,
@@ -509,6 +530,54 @@ impl JobView {
         }
     }
 
+    fn page_width(&self) -> Pixels {
+        PAGE_WIDTH * self.zoom
+    }
+
+    /// Pixels on screen per typographic point.
+    fn scale(&self, page: PageSize) -> f32 {
+        f32::from(self.page_width()) / page.width
+    }
+
+    /// To the next zoom step up or down from the current zoom, which may
+    /// be between steps after fitting the width.
+    fn step_zoom(&mut self, up: bool, cx: &mut Context<Self>) {
+        let next = if up {
+            ZOOMS.iter().find(|zoom| **zoom > self.zoom + 0.01)
+        } else {
+            ZOOMS.iter().rev().find(|zoom| **zoom < self.zoom - 0.01)
+        };
+        if let Some(&zoom) = next {
+            self.set_zoom(zoom, cx);
+        }
+    }
+
+    /// The pages as wide as the space beside the inspector, within the
+    /// zoom steps.
+    fn fit_width(&mut self, cx: &mut Context<Self>) {
+        let width = f32::from(self.scroll_handle.bounds().size.width);
+        if width <= 0. {
+            return;
+        }
+        let fitted = (width - PAGE_GAP * 2.) / f32::from(PAGE_WIDTH);
+        // Whole percents, so the same width gives the same render to reuse.
+        let fitted = (fitted * 100.).floor() / 100.;
+        self.set_zoom(fitted.clamp(ZOOMS[0], ZOOMS[ZOOMS.len() - 1]), cx);
+    }
+
+    /// Keeps the same part of the page in view as it grows or shrinks.
+    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        if zoom == self.zoom {
+            return;
+        }
+        let ratio = zoom / self.zoom;
+        let offset = self.scroll_handle.offset();
+        self.scroll_handle
+            .set_offset(point(offset.x * ratio, offset.y * ratio));
+        self.zoom = zoom;
+        cx.notify();
+    }
+
     /// Scrolls just enough to show the selected line's first box.
     fn scroll_to_selected(&self) {
         let Some((pages, line)) = self.pages.as_ref().zip(self.selected) else {
@@ -522,13 +591,13 @@ impl JobView {
             .pages
             .iter()
             .take(first.page)
-            .map(|page| page.height * scale(*page) + PAGE_GAP)
+            .map(|page| page.height * self.scale(*page) + PAGE_GAP)
             .sum();
         let page_scale = pages
             .layout
             .pages
             .get(first.page)
-            .map_or(1., |page| scale(*page));
+            .map_or(1., |page| self.scale(*page));
         let page_top = PAGE_GAP + pages_above;
         let top = page_top + first.top * page_scale - SCROLL_MARGIN;
         let bottom = page_top + first.bottom * page_scale + SCROLL_MARGIN;
@@ -551,7 +620,7 @@ impl JobView {
         let size = *pages.layout.pages.get(page)?;
         let bounds = *self.page_bounds.borrow().get(page)?;
         let local = position - bounds.origin;
-        let scale = scale(size);
+        let scale = self.scale(size);
         pages
             .layout
             .line_at(page, f32::from(local.x) / scale, f32::from(local.y) / scale)
@@ -1160,7 +1229,7 @@ impl JobView {
 
     fn render_resume_tab(&self, render: Option<PageRender>, cx: &Context<Self>) -> AnyElement {
         if self.shown_id().is_none() {
-            return self.render_resume(None, render, cx);
+            return self.render_resume(None, render, None, cx);
         }
         let shown = self
             .shown
@@ -1178,9 +1247,6 @@ impl JobView {
                 resizable_panel().child(
                     v_flex()
                         .size_full()
-                        .children(
-                            version.map(|version| template_bar(version, !showing_current, cx)),
-                        )
                         .when_some(sent_notice(sent, self.showing_sent, cx), |this, notice| {
                             this.child(notice)
                         })
@@ -1193,7 +1259,12 @@ impl JobView {
                                 this.child(self.lines_notice(cx))
                             })
                         })
-                        .child(self.render_resume(shown.map(Rc::as_ref), render, cx)),
+                        .child(self.render_resume(
+                            shown.map(Rc::as_ref),
+                            render,
+                            version.map(|version| page_menus(version, !showing_current, cx)),
+                            cx,
+                        )),
                 ),
             )
             .child(
@@ -1216,10 +1287,13 @@ impl JobView {
             .into_any_element()
     }
 
+    /// `menus` float over the pages' top left corner, and the zoom over the
+    /// bottom right.
     fn render_resume(
         &self,
         resume: Option<&ShownResume>,
         render: Option<PageRender>,
+        menus: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let Some(resume) = resume else {
@@ -1325,7 +1399,7 @@ impl JobView {
                     .overflow_x_scroll()
                     .child(
                         v_flex()
-                            .min_w(PAGE_WIDTH + px(PAGE_GAP * 2.))
+                            .min_w(self.page_width() + px(PAGE_GAP * 2.))
                             .items_center()
                             .gap(px(PAGE_GAP))
                             .py(px(PAGE_GAP))
@@ -1334,6 +1408,14 @@ impl JobView {
             )
             .vertical_scrollbar(&self.scroll_handle)
             .horizontal_scrollbar(&self.scroll_handle)
+            .children(menus.map(|menus| div().absolute().top_3().left_3().child(menus)))
+            .child(
+                div()
+                    .absolute()
+                    .bottom_4()
+                    .right_4()
+                    .child(zoom_bar(self.zoom, cx)),
+            )
             .into_any_element()
     }
 
@@ -1346,7 +1428,7 @@ impl JobView {
         markers: &Markers,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let scale = scale(size);
+        let scale = self.scale(size);
         let page_bounds = self.page_bounds.clone();
         let highlight = |line_box: &LineBox, color: Hsla| {
             div()
@@ -1364,7 +1446,7 @@ impl JobView {
             .id(("page", index))
             .relative()
             .flex_none()
-            .w(PAGE_WIDTH)
+            .w(self.page_width())
             .h(px(size.height * scale))
             .bg(rgb(PAPER))
             .shadow_md()
@@ -1493,24 +1575,22 @@ fn margin_marker(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Di
         .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
 }
 
-/// Pixels on screen per typographic point.
-fn scale(page: PageSize) -> f32 {
-    f32::from(PAGE_WIDTH) / page.width
-}
-
-/// Above the page, as it's about the page: which template lays the résumé
-/// out and on what paper, and menus to pick others. Its content stays as it
-/// is, so switching is only a new layout. A version that was sent keeps its
-/// template and paper, so for one they're only named.
-fn template_bar(version: &Version, read_only: bool, cx: &App) -> impl IntoElement {
+/// A pill floating over the pages, as it's about them, so it takes no row
+/// of its own: which template lays the résumé out and on what paper, with
+/// menus to pick others. Switching keeps the content, so it's only a new
+/// layout. A version that was sent keeps its template and paper, so for one
+/// they're only named.
+fn page_menus(version: &Version, read_only: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (picker, paper) = if read_only {
         (
             div()
+                .px_2()
                 .text_sm()
                 .child(version.template.name)
                 .into_any_element(),
             div()
+                .px_2()
                 .text_sm()
                 .child(version.paper.label())
                 .into_any_element(),
@@ -1521,24 +1601,101 @@ fn template_bar(version: &Version, read_only: bool, cx: &App) -> impl IntoElemen
             paper_menu(version.paper).into_any_element(),
         )
     };
-    h_flex()
-        .flex_none()
-        .gap_1()
-        .px_4()
-        .py_1()
-        .border_b_1()
-        .border_color(theme.border)
-        .child(picker)
-        .child(div().w(px(1.)).h_4().bg(theme.border))
-        .child(paper)
+    let divider = || div().w(px(1.)).h_4().bg(theme.border);
+    pill(h_flex(), cx)
         .when(read_only, |this| {
-            this.child(div().flex_1()).child(
+            this.child(
                 div()
+                    .px_2()
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child("Sent version"),
             )
+            .child(divider())
         })
+        .child(picker)
+        .child(divider())
+        .child(paper)
+        .into_any_element()
+}
+
+/// A pill floating over the pages' bottom right corner: zoom in, back to
+/// actual size, zoom out, and fit to the width. The zoom itself is in the
+/// tooltips: a percentage among the icons made the pill uneven.
+fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
+    let divider = || div().h(px(1.)).w_4().bg(cx.theme().border);
+    let percent = format!("{}%", (zoom * 100.).round());
+    pill(v_flex(), cx)
+        .items_center()
+        .child(
+            Button::new("zoom-in")
+                .icon(lucide("zoom-in"))
+                .ghost()
+                .small()
+                .disabled(zoom >= ZOOMS[ZOOMS.len() - 1])
+                .tooltip_with_action(
+                    format!("Zoom in (now {percent})"),
+                    &ZoomIn,
+                    Some(KEY_CONTEXT),
+                )
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ZoomIn), cx)),
+        )
+        .child(
+            Button::new("actual-size")
+                .icon(IconName::Search)
+                .ghost()
+                .small()
+                .disabled(zoom == 1.)
+                .tooltip_with_action(
+                    format!("Actual size (now {percent})"),
+                    &ResetZoom,
+                    Some(KEY_CONTEXT),
+                )
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ResetZoom), cx)),
+        )
+        .child(
+            Button::new("zoom-out")
+                .icon(lucide("zoom-out"))
+                .ghost()
+                .small()
+                .disabled(zoom <= ZOOMS[0])
+                .tooltip_with_action(
+                    format!("Zoom out (now {percent})"),
+                    &ZoomOut,
+                    Some(KEY_CONTEXT),
+                )
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(ZoomOut), cx)),
+        )
+        .child(divider())
+        .child(
+            Button::new("fit-width")
+                .icon(lucide("move-horizontal"))
+                .ghost()
+                .small()
+                .tooltip("Fit width")
+                .on_click(|_, window, cx| window.dispatch_action(Box::new(FitWidth), cx)),
+        )
+}
+
+/// A Lucide icon `IconName` doesn't name; `AllAssets` has every one.
+fn lucide(name: &str) -> Icon {
+    Icon::empty().path(format!("icons/{name}.svg"))
+}
+
+/// A raised surface over the pages, for controls that float there. In
+/// light palettes the popover and background colors and the border are all
+/// near the paper's white, so over a zoomed page the pill vanished: it takes
+/// the sidebar's darker tint and an edge from the secondary text, which is
+/// dark in light palettes and light in dark ones.
+fn pill(base: Div, cx: &App) -> Div {
+    let theme = cx.theme();
+    base.gap_1()
+        .p_1()
+        .rounded_lg()
+        .border_1()
+        .border_color(theme.muted_foreground.opacity(0.3))
+        .bg(theme.sidebar)
+        .shadow_lg()
 }
 
 fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
@@ -2690,7 +2847,39 @@ mod tests {
     }
 
     #[test]
-    fn a_template_switch_shows_in_the_template_bar() {
+    fn zoom_steps_up_and_down_and_back_to_actual_size() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        view.keys("ctrl-=");
+        assert_eq!(view.read(|view| view.zoom), 1.1);
+        view.keys("ctrl-- ctrl--");
+        assert_eq!(view.read(|view| view.zoom), 0.9);
+        for _ in 0..ZOOMS.len() {
+            view.keys("ctrl--");
+        }
+        assert_eq!(
+            view.read(|view| view.zoom),
+            ZOOMS[0],
+            "it stops at the smallest step"
+        );
+        view.keys("ctrl-0");
+        assert_eq!(view.read(|view| view.zoom), 1.);
+    }
+
+    #[test]
+    fn a_fitted_zoom_steps_to_the_next_step() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        view.update(|view, cx| view.set_zoom(1.95, cx));
+        view.keys("ctrl--");
+        assert_eq!(view.read(|view| view.zoom), 1.5);
+        view.update(|view, cx| view.set_zoom(1.95, cx));
+        view.keys("ctrl-=");
+        assert_eq!(view.read(|view| view.zoom), 2.);
+    }
+
+    #[test]
+    fn a_template_switch_shows_in_the_page_menus() {
         let mut app = TestAppContext::single();
         let mut view = open(&mut app, "Ledgerly");
         view.cx.dispatch_action(UseTemplate { key: "sidebar" });
@@ -2700,7 +2889,7 @@ mod tests {
     }
 
     #[test]
-    fn a_paper_switch_shows_in_the_template_bar() {
+    fn a_paper_switch_shows_in_the_page_menus() {
         let mut app = TestAppContext::single();
         let mut view = open(&mut app, "Ledgerly");
         for paper in Paper::ALL {
