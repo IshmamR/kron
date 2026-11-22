@@ -1,4 +1,5 @@
 use super::parts::COMPACT;
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -150,11 +151,27 @@ impl Inspector {
             })
             .children(edited)
             .children(self.new_words(line, cx))
+            .when(
+                self.inspection
+                    .facts
+                    .iter()
+                    .any(|cited| cited.words.is_some()),
+                |this| {
+                    this.child(caption(
+                        "Marked in each fact: the words this line used.",
+                        cx,
+                    ))
+                },
+            )
             .children(self.inspection.facts.iter().map(|cited| {
                 match &cited.fact {
-                    Some(fact) => {
-                        fact_card(fact, self.resume.change(cited.id), cx).into_any_element()
-                    }
+                    Some(fact) => fact_card(
+                        fact,
+                        cited.words.as_deref(),
+                        self.resume.change(cited.id),
+                        cx,
+                    )
+                    .into_any_element(),
                     None => notice(
                         "This line cites a fact that no longer exists.",
                         theme.danger,
@@ -349,6 +366,9 @@ pub(super) struct CitedFact {
     pub(super) id: FactId,
     /// `None` once it's deleted.
     pub(super) fact: Option<InspectedFact>,
+    /// The words of it the line was written from, as the generator copied
+    /// them, where it gave them.
+    pub(super) words: Option<String>,
 }
 
 pub(super) struct InspectedFact {
@@ -382,9 +402,20 @@ impl Inspection {
         let cites = selected.map_or(&[][..], |line| &line.cites);
         let mut facts = Vec::new();
         for &fact in cites {
+            let words = match line {
+                Some(line) => connection
+                    .prepare_cached(
+                        "SELECT words FROM line_citations WHERE line_id = ?1 AND fact_id = ?2",
+                    )?
+                    .query_row((line.0, fact.0), |row| row.get(0))
+                    .optional()?
+                    .flatten(),
+                None => None,
+            };
             facts.push(CitedFact {
                 id: fact,
                 fact: inspected_fact(connection, fact)?,
+                words,
             });
         }
         let edit_problem = selected.filter(|line| line.is_edited()).and_then(|line| {
@@ -574,8 +605,24 @@ fn root(connection: &Connection, fact: Uuid) -> Result<FactId, Error> {
     Ok(FactId(fact))
 }
 
-fn fact_card(fact: &InspectedFact, change: Option<FactChange>, cx: &App) -> impl IntoElement {
+/// `fact`'s card, with the `words` of it a line used marked.
+fn fact_card(
+    fact: &InspectedFact,
+    words: Option<&str>,
+    change: Option<FactChange>,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
+    let used = HighlightStyle {
+        background_color: Some(theme.primary.opacity(0.15)),
+        underline: Some(UnderlineStyle {
+            thickness: px(1.),
+            color: Some(theme.primary),
+            wavy: false,
+        }),
+        ..Default::default()
+    };
+    let marked = words.map_or_else(Vec::new, |words| quoted_ranges(&fact.text, words));
     let changed = change.map(|change| match change {
         FactChange::Hidden => {
             "You hid this fact after the résumé was generated. Regenerate to leave it out."
@@ -599,7 +646,12 @@ fn fact_card(fact: &InspectedFact, change: Option<FactChange>, cx: &App) -> impl
                 .child(caption(fact_kind_label(fact.kind), cx))
                 .child(fact_status(fact.review.is_some(), fact.hidden, cx)),
         )
-        .child(div().text_sm().child(fact.text.clone()))
+        .child(
+            div().text_sm().child(
+                StyledText::new(fact.text.clone())
+                    .with_highlights(marked.into_iter().map(|range| (range, used))),
+            ),
+        )
         .when_some(fact.entry.clone(), |this, entry| {
             this.child(caption(entry, cx))
         })
@@ -617,6 +669,45 @@ fn fact_card(fact: &InspectedFact, change: Option<FactChange>, cx: &App) -> impl
             SharedString::from(format!("show-fact-{}", fact_id.0)),
             fact_id,
         )))
+}
+
+/// Where `text` has `words`, ignoring case, each part on its own where the
+/// generator left a gap with "…" or "...". Nothing, once the fact was
+/// reworded so that it no longer has them.
+fn quoted_ranges(text: &str, words: &str) -> Vec<Range<usize>> {
+    let mut ranges: Vec<Range<usize>> = words
+        .split('…')
+        .flat_map(|part| part.split("..."))
+        .map(|part| {
+            part.trim_matches(|character: char| character.is_whitespace() || character == ',')
+        })
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| {
+            text.char_indices().find_map(|(start, _)| {
+                let mut end = start;
+                let mut rest = text[start..].chars();
+                for wanted in part.chars() {
+                    let found = rest.next()?;
+                    if !found.to_lowercase().eq(wanted.to_lowercase()) {
+                        return None;
+                    }
+                    end += found.len_utf8();
+                }
+                Some(start..end)
+            })
+        })
+        .collect();
+    // Drawn in order, and never twice over.
+    ranges.sort_by_key(|range| range.start);
+    let mut end = 0;
+    ranges.retain(|range| {
+        let apart = range.start >= end;
+        if apart {
+            end = range.end;
+        }
+        apart
+    });
+    ranges
 }
 
 fn show_in_facts_button(id: impl Into<ElementId>, fact: FactId) -> Button {
@@ -644,5 +735,40 @@ fn unsupported_reason(reason: &UnsupportedReason) -> String {
             format!("“{word}” is from the job ad, not your facts")
         }
         UnsupportedReason::SaysMore(words) => format!("“{words}” says more than your facts"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_words_a_line_used_are_found_in_its_fact_whatever_their_case() {
+        let fact = "Led the move from nightly batch exports to a streaming integration.";
+        let marked = |words| {
+            quoted_ranges(fact, words)
+                .into_iter()
+                .map(|range| &fact[range])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(marked("led the move"), ["Led the move"]);
+        assert_eq!(
+            marked("Led the move … a streaming integration"),
+            ["Led the move", "a streaming integration"],
+            "each part on its own"
+        );
+        assert_eq!(
+            marked("streaming integration... the move"),
+            ["the move", "streaming integration"]
+        );
+        assert_eq!(
+            marked("Led the move…the move"),
+            ["Led the move"],
+            "never twice over"
+        );
+        assert!(
+            marked("a Kafka pipeline").is_empty(),
+            "once the fact no longer has them"
+        );
     }
 }

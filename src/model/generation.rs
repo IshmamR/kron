@@ -38,7 +38,7 @@ const PREAMBLE: &str = r#"You write a résumé for one job from facts about a pe
 
 Answer with one JSON object. Ids are strings in it, like "F12" and "E3":
 {
-  "summary": {"text": two or three sentences of what this person has done that matters most for the job, "facts": [the ids of the facts it rests on]}, or null,
+  "summary": {"facts": [{"fact": the id of a fact it rests on, "words": the words of that fact it uses, copied exactly}], "text": two or three sentences of what this person has done that matters most for the job}, or null,
   "entries": [
     {
       "entry": the id of a job, degree, project, certification or other entry to show,
@@ -51,7 +51,7 @@ Answer with one JSON object. Ids are strings in it, like "F12" and "E3":
 }
 
 Rules:
-- A bullet says only what its facts say. Reword it for this job: lead with what matters most to it, and use the job's words where they mean the same as the fact's.
+- For the summary, first copy the words of each fact it uses, then write it, saying nothing those words don't. A bullet says only what its facts say. Reword it for this job: lead with what matters most to it, and use the job's words where they mean the same as the fact's.
 - Never add a number, year, technology, tool, title, scope or result that the facts don't state, and never make one bigger. Keep every number as the facts give it.
 - A bullet may combine two or three facts from its entry when they're about the same work. Cite every fact a bullet uses, and only facts from its own entry; the summary may cite any.
 - Order each entry's bullets by how much they matter to this job. Leave out facts that don't help with it.
@@ -120,7 +120,7 @@ pub struct Answer {
     #[serde(default)]
     skills: Vec<ChosenSkills>,
     #[serde(default)]
-    items: Vec<String>,
+    items: Vec<Cited>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -128,7 +128,40 @@ struct Written {
     #[serde(default)]
     text: String,
     #[serde(default)]
-    facts: Vec<String>,
+    facts: Vec<Cited>,
+}
+
+/// A fact a line rests on, or one chosen to show: its id, and for a line
+/// the words of it the line uses as the model copied them. Any list of ids
+/// takes either shape, as a model asked for quotes may give them in a list
+/// of skills too, and one it can't read is passed over rather than losing
+/// the answer.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Cited {
+    Id(String),
+    Quoted {
+        fact: String,
+        #[serde(default)]
+        words: String,
+    },
+    Unread(serde::de::IgnoredAny),
+}
+
+impl Cited {
+    fn fact(&self) -> &str {
+        match self {
+            Self::Id(fact) | Self::Quoted { fact, .. } => fact,
+            Self::Unread(_) => "",
+        }
+    }
+}
+
+impl Written {
+    /// The ids of the facts it cites, in order.
+    fn cited(&self) -> impl Iterator<Item = &str> {
+        self.facts.iter().map(Cited::fact)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -138,7 +171,7 @@ struct ChosenEntry {
     #[serde(default)]
     bullets: Vec<Written>,
     #[serde(default)]
-    skills: Vec<String>,
+    skills: Vec<Cited>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,7 +179,7 @@ struct ChosenSkills {
     #[serde(default)]
     entry: String,
     #[serde(default)]
-    skills: Vec<String>,
+    skills: Vec<Cited>,
 }
 
 /// A résumé ready to save: its sections, and the claims left out of it.
@@ -157,6 +190,9 @@ pub struct Draft {
     /// The lines the model wrote and the rules passed, for the meaning
     /// check.
     pub checked: Vec<Checked>,
+    /// The words of a fact a line used, as the model copied them, for the
+    /// lines that gave them.
+    quotes: Vec<(LineId, FactId, String)>,
     /// The facts it was made from, as they are now.
     facts: Vec<(FactId, String)>,
 }
@@ -385,6 +421,7 @@ impl Draft {
             .collect();
         let mut claims = Vec::new();
         let mut checked = Vec::new();
+        let mut quotes = Vec::new();
         // A line kept, with what the meaning check is to be sent of it: its
         // text as the model wrote it, and its facts as they were sent.
         let mut kept = |written: &Written, kept: Line| -> Option<Line> {
@@ -397,6 +434,17 @@ impl Draft {
                 .iter()
                 .map(|index| material.facts[*index].text.as_str())
                 .collect();
+            for cited in &written.facts {
+                if let Cited::Quoted { fact, words } = cited
+                    && let Some(index) = material.fact(fact)
+                    && kept.cites.contains(&material.facts[index].id)
+                {
+                    let words = redaction.restore(words.trim(), sent);
+                    if !words.is_empty() {
+                        quotes.push((kept.id, material.facts[index].id, words));
+                    }
+                }
+            }
             let new = meaning_check::new_words(&kept.text, &said);
             if !new.is_empty() {
                 checked.push(Checked {
@@ -423,7 +471,7 @@ impl Draft {
                     return None;
                 }
                 let mut cites: Vec<FactId> = Vec::new();
-                for index in written.facts.iter().filter_map(|id| material.fact(id)) {
+                for index in written.cited().filter_map(|id| material.fact(id)) {
                     let id = material.facts[index].id;
                     if !cites.contains(&id) {
                         cites.push(id);
@@ -598,7 +646,7 @@ impl Draft {
         let mut items: Vec<usize> = answer
             .items
             .iter()
-            .filter_map(|id| material.fact(id))
+            .filter_map(|id| material.fact(id.fact()))
             .filter(|index| {
                 let fact = &material.facts[*index];
                 fact.entry.is_none() && fact.kind != FactKind::Summary
@@ -643,6 +691,7 @@ impl Draft {
             sections,
             claims,
             checked,
+            quotes,
             facts,
         }
     }
@@ -741,7 +790,7 @@ pub fn save(
             ],
         )?;
         for (position, block) in section.blocks.iter().enumerate() {
-            save_block(write, id, position, block)?;
+            save_block(write, id, position, block, &draft.quotes)?;
         }
     }
     for (id, text) in &draft.facts {
@@ -1033,6 +1082,7 @@ fn save_block(
     section: Uuid,
     position: usize,
     block: &Block,
+    quotes: &[(LineId, FactId, String)],
 ) -> Result<(), Error> {
     let id = Uuid::now_v7();
     let (kind, lines): (&str, Vec<(&str, &Line)>) = match block {
@@ -1088,7 +1138,15 @@ fn save_block(
             write.insert(
                 LineCitations,
                 (line.id.0, fact.0),
-                &[line_citations::SORT_KEY.value(&sort_key(position))],
+                &[
+                    line_citations::SORT_KEY.value(&sort_key(position)),
+                    line_citations::WORDS.value(
+                        &quotes
+                            .iter()
+                            .find(|(quoted, cited, _)| *quoted == line.id && cited == fact)
+                            .map(|(.., words)| words.as_str()),
+                    ),
+                ],
             )?;
         }
     }
@@ -1101,7 +1159,7 @@ fn save_block(
 fn entry_block(
     material: &Material,
     entry: usize,
-    skills: &[String],
+    skills: &[Cited],
     bullets: Vec<Line>,
 ) -> Option<Box<EntryBlock>> {
     let field = |kind: FactKind| {
@@ -1125,9 +1183,9 @@ fn entry_block(
 }
 
 /// The skills `chosen` of `entry`'s own, as one line citing each.
-fn skill_line(material: &Material, entry: usize, chosen: &[String]) -> Option<Line> {
+fn skill_line(material: &Material, entry: usize, chosen: &[Cited]) -> Option<Line> {
     let mut skills: Vec<usize> = Vec::new();
-    for index in chosen.iter().filter_map(|id| material.fact(id)) {
+    for index in chosen.iter().filter_map(|id| material.fact(id.fact())) {
         let fact = &material.facts[index];
         if fact.entry == Some(entry) && fact.kind == FactKind::Skill && !skills.contains(&index) {
             skills.push(index);
@@ -1174,6 +1232,7 @@ fn sort_key(position: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::model::meaning_check::Flag;
     use crate::model::{redaction, sample};
@@ -1519,32 +1578,52 @@ mod tests {
         };
         let summary = answer.summary.unwrap_or_default();
         assert_eq!(summary.text, "Cut F1 \"E2\" time.");
-        assert_eq!(summary.facts, ["F1", "F12"]);
+        assert_eq!(summary.cited().collect::<Vec<_>>(), ["F1", "F12"]);
         let entry = answer.entries.first().map(|entry| {
             let bullet = entry
                 .bullets
                 .first()
-                .map(|bullet| (&bullet.text, &bullet.facts));
-            (&entry.entry, bullet, &entry.skills)
+                .map(|bullet| (bullet.text.as_str(), bullet.cited().collect::<Vec<_>>()));
+            (entry.entry.as_str(), bullet, ids(&entry.skills))
         });
-        let (bullet_text, bullet_facts) = (String::from("Ran F9."), vec![String::from("F4")]);
         assert_eq!(
             entry,
-            Some((
-                &"E3".to_owned(),
-                Some((&bullet_text, &bullet_facts)),
-                &vec!["F5".to_owned()]
-            ))
+            Some(("E3", Some(("Ran F9.", vec!["F4"])), vec!["F5"]))
         );
         let skills = answer
             .skills
             .first()
-            .map(|skills| (&skills.entry, &skills.skills));
-        assert_eq!(
-            skills,
-            Some((&"E6".to_owned(), &vec!["F7".to_owned(), "F8".to_owned()]))
+            .map(|skills| (skills.entry.as_str(), ids(&skills.skills)));
+        assert_eq!(skills, Some(("E6", vec!["F7", "F8"])));
+        assert_eq!(ids(&answer.items), ["F10"]);
+    }
+
+    fn ids(cited: &[Cited]) -> Vec<&str> {
+        cited.iter().map(Cited::fact).collect()
+    }
+
+    #[test]
+    fn a_fact_is_cited_by_its_id_or_with_the_words_used_in_any_list() {
+        let answer = Answer::parse(
+            r#"{"summary": {"facts": [{"fact": "F1", "words": "Cut p99 latency"}, "F2", 7],
+                            "text": "Cut latency."},
+                "entries": [{"entry": "E3", "bullets": [],
+                             "skills": [{"fact": "F5", "words": "Rust"}, "F6"]}],
+                "items": [{"fact": "F10"}]}"#,
         );
-        assert_eq!(answer.items, ["F10"]);
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => panic!("either shape is read: {error}"),
+        };
+        let summary = answer.summary.unwrap_or_default();
+        assert_eq!(summary.cited().collect::<Vec<_>>(), ["F1", "F2", ""]);
+        assert!(matches!(
+            summary.facts.first(),
+            Some(Cited::Quoted { words, .. }) if words == "Cut p99 latency"
+        ));
+        let skills = answer.entries.first().map(|entry| ids(&entry.skills));
+        assert_eq!(skills, Some(vec!["F5", "F6"]));
+        assert_eq!(ids(&answer.items), ["F10"]);
     }
 
     #[test]
@@ -1660,6 +1739,47 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn the_words_a_kept_line_quotes_are_saved_with_its_citation() -> Result<(), Error> {
+        let mut writer = sample::written()?;
+        let material = Material::read(writer.kron())?;
+        let summary = material.facts[0].text.clone();
+        let quoted: String = summary
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let json = |text: &str| serde_json::to_string(text).unwrap_or_default();
+        let answer = format!(
+            r#"{{"summary": {{"facts": [{{"fact": "F1", "words": {}}}], "text": {}}},
+                "entries": [{{"entry": "E1", "bullets": [
+                  {{"facts": [{{"fact": "F10", "words": "made up"}}],
+                    "text": "Cut cloud costs by 40%."}}]}}]}}"#,
+            json(&quoted),
+            json(&summary)
+        );
+        let (_, draft) = draft(writer.kron(), &answer);
+        let job = sample::job(writer.kron(), "Cinder Labs")?;
+        let (resume, _) = writer.execute(|write| save(write, job, &draft, Paper::A4, None))?;
+        let words: Vec<String> = writer
+            .kron()
+            .prepare(
+                "SELECT line_citations.words FROM line_citations
+                 JOIN lines ON lines.id = line_citations.line_id
+                 JOIN blocks ON blocks.id = lines.block_id
+                 JOIN sections ON sections.id = blocks.section_id
+                 WHERE sections.generation_id = ?1 AND line_citations.words IS NOT NULL",
+            )?
+            .query_map([resume.0], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            words,
+            [quoted],
+            "the bullet's figure left it out, quote and all"
+        );
+        Ok(())
+    }
+
     /// Writes a résumé from the sample's facts for its Cinder Labs job with
     /// the provider set up in the development data, its key from the
     /// keyring, and prints it with the claims left out. It costs money and
@@ -1725,6 +1845,171 @@ mod tests {
         assert!(draft.sections.len() > 2, "more than a header and a summary");
         Ok(())
     }
+    /// Writes résumés for the test CVs and `generation/jobs.txt`, each run
+    /// through the rules and the meaning check as Kron does, and prints the
+    /// lines written, kept and left out, the kept lines with words their
+    /// facts don't have, the quotes found in their fact, the cost and the
+    /// time spent writing: what to compare a change to the prompt by. Each
+    /// job is written `KRON_LIVE_REPEATS` times (1), as answers vary; with
+    /// `KRON_LIVE_OUT`, every line goes to that file to read. It costs money
+    /// and needs the network, so it runs only when asked:
+    /// `cargo test live_rates -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_rates() -> Result<(), Box<dyn std::error::Error>> {
+        const JOBS: &str = include_str!("generation/jobs.txt");
+        const CVS: [(&str, &[u8]); 4] = [
+            ("junior", include_bytes!("extraction/junior.pdf")),
+            ("senior", include_bytes!("extraction/senior.pdf")),
+            ("columns", include_bytes!("extraction/columns.pdf")),
+            ("linkedin", include_bytes!("extraction/linkedin.pdf")),
+        ];
+        #[derive(Default)]
+        struct Tally {
+            written: usize,
+            kept: usize,
+            by_rules: usize,
+            by_meaning: usize,
+            reworded: usize,
+            new_words: usize,
+            quotes: usize,
+            quotes_found: usize,
+            output_tokens: u64,
+            cost: f64,
+            seconds: f64,
+        }
+        let repeats: usize = std::env::var("KRON_LIVE_REPEATS")
+            .ok()
+            .and_then(|repeats| repeats.parse().ok())
+            .unwrap_or(1);
+        let (assigned, key) = crate::llm::live_assigned(crate::llm::Purpose::GenerateResume)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let call = |request| {
+            runtime
+                .block_on(crate::llm::call(&assigned, key.clone(), request))
+                .map_err(|error| error.to_string())
+        };
+        let mut out = String::new();
+        let mut tally = Tally::default();
+        for (cv, pdf) in CVS {
+            let (_, material, listed) = find_facts(&call, pdf)?;
+            for block in JOBS.split("\n===\n") {
+                let mut lines = block.lines().filter(|line| !line.starts_with('#'));
+                let mut field = |name: &str| {
+                    lines
+                        .find(|line| !line.is_empty())
+                        .and_then(|line| line.strip_prefix(name))
+                };
+                let (Some(of), Some(title), Some(company)) =
+                    (field("cv: "), field("title: "), field("company: "))
+                else {
+                    continue;
+                };
+                if of != cv {
+                    continue;
+                }
+                let description = lines.collect::<Vec<_>>().join("\n");
+                let job = Job {
+                    title,
+                    company,
+                    description: description.trim(),
+                };
+                for _ in 0..repeats {
+                    let started = std::time::Instant::now();
+                    let reply = call(request(&listed.text, &job))?;
+                    tally.seconds += started.elapsed().as_secs_f64();
+                    tally.cost += reply.cost.unwrap_or(0.);
+                    tally.output_tokens += reply.response.usage.output_tokens.unwrap_or(0);
+                    let answer = Answer::parse(&reply.response.text())?;
+                    let written: Vec<&Written> = answer
+                        .summary
+                        .iter()
+                        .chain(answer.entries.iter().flat_map(|entry| &entry.bullets))
+                        .collect();
+                    tally.written += written.len();
+                    for cited in written.iter().flat_map(|written| &written.facts) {
+                        if let Cited::Quoted { fact, words } = cited {
+                            tally.quotes += 1;
+                            let words = listed.restore(words, &material.listing);
+                            let found = material.fact(fact).is_some_and(|index| {
+                                plain(&material.facts[index].text).contains(&plain(&words))
+                            });
+                            tally.quotes_found += usize::from(found);
+                        }
+                    }
+                    let mut draft =
+                        Draft::new(&answer, &material, &material.listing, &listed, &job);
+                    tally.by_rules += draft.claims.len();
+                    tally.reworded += draft.checked.len();
+                    tally.new_words += draft
+                        .checked
+                        .iter()
+                        .map(|checked| checked.new.len())
+                        .sum::<usize>();
+                    if !draft.checked.is_empty() {
+                        let check = call(meaning_check::request(&draft.checked))?;
+                        tally.cost += check.cost.unwrap_or(0.);
+                        let flags =
+                            meaning_check::flags(&check.response.text(), draft.checked.len())?;
+                        let before = draft.claims.len();
+                        draft.leave_out(&flags, &listed, &material.listing);
+                        tally.by_meaning += draft.claims.len() - before;
+                    }
+                    out.push_str(&format!("\n== {cv}, {company}\n"));
+                    for section in &draft.sections {
+                        for block in &section.blocks {
+                            let lines: Vec<&Line> = match block {
+                                Block::Text(line) => vec![line],
+                                Block::Entry(entry) => entry.bullets.iter().collect(),
+                                _ => Vec::new(),
+                            };
+                            tally.kept += lines.len();
+                            for line in lines {
+                                out.push_str(&format!("KEPT {}\n", line.text));
+                            }
+                        }
+                    }
+                    for (text, reason) in &draft.claims {
+                        out.push_str(&format!("LEFT OUT {reason:?}: {text}\n"));
+                    }
+                }
+                println!("{cv}, {company} done");
+            }
+        }
+        println!(
+            "== {} written, {} kept, {} left out by the rules and {} by the \
+                 meaning check; {} reworded with {} new words; {} of {} quotes found in \
+                 their fact; {} tokens out, ${:.4}, {:.0} s writing",
+            tally.written,
+            tally.kept,
+            tally.by_rules,
+            tally.by_meaning,
+            tally.reworded,
+            tally.new_words,
+            tally.quotes_found,
+            tally.quotes,
+            tally.output_tokens,
+            tally.cost,
+            tally.seconds
+        );
+        if let Ok(path) = std::env::var("KRON_LIVE_OUT") {
+            std::fs::write(path, out)?;
+        }
+        Ok(())
+    }
+
+    /// `text` lowercase with only its letters and digits, a space between
+    /// each run, for finding a quote however it was spaced or punctuated.
+    fn plain(text: &str) -> String {
+        text.to_lowercase()
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Builds the test set of real output: reads each test CV, finds its
     /// facts and writes résumés for its jobs in `generation/jobs.txt` with
     /// the provider set up in the development data, then writes every line
@@ -1822,8 +2107,7 @@ mod tests {
                 for (kind, entry, line) in written {
                     let text = listed.restore(line.text.trim(), &material.listing);
                     let mut cited: Vec<usize> = line
-                        .facts
-                        .iter()
+                        .cited()
                         .filter_map(|id| material.fact(id))
                         .fold(Vec::new(), |mut cited, index| {
                             if !cited.contains(&index) {

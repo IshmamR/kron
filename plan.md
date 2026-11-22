@@ -246,9 +246,28 @@ Test set first. Each rule only adds rejections, and each is measured on
   a highlight underlined darker, as Grammarly marks; it's never exported.
   Checked has no mark and is said only in the inspector, to keep the page
   clear (2026-11-22).
-- [ ] **Generation returns the words of each fact it used.** Optionally, limit
-  bullets to a menu of edits (keep, trim, merge within an entry, a verb no
-  higher on the ladder). Compare fluency against the rejection rate.
+- [x] **Generation returns the words of each fact it used** (2026-11-23),
+  for the summary. The word diff rarely misattributes: of 93 lines in
+  `generated.txt`, 9 cite more than one fact, all summaries, and none cites a
+  fact it shares no word with. So quotes were measured for what they do to
+  writing (`live_rates`, 8 jobs, rules and meaning check as in the app).
+  Quoting every line: DeepSeek Flash left out 3–4 lines instead of 10–12,
+  but wrote 1.85× the tokens; GPT-6.2-Sol left out as many and took 45%
+  longer. Quoting the summary only, the lines that combine facts: DeepSeek
+  left out 2 instead of 10 (the baseline lost most summaries, to words of
+  facts they didn't cite), 22% more tokens and 13% more time; GPT left out
+  14 either way, 10% more time. Every quote was found in its fact. Its
+  summaries lean on the person's own profile, less tailored to the job. The
+  words are saved with each citation and marked in the inspector. Bullets
+  aren't limited to a menu of edits: what's left out of them is mostly the
+  rules' doing (next item).
+- [ ] **The job-echo rule rejects plain words.** On real output with jobs
+  (`live_rates`), most of what GPT-6.2-Sol had left out was the rule taking
+  everyday words an ad happens to use for claims: "experience",
+  "Built", "engineers", "across", "poor", "mobile", "experiment"; and "2G
+  view" read as a count. Measure them on `generated.txt` rewritten with jobs,
+  then narrow the rule (for example, only words that name a skill, tool or
+  title).
 - [x] **The meaning check through the user's AI service** (2026-11-22). One
   more call after the résumé, on the same service, with the lines the rules
   passed that have words their facts don't; a line it flags goes to Left out

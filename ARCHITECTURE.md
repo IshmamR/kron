@@ -69,7 +69,9 @@ CppCon 2014) and Richard Fabian (*Data-Oriented Design*):
 4. **Generation** (`model/generation.rs`) sends the facts, numbered and
    grouped by entry (with no name or contacts), with the job description. The
    model picks entries and skills, and writes the summary and bullets, citing
-   facts by number. It may reword a fact and combine two or three. Kron
+   facts by number. For the summary it first copies the words of each fact it
+   uses, which keeps it to them; they're saved with the citation and marked
+   in the inspector. It may reword a fact and combine two or three. Kron
    writes everything else from the facts as stored: the header, titles,
    organizations, dates and locations. A new résumé starts on the paper last
    chosen, else the locale's (US Letter in the US and a few others, A4
