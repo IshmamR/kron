@@ -472,10 +472,11 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
         Option<u16>,
         Option<Uuid>,
         Option<Uuid>,
+        Option<String>,
     );
     let rows: Vec<Row> = connection
         .prepare_cached(
-            "SELECT id, text, reason, figure, year, hidden_fact_id, added_as
+            "SELECT id, text, reason, figure, year, hidden_fact_id, added_as, word
              FROM unsupported_claims
              WHERE generation_id = ?1 AND deleted_at IS NULL
              ORDER BY sort_key",
@@ -489,17 +490,24 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
                 row.get(4)?,
                 row.get(5)?,
                 row.get(6)?,
+                row.get(7)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
     let mut claims = Vec::new();
-    for (id, text, reason, figure, year, hidden_fact, added_as) in rows {
+    for (id, text, reason, figure, year, hidden_fact, added_as, word) in rows {
         let mut hidden_fact_shown = false;
         let reason = match (reason.as_str(), figure, year, hidden_fact) {
             ("invented_figure", Some(figure), _, _) => UnsupportedReason::InventedFigure(figure),
             ("invented_year", _, Some(year), _) => UnsupportedReason::InventedYear(year),
             ("no_supporting_fact", ..) => UnsupportedReason::NoSupportingFact,
             ("other_entry", ..) => UnsupportedReason::OtherEntry,
+            ("dropped_qualifier", ..) if let Some(word) = word.clone() => {
+                UnsupportedReason::DroppedQualifier(word)
+            }
+            ("added_qualifier", ..) if let Some(word) = word.clone() => {
+                UnsupportedReason::AddedQualifier(word)
+            }
             ("uses_hidden_fact", _, _, Some(fact)) => {
                 let fact = root(connection, fact)?;
                 hidden_fact_shown = connection
@@ -612,5 +620,9 @@ fn unsupported_reason(reason: &UnsupportedReason) -> String {
         UnsupportedReason::NoSupportingFact => "No fact supports this".into(),
         UnsupportedReason::UsesHiddenFact(_) => "Relies on a fact you hid".into(),
         UnsupportedReason::OtherEntry => "Mixes in work from another entry".into(),
+        UnsupportedReason::DroppedQualifier(word) => {
+            format!("Leaves out “{word}” from your fact")
+        }
+        UnsupportedReason::AddedQualifier(word) => format!("“{word}” isn't in any of your facts"),
     }
 }

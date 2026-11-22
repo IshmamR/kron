@@ -646,18 +646,24 @@ pub fn save(
         )?;
     }
     for (position, (text, reason)) in draft.claims.iter().enumerate() {
-        let (stored, figure, year, hidden) = match reason {
+        let (stored, figure, year, hidden, word) = match reason {
             UnsupportedReason::InventedFigure(figure) => {
-                ("invented_figure", Some(figure.as_str()), None, None)
+                ("invented_figure", Some(figure.as_str()), None, None, None)
             }
             UnsupportedReason::InventedYear(year) => {
-                ("invented_year", None, Some(i64::from(*year)), None)
+                ("invented_year", None, Some(i64::from(*year)), None, None)
             }
-            UnsupportedReason::NoSupportingFact => ("no_supporting_fact", None, None, None),
+            UnsupportedReason::NoSupportingFact => ("no_supporting_fact", None, None, None, None),
             UnsupportedReason::UsesHiddenFact(fact) => {
-                ("uses_hidden_fact", None, None, Some(fact.0))
+                ("uses_hidden_fact", None, None, Some(fact.0), None)
             }
-            UnsupportedReason::OtherEntry => ("other_entry", None, None, None),
+            UnsupportedReason::OtherEntry => ("other_entry", None, None, None, None),
+            UnsupportedReason::DroppedQualifier(word) => {
+                ("dropped_qualifier", None, None, None, Some(word.as_str()))
+            }
+            UnsupportedReason::AddedQualifier(word) => {
+                ("added_qualifier", None, None, None, Some(word.as_str()))
+            }
         };
         write.insert(
             UnsupportedClaims,
@@ -670,6 +676,7 @@ pub fn save(
                 unsupported_claims::FIGURE.value(&figure),
                 unsupported_claims::YEAR.value(&year),
                 unsupported_claims::HIDDEN_FACT_ID.value(&hidden),
+                unsupported_claims::WORD.value(&word),
             ],
         )?;
     }
@@ -1110,6 +1117,8 @@ mod tests {
               {"text": "Led moving 12 backend services from Python to Rust, one service at a time.",
                "facts": ["F9", "F12", "F12", "F75"]},
               {"text": "Cut cloud costs by 40%.", "facts": ["F10"]},
+              {"text": "Cut the routing API's p99 latency without downtime, from 480 ms to 95 ms.",
+               "facts": ["F10"]},
               {"text": "Cut the routing API's p99 latency from 480 ms to 95 ms, for the appointment scheduling service.",
                "facts": ["F10", "F23"]},
               {"text": "Built the appointment scheduling service used by 40 clinics.", "facts": ["F23"]}]},
@@ -1187,6 +1196,11 @@ mod tests {
                     UnsupportedReason::InventedFigure("40%".to_owned())
                 ),
                 (
+                    "Cut the routing API's p99 latency without downtime, from 480 ms to 95 ms."
+                        .to_owned(),
+                    UnsupportedReason::AddedQualifier("without".to_owned())
+                ),
+                (
                     "Cut the routing API's p99 latency from 480 ms to 95 ms, for the appointment \
                      scheduling service."
                         .to_owned(),
@@ -1197,7 +1211,8 @@ mod tests {
                     UnsupportedReason::OtherEntry
                 ),
             ],
-            "a figure no fact states, and work of another job, with a fact of this one or alone"
+            "a figure no fact states, a \"without\" no fact says, and work of another job, \
+             with a fact of this one or alone"
         );
     }
 
@@ -1453,7 +1468,13 @@ mod tests {
         };
         assert_eq!(
             count("SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1")?,
-            3
+            4
+        );
+        assert_eq!(
+            count(
+                "SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1 AND word = 'without'"
+            )?,
+            1
         );
         assert_eq!(
             count("SELECT count(*) FROM fact_versions WHERE generation_id = ?1")?,

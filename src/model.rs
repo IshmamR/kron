@@ -234,6 +234,11 @@ pub enum UnsupportedReason {
     UsesHiddenFact(FactId),
     /// A bullet takes from a fact of another job, project or other entry.
     OtherEntry,
+    /// The line leaves out a word of its facts that says the work wasn't
+    /// done, or not all of it: "proposed", "planned", "started".
+    DroppedQualifier(String),
+    /// The line says "without", "no" or "never" where its facts don't.
+    AddedQualifier(String),
 }
 
 /// Tells whether another fact probably says the same thing as `text`: most

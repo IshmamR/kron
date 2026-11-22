@@ -1,6 +1,7 @@
 // Checks generated lines against the facts they cite, with no model: a line
 // may state only figures and years its facts state, counting what they
-// count, may not rest on a fact the user hid, and a bullet may not take from
+// count, may not rest on a fact the user hid, may not drop a fact's
+// "proposed" or "planned" or add a "without", and a bullet may not take from
 // a fact of another entry. A line that fails is left out of the résumé and
 // listed as an unsupported claim.
 
@@ -18,6 +19,45 @@ const CURRENCIES: [char; 6] = ['$', '€', '£', '¥', '₹', '৳'];
 /// Lone numbers under this stay words when number words are read: "one" and
 /// "first" are more often "one of the first" than a count.
 const LONE_NUMBER_WORDS_BELOW: f64 = 2.0;
+/// Words saying work was only proposed, planned, begun, tried or tested, as
+/// written: a line may reword its fact but must keep one. Matched whole, not
+/// by stem, so a "pricing plan" isn't "planned".
+const HEDGES: [&str; 31] = [
+    "proposed",
+    "propose",
+    "proposing",
+    "suggested",
+    "recommended",
+    "pitched",
+    "planned",
+    "planning to",
+    "plan to",
+    "plans to",
+    "started",
+    "began",
+    "begun",
+    "enrolled",
+    "pursuing",
+    "studying",
+    "working towards",
+    "working toward",
+    "tried",
+    "trying to",
+    "attempted",
+    "prototyped",
+    "prototype",
+    "prototyping",
+    "piloted",
+    "proof of concept",
+    "proof-of-concept",
+    "aims to",
+    "aiming to",
+    "intends to",
+    "hoping to",
+];
+/// Words a line may not add, as "without downtime" or "no outages" claim
+/// what a fact didn't.
+const NEGATIONS: [&str; 6] = ["not", "no", "never", "without", "zero", "none"];
 
 /// A fact as the generator was given it.
 pub struct GivenFact<'a> {
@@ -80,17 +120,17 @@ fn check(
             if entry.is_some_and(|entry| fact.entry != Some(entry)) {
                 return Some(UnsupportedReason::OtherEntry);
             }
-            facts.push((figures, stems));
+            facts.push((figures, stems, fact.text));
         }
     }
     if facts.is_empty() {
         return Some(UnsupportedReason::NoSupportingFact);
     }
-    line.iter().find_map(|figure| {
+    let figure = line.iter().find_map(|figure| {
         let stating: Vec<&Vec<String>> = facts
             .iter()
-            .filter(|(figures, _)| figures.iter().any(|stated| stated.value == figure.value))
-            .map(|(_, stems)| stems)
+            .filter(|(figures, ..)| figures.iter().any(|stated| stated.value == figure.value))
+            .map(|(_, stems, _)| stems)
             .collect();
         if stating.is_empty() {
             return Some(match figure.year {
@@ -104,7 +144,56 @@ fn check(
             .any(|stems| counted.iter().all(|stem| stems.contains(stem)));
         (!counts_the_same)
             .then(|| UnsupportedReason::InventedFigure(text[figure.start..end].to_owned()))
+    });
+    figure.or_else(|| {
+        let texts: Vec<&str> = facts.iter().map(|(.., text)| *text).collect();
+        qualifier(text, &texts)
     })
+}
+
+/// Why `text` says more than `facts` by a qualifier, if it does: it keeps
+/// none of their hedges ("proposed", "planned"), or it adds a negation
+/// ("without", "no") none of them has. A fact's own negation may go: "a
+/// prototype that wasn't shipped" may be "a prototype".
+fn qualifier(text: &str, facts: &[&str]) -> Option<UnsupportedReason> {
+    let line = spoken(text);
+    if !HEDGES
+        .iter()
+        .any(|hedge| line.contains(&format!(" {hedge} ")))
+    {
+        let dropped = facts.iter().find_map(|fact| {
+            let fact = spoken(fact);
+            HEDGES
+                .into_iter()
+                .find(|hedge| fact.contains(&format!(" {hedge} ")))
+        });
+        if let Some(hedge) = dropped {
+            return Some(UnsupportedReason::DroppedQualifier(hedge.to_owned()));
+        }
+    }
+    let facts: Vec<String> = facts.iter().map(|fact| spoken(fact)).collect();
+    NEGATIONS
+        .into_iter()
+        .find(|negation| {
+            let word = format!(" {negation} ");
+            line.contains(&word) && !facts.iter().any(|fact| fact.contains(&word))
+        })
+        .map(|negation| UnsupportedReason::AddedQualifier(negation.to_owned()))
+}
+
+/// `text` lowercase, as words between single spaces with one at each end,
+/// "n't" as " not": "Wasn't shipped." is " was not shipped ". A hyphen or
+/// underscore stays in its word, so "no_std" and "no-code" aren't "no".
+fn spoken(text: &str) -> String {
+    let lower = text
+        .to_lowercase()
+        .replace(['’', '\''], "'")
+        .replace("n't", " not");
+    let words: Vec<&str> = lower
+        .split(|character: char| !(character.is_alphanumeric() || matches!(character, '-' | '_')))
+        .filter(|word| !word.is_empty())
+        .collect();
+    format!(" {} ", words.join(" "))
 }
 
 /// Where the line `text` has words that carry meaning and none of `facts`
@@ -829,13 +918,15 @@ mod tests {
     const GENERATED: &str = include_str!("verifier/generated.txt");
     /// Labels the verifier handles: getting any of those cases wrong fails
     /// the test. The rest are only reported.
-    const HANDLED: [&str; 6] = [
+    const HANDLED: [&str; 8] = [
         "paraphrase",
         "invented_figure",
         "invented_year",
         "unit_swap",
         "combined",
         "cross_entry",
+        "kept_qualifier",
+        "dropped_qualifier",
     ];
 
     struct Case {
@@ -887,6 +978,53 @@ mod tests {
                 Some(case)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_qualifier_is_a_whole_word() {
+        let given = [fact(
+            "Built a pricing plan for the no-code editor in no_std Rust.",
+        )];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify(
+                "Built the no-code editor's pricing plan in no_std Rust.",
+                &cites,
+                &given
+            ),
+            None,
+            "a plan isn't planned, and no-code isn't no"
+        );
+        let given = [fact(
+            "Planned a rewrite of the editor that wasn't approved.",
+        )];
+        let cites = [given[0].id];
+        assert_eq!(
+            verify("Rewrote the editor.", &cites, &given),
+            Some(UnsupportedReason::DroppedQualifier("planned".to_owned()))
+        );
+        assert_eq!(
+            verify("Planned a rewrite of the editor.", &cites, &given),
+            None,
+            "its own negation may go"
+        );
+        assert_eq!(
+            verify(
+                "Planned a rewrite of the editor without downtime.",
+                &cites,
+                &given
+            ),
+            Some(UnsupportedReason::AddedQualifier("without".to_owned()))
+        );
+        assert_eq!(
+            verify(
+                "Planned an editor rewrite that wasn't approved.",
+                &cites,
+                &given
+            ),
+            None,
+            "wasn't is the fact's not"
+        );
     }
 
     #[test]

@@ -217,8 +217,13 @@ Test set first. Each rule only adds rejections, and each is measured on
   flags on combined (2026-11-22).
 - [ ] **Job-description echo.** A word in `new_words` that also appears in the
   job description means rejection. `verify` needs the description passed in.
-- [ ] **Negation and modality.** Words like not, never, without, helped to and
+- [x] **Negation and modality.** Words like not, never, without, helped to and
   planned, present in a fact and missing from the line, or the other way round.
+  A line must keep one of its facts' hedges (proposed, planned, started,
+  tried, prototyped, working towards…), matched as whole words, and may not
+  add a not, no, never, without, zero or none. A fact's own negation may go.
+  "Helped to" is left to the verb ladder. dropped_qualifier: 7 of 7 caught,
+  no false flags on kept_qualifier or the 93 real lines (2026-11-22).
 - [ ] **The ownership-verb ladder** (assisted < built < led, owned, managed,
   architected), and unsupported "team of N". Label the scale as Kron's own.
 - [ ] **A term check against ESCO and Wikidata.**
