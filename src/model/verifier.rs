@@ -70,7 +70,18 @@ const HEDGES: [&str; 42] = [
 /// Words claiming the work was the person's to lead, as written and in
 /// each form: a line may say one only where a fact does, so "reviewed"
 /// can't become "owned". Kron's own ladder, above doing the work.
-const LEADS: [&str; 41] = [
+const LEADS: [&str; 52] = [
+    "drove",
+    "drive",
+    "drives",
+    "driving",
+    "championed",
+    "championing",
+    "orchestrated",
+    "pioneered",
+    "steered",
+    "steering",
+    "spearheading",
     "led",
     "lead",
     "leads",

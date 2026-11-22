@@ -490,3 +490,11 @@ line: Worked with a team of five on the mobile app's offline mode.
 same_scope
 fact: Covered the bar manager's shifts for two weeks.
 line: Stood in for the bar manager for two weeks.
+
+scope_inflation
+fact: Worked on the move of the CI pipeline to GitHub Actions.
+line: Drove the move of the CI pipeline to GitHub Actions.
+
+scope_inflation
+fact: Wrote the first draft of the team's code review guidelines.
+line: Championed the team's code review guidelines.
