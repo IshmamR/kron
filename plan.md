@@ -260,8 +260,10 @@ Test set first. Each rule only adds rejections, and each is measured on
 - [ ] **Interview prep from what was sent.** Show the résumé that was sent, the
   facts and quotes behind each line, and a story outline for each line. Show it
   on "Interview in 3 days".
-- [ ] **What a job asks for that the user's facts don't show:** each
-  requirement no fact covers, with "Add a fact if true". Not a score.
+- [ ] **A fit check for a job:** the job's requirements, each shown as covered
+  (with the facts behind it) or not shown (with "Add a fact if true"), and a
+  coarse estimate from them on the job page before writing: Strong fit,
+  Partial fit or Stretch. An estimate, never a percentage.
 - [ ] **A record that grows:**
   - a gentle monthly check-in;
   - importing LinkedIn's data export;
