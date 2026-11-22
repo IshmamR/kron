@@ -91,6 +91,14 @@ const CHAT_FORMAT: &str = "chat";
 const TIMEOUT: Duration = Duration::from_secs(180);
 /// A server lists its models at once, or it isn't there.
 const LISTING_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait before each retry of a request that never reached the
+/// provider: a lookup or connection that failed, as a flaky network does for
+/// seconds.
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 
 pub fn init(cx: &mut App) {
     match tokio::runtime::Builder::new_multi_thread()
@@ -746,7 +754,7 @@ pub async fn call(
     }
     let model = completion_model(provider, key, &assigned.model)
         .ok_or_else(|| Error::Unsupported(provider.vendor.clone()))?;
-    let response = tokio::time::timeout(TIMEOUT, model.call(request))
+    let response = tokio::time::timeout(TIMEOUT, retried(|| model.call(request.clone())))
         .await
         .map_err(|_| Error::TimedOut)?
         .map_err(|error| match error {
@@ -800,7 +808,7 @@ async fn call_chatgpt(
         .client()
         .completion(&assigned.model)
         .erase();
-    let streamed = async { model.stream(request)?.finish().await };
+    let streamed = retried(|| async { model.stream(request.clone())?.finish().await });
     let response = tokio::time::timeout(TIMEOUT, streamed)
         .await
         .map_err(|_| Error::TimedOut)?
@@ -821,6 +829,46 @@ async fn call_chatgpt(
         response,
         cost: None,
     })
+}
+
+/// Runs `attempt`, again after a pause when it never reached the provider. A
+/// call that reached it isn't resent: it may have been answered, and paid for.
+async fn retried<T, F>(attempt: impl Fn() -> F) -> Result<T, ProviderError>
+where
+    F: Future<Output = Result<T, ProviderError>>,
+{
+    let mut delays = RETRY_DELAYS.iter();
+    loop {
+        match attempt().await {
+            Err(error) if never_reached(&error) => match delays.next() {
+                Some(delay) => {
+                    eprintln!("llm: a call never reached the provider; trying again");
+                    tokio::time::sleep(*delay).await;
+                }
+                None => return Err(error),
+            },
+            result => return result,
+        }
+    }
+}
+
+/// The request failed to look up or connect to the provider, so it never
+/// arrived.
+fn never_reached(error: &ProviderError) -> bool {
+    let ProviderError::Http(error) = error else {
+        return false;
+    };
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&**error);
+    while let Some(cause) = source {
+        if cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_connect)
+        {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
 }
 
 /// The plan's endpoint, on rig's wire for ChatGPT plans: always streamed,
@@ -968,6 +1016,63 @@ pub fn live_assigned(purpose: Purpose) -> Result<(Assigned, String), Box<dyn std
 mod tests {
     use super::*;
     use crate::database::Writer;
+
+    #[test]
+    fn a_call_that_never_reached_the_provider_is_sent_again()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            std::thread::sleep(Duration::from_millis(300));
+            let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+            let (stream, _) = listener.accept()?;
+            let mut reader = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line)?;
+                if let Some((name, value)) = line.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; length])?;
+            let body = r#"{"id":"1","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"{}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            write!(
+                reader.get_mut(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        let assigned = Assigned {
+            provider: Provider {
+                id: Uuid::new_v4(),
+                name: "Remote".to_owned(),
+                vendor: "openai".to_owned(),
+                format: None,
+                base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+            },
+            model: "m".to_owned(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime
+            .block_on(call(
+                &assigned,
+                String::new(),
+                crate::model::extraction::request("A résumé."),
+            ))
+            .map_err(|error| format!("{error:?}"))?;
+        server.join().map_err(|_| "the server panicked")??;
+        Ok(())
+    }
 
     #[test]
     fn the_plan_is_sent_no_temperature_or_cap_and_keeps_nothing() {

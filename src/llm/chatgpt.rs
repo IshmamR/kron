@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::database::schema::device_settings;
 use crate::database::{self, Write};
+use crate::llm::RETRY_DELAYS;
 
 /// What a ChatGPT provider is saved as, in place of a vendor rig knows.
 pub const VENDOR: &str = "chatgpt";
@@ -49,13 +50,6 @@ const PREFERRED_PORT: u16 = 1455;
 /// How long the browser has to come back.
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long to wait before each retry of a request that never reached OpenAI:
-/// a lookup or connection that failed, as a flaky network does for seconds.
-const RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-];
 /// Access tokens are refreshed this long before they expire, so one doesn't
 /// lapse during a call.
 const EXPIRY_MARGIN: Duration = Duration::from_secs(120);
