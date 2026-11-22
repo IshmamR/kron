@@ -1968,6 +1968,42 @@ mod tests {
     }
 
     #[test]
+    fn a_line_shows_the_words_its_facts_dont_have() -> Result<(), Error> {
+        let writer = sample::written()?;
+        let connection = writer.kron();
+        let Some(version) =
+            Versions::read(connection, sample::job(connection, "Cinder Labs")?)?.current
+        else {
+            panic!("Cinder Labs has a résumé");
+        };
+        let shown = ShownResume::read(connection, version.id)?;
+        let reworded = |start: &str| -> Vec<&str> {
+            shown
+                .lines
+                .iter()
+                .find(|line| line.text.starts_with(start))
+                .map(|line| {
+                    line.reworded
+                        .iter()
+                        .filter_map(|range| line.text.get(range.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            reworded("Reduced the routing"),
+            ["Reduced"],
+            "its fact says Cut"
+        );
+        assert_eq!(
+            reworded("Led the migration"),
+            Vec::<&str>::new(),
+            "as its fact says"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn each_job_shows_its_current_resume_and_the_older_one_sent() -> Result<(), Error> {
         let writer = sample::written()?;
         let expected = [
