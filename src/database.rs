@@ -546,7 +546,8 @@ mod tests {
 
     #[test]
     fn an_install_on_orchid_by_default_moves_to_graphite() -> Result<(), Error> {
-        let before_graphite = KRON_MIGRATIONS.len() - 1;
+        // Migration 6 moved it.
+        let before_graphite = 5;
         let palette = |chosen: Option<&str>| -> Result<String, Error> {
             let mut connection = Connection::open_in_memory()?;
             migrate(
@@ -562,6 +563,59 @@ mod tests {
         };
         assert_eq!(palette(None)?, "graphite");
         assert_eq!(palette(Some("moss"))?, "moss", "a palette chosen stays");
+        Ok(())
+    }
+
+    #[test]
+    fn a_run_recorded_whole_keeps_its_calls_with_their_step_when_it_had_one() -> Result<(), Error> {
+        // Migration 9 recorded calls apart.
+        let before_calls = 8;
+        let mut connection = Connection::open_in_memory()?;
+        migrate(
+            &mut connection,
+            "kron.sqlite",
+            &KRON_MIGRATIONS[..before_calls],
+        )?;
+        connection.execute_batch(
+            "INSERT INTO documents (id, added_at) VALUES (x'd0', 0);
+             INSERT INTO llm_runs (id, task, started_at, duration, outcome, provider, vendor,
+                                   model, calls, input_tokens, cached_input_tokens,
+                                   cache_written_tokens, output_tokens, reasoning_tokens, cost,
+                                   unpriced_calls, document_id)
+             VALUES (x'01', 'extract_facts', 0, 900, 'done', 'DeepSeek', 'deepseek',
+                     'deepseek-flash', 1, 3000, 0, 0, 800, 0, 0.002, 0, x'd0'),
+                    (x'02', 'extract_facts', 1, 700, 'done', 'DeepSeek', 'deepseek',
+                     'deepseek-flash', 2, 5000, 0, 0, 900, 0, 0.003, 1, x'd0');",
+        )?;
+        migrate(&mut connection, "kron.sqlite", KRON_MIGRATIONS)?;
+        let calls = connection
+            .prepare(
+                "SELECT run_id, step, duration, output_tokens, cost FROM llm_calls ORDER BY run_id",
+            )?
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<f64>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    vec![1],
+                    Some("extract_facts".to_owned()),
+                    900,
+                    Some(800),
+                    Some(0.002)
+                ),
+                (vec![2], None, 700, Some(900), None),
+            ],
+            "two calls together can't be split, and a lower bound isn't a cost"
+        );
         Ok(())
     }
 

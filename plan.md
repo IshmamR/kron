@@ -323,6 +323,13 @@ Test set first. Each rule only adds rejections, and each is measured on
 - [x] **Bigger controls and a text size** (2026-11-23). Buttons and fields
   are 32 px, as Fluent and libadwaita draw them (24 on a Mac), none below
   WCAG 2.5.8's 24. Settings has a text size slider, 85% to 130%, per device.
+- [x] **What a résumé cost, call by call** (2026-11-23). The header shows
+  the total; hovering it lists each call (writing, checking claims) with its
+  model, tokens, time and cost, or "included" on a ChatGPT plan, and says
+  when no line needed checking. Calls are recorded one by one in
+  `llm_calls` (migration `0009_kron.sql`). Two prompt changes asking
+  DeepSeek Flash to reword more for the job changed nothing (3 and 6 lines
+  reworded of about 190, from 8), so the prompt stays.
 - [ ] **Re-join broken lines** in "Check the text": join a line that doesn't end
   in `.`, `:` or `;` to the next one when it starts in lowercase.
 - [x] **A new default dark palette:** Graphite, in place of Orchid's violet

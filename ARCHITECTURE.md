@@ -194,7 +194,8 @@ default's.
 
 - API keys are in the OS keyring, never in the database.
 - Prompts and responses are never stored or logged. `llm_runs` keeps each
-  run's task, tokens and cost.
+  run's task and outcome, and `llm_calls` each of its calls' model, time,
+  tokens and cost: a résumé is written by one call and checked by another.
 - The user's name and contacts never reach a model (see Redaction).
 
 ## The UI

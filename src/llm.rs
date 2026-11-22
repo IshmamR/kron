@@ -23,7 +23,8 @@ use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::database::schema::{
-    LlmAssignments, LlmProviders, LlmRuns, llm_assignments, llm_providers, llm_runs,
+    LlmAssignments, LlmCalls, LlmProviders, LlmRuns, llm_assignments, llm_calls, llm_providers,
+    llm_runs,
 };
 use crate::database::{self, Write};
 
@@ -183,17 +184,16 @@ pub struct Reply {
     pub cost: Option<f64>,
 }
 
-/// A call made, to record in `llm_runs`.
+/// A task run, to record in `llm_runs`, with each call it made in
+/// `llm_calls`.
 pub struct Run<'a> {
     pub purpose: Purpose,
     pub assigned: &'a Assigned,
     /// In ms since the Unix epoch.
     pub started_at: i64,
     pub duration: Duration,
-    /// The answer, if one came.
-    pub reply: Option<&'a Reply>,
-    /// The meaning check's answer, a second call, for a résumé checked.
-    pub check: Option<&'a Reply>,
+    /// In the order they were made.
+    pub calls: &'a [Call<'a>],
     /// Whether the answer was used: one that couldn't be read wasn't.
     pub done: bool,
     /// What it ran for: a document's facts, or a job's résumé, and the
@@ -201,6 +201,126 @@ pub struct Run<'a> {
     pub document: Option<Uuid>,
     pub job: Option<Uuid>,
     pub generation: Option<Uuid>,
+}
+
+/// One call of a run.
+pub struct Call<'a> {
+    pub step: Step,
+    pub duration: Duration,
+    /// The answer, if one came.
+    pub reply: Option<&'a Reply>,
+}
+
+/// What a call of a run was for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    ExtractFacts,
+    Write,
+    CheckMeaning,
+}
+
+impl Step {
+    fn stored(self) -> &'static str {
+        match self {
+            Self::ExtractFacts => "extract_facts",
+            Self::Write => "write",
+            Self::CheckMeaning => "check_meaning",
+        }
+    }
+
+    fn from_stored(stored: &str) -> Option<Self> {
+        match stored {
+            "extract_facts" => Some(Self::ExtractFacts),
+            "write" => Some(Self::Write),
+            "check_meaning" => Some(Self::CheckMeaning),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ExtractFacts => "Finding facts",
+            Self::Write => "Writing",
+            Self::CheckMeaning => "Checking claims",
+        }
+    }
+}
+
+/// What the calls that wrote a résumé took and cost.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spent {
+    pub vendor: String,
+    pub calls: Vec<SpentCall>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpentCall {
+    /// `None`: the run's calls together, recorded before they were apart.
+    pub step: Option<Step>,
+    pub model: String,
+    pub duration: Duration,
+    /// In and out; `None` when no answer came.
+    pub tokens: Option<(u64, u64)>,
+    /// `None` when it has no price.
+    pub cost: Option<f64>,
+}
+
+impl Spent {
+    /// The calls of the run that wrote `generation`; `None` when it has none,
+    /// as for the sample résumé.
+    pub fn of_generation(
+        connection: &Connection,
+        generation: Uuid,
+    ) -> Result<Option<Self>, database::Error> {
+        let mut vendor = None;
+        let calls = connection
+            .prepare_cached(
+                "SELECT llm_runs.vendor, step, model, llm_calls.duration, input_tokens,
+                        output_tokens, cost
+                 FROM llm_calls JOIN llm_runs ON llm_runs.id = llm_calls.run_id
+                 WHERE llm_runs.generation_id = ?1
+                 ORDER BY llm_runs.started_at, llm_calls.rowid",
+            )?
+            .query_map([generation], |row| {
+                vendor = Some(row.get::<_, String>(0)?);
+                let tokens: (Option<i64>, Option<i64>) = (row.get(4)?, row.get(5)?);
+                Ok(SpentCall {
+                    step: row
+                        .get::<_, Option<String>>(1)?
+                        .as_deref()
+                        .and_then(Step::from_stored),
+                    model: row.get(2)?,
+                    duration: Duration::from_millis(row.get::<_, i64>(3)?.max(0) as u64),
+                    tokens: match tokens {
+                        (Some(input), Some(output)) => {
+                            Some((input.max(0) as u64, output.max(0) as u64))
+                        }
+                        _ => None,
+                    },
+                    cost: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(vendor.map(|vendor| Self { vendor, calls }))
+    }
+
+    /// What every call cost together; `None` when one has no price, as the
+    /// sum would only be a lower bound.
+    pub fn total(&self) -> Option<f64> {
+        self.calls.iter().map(|call| call.cost).sum()
+    }
+
+    /// The résumé was written but no line needed the meaning check, which
+    /// checks only lines with words their facts don't have.
+    pub fn checked_nothing(&self) -> bool {
+        let has = |step| self.calls.iter().any(|call| call.step == Some(step));
+        has(Step::Write) && !has(Step::CheckMeaning)
+    }
+
+    /// Paid for by the user's ChatGPT plan, so it costs nothing apart.
+    pub fn on_plan(&self) -> bool {
+        self.vendor == chatgpt::VENDOR
+    }
 }
 
 #[derive(Debug)]
@@ -945,59 +1065,75 @@ pub fn cost_label(cost: f64) -> String {
     }
 }
 
-/// Records a call: what it took and cost, never what was sent or answered.
-/// A call with no price counts as unpriced, at no cost: the total is a
-/// lower bound.
+/// What a call cost, closer than `cost_label`: "0.21¢", "4.5¢", "$1.20".
+pub fn cost_detail(cost: f64) -> String {
+    let cents = cost * 100.;
+    if cents < 1. {
+        format!("{cents:.2}¢")
+    } else if cents < 100. {
+        format!("{cents:.1}¢")
+    } else {
+        format!("${:.2}", cents / 100.)
+    }
+}
+
+/// A count of tokens, as the user reads it: "850", "4.2k", "1.3M".
+pub fn tokens_label(tokens: u64) -> String {
+    match tokens {
+        0..1_000 => tokens.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", tokens as f64 / 1e3),
+        _ => format!("{:.1}M", tokens as f64 / 1e6),
+    }
+}
+
+/// Records a run and its calls: what they took and cost, never what was
+/// sent or answered.
 pub fn record(write: &mut Write, run: &Run) -> Result<(), database::Error> {
-    let usage = run
-        .reply
-        .iter()
-        .chain(&run.check)
-        .map(|reply| reply.response.usage)
-        .reduce(|sum, usage| sum + usage);
-    let tokens = |count: fn(&rig_core::completion::Usage) -> Option<u64>| {
-        usage.as_ref().and_then(count).unwrap_or(0) as i64
-    };
-    let model = run
-        .reply
-        .and_then(|reply| reply.response.model())
-        .unwrap_or(&run.assigned.model)
-        .to_owned();
-    let costs = [
-        run.reply.map(|reply| reply.cost),
-        run.check.map(|check| check.cost),
-    ];
-    // A call with no answer, or one with no price, counts as unpriced.
-    let calls = 1 + i64::from(run.check.is_some());
-    let unpriced = costs[0].flatten().is_none() as i64
-        + run.check.is_some_and(|check| check.cost.is_none()) as i64;
-    let cost: f64 = costs.into_iter().flatten().flatten().sum();
-    let duration = run.duration.as_millis() as i64;
+    let id = Uuid::now_v7();
     write.insert(
         LlmRuns,
-        Uuid::now_v7(),
+        id,
         &[
             llm_runs::TASK.value(&run.purpose.stored()),
             llm_runs::STARTED_AT.value(&run.started_at),
-            llm_runs::DURATION.value(&duration),
+            llm_runs::DURATION.value(&(run.duration.as_millis() as i64)),
             llm_runs::OUTCOME.value(&if run.done { "done" } else { "failed" }),
             llm_runs::PROVIDER.value(&run.assigned.provider.name),
             llm_runs::VENDOR.value(&run.assigned.provider.vendor),
-            llm_runs::MODEL.value(&model),
-            llm_runs::CALLS.value(&calls),
-            llm_runs::INPUT_TOKENS.value(&Some(tokens(|usage| usage.input_tokens))),
-            llm_runs::CACHED_INPUT_TOKENS.value(&Some(tokens(|usage| usage.cached_input_tokens))),
-            llm_runs::CACHE_WRITTEN_TOKENS
-                .value(&Some(tokens(|usage| usage.cache_creation_input_tokens))),
-            llm_runs::OUTPUT_TOKENS.value(&Some(tokens(|usage| usage.output_tokens))),
-            llm_runs::REASONING_TOKENS.value(&Some(tokens(|usage| usage.reasoning_tokens))),
-            llm_runs::COST.value(&Some(cost)),
-            llm_runs::UNPRICED_CALLS.value(&Some(unpriced)),
             llm_runs::DOCUMENT_ID.value(&run.document),
             llm_runs::JOB_ID.value(&run.job),
             llm_runs::GENERATION_ID.value(&run.generation),
         ],
-    )
+    )?;
+    for call in run.calls {
+        let usage = call.reply.map(|reply| reply.response.usage);
+        let tokens = |count: fn(&rig_core::completion::Usage) -> Option<u64>| {
+            usage.as_ref().map(|usage| count(usage).unwrap_or(0) as i64)
+        };
+        let model = call
+            .reply
+            .and_then(|reply| reply.response.model())
+            .unwrap_or(&run.assigned.model)
+            .to_owned();
+        write.insert(
+            LlmCalls,
+            Uuid::now_v7(),
+            &[
+                llm_calls::RUN_ID.value(&id),
+                llm_calls::STEP.value(&Some(call.step.stored())),
+                llm_calls::MODEL.value(&model),
+                llm_calls::DURATION.value(&(call.duration.as_millis() as i64)),
+                llm_calls::INPUT_TOKENS.value(&tokens(|usage| usage.input_tokens)),
+                llm_calls::CACHED_INPUT_TOKENS.value(&tokens(|usage| usage.cached_input_tokens)),
+                llm_calls::CACHE_WRITTEN_TOKENS
+                    .value(&tokens(|usage| usage.cache_creation_input_tokens)),
+                llm_calls::OUTPUT_TOKENS.value(&tokens(|usage| usage.output_tokens)),
+                llm_calls::REASONING_TOKENS.value(&tokens(|usage| usage.reasoning_tokens)),
+                llm_calls::COST.value(&call.reply.and_then(|reply| reply.cost)),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// For the live tests: what `purpose` runs on in the development data, with
@@ -1356,8 +1492,11 @@ mod tests {
                     assigned: &assigned,
                     started_at: 1,
                     duration: Duration::from_millis(1500),
-                    reply: None,
-                    check: None,
+                    calls: &[Call {
+                        step: Step::ExtractFacts,
+                        duration: Duration::from_millis(1500),
+                        reply: None,
+                    }],
                     done: false,
                     document: Some(document.0),
                     job: None,
@@ -1365,8 +1504,10 @@ mod tests {
                 },
             )
         })?;
-        let run: (String, String, i64, i64, f64, i64) = writer.kron().query_row(
-            "SELECT outcome, model, duration, output_tokens, cost, unpriced_calls FROM llm_runs",
+        type Recorded = (String, String, String, i64, Option<i64>, Option<f64>);
+        let recorded: Recorded = writer.kron().query_row(
+            "SELECT outcome, step, model, llm_calls.duration, output_tokens, cost
+             FROM llm_runs JOIN llm_calls ON llm_calls.run_id = llm_runs.id",
             [],
             |row| {
                 Ok((
@@ -1380,17 +1521,27 @@ mod tests {
             },
         )?;
         assert_eq!(
-            run,
+            recorded,
             (
                 "failed".to_owned(),
+                "extract_facts".to_owned(),
                 "deepseek-flash".to_owned(),
                 1500,
-                0,
-                0.,
-                1
+                None,
+                None
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_calls_cost_and_tokens_read_closer() {
+        assert_eq!(cost_detail(0.0021), "0.21¢");
+        assert_eq!(cost_detail(0.045), "4.5¢");
+        assert_eq!(cost_detail(1.2), "$1.20");
+        assert_eq!(tokens_label(850), "850");
+        assert_eq!(tokens_label(4_240), "4.2k");
+        assert_eq!(tokens_label(1_300_000), "1.3M");
     }
 
     #[test]

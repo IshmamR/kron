@@ -1,14 +1,13 @@
-use super::parts::{COMPACT, CONTROL};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::SetUpAi;
 use super::application_view::{self, ApplicationView, ApplicationViewEvent};
 use super::inspector::{Inspection, Inspector, LINE_EDITOR_CONTEXT};
 use super::instructions_form::{InstructionsForm, InstructionsFormEvent};
-use super::parts::{call_failed, notify};
+use super::parts::{COMPACT, CONTROL, call_failed, notify};
 use super::previews::{self, Previews, Render as PageRender, RenderedPages};
 use crate::database::schema::{
     Blocks, DocumentTexts, Documents, Entries, Events, FactSources, FactVersions, Facts,
@@ -44,7 +43,7 @@ use gpui_kit::{
     EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
     RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, Stateful, StyledText, Subscription,
-    Task, Window, actions, canvas, div, img, point, prelude::*, px, rgb,
+    Task, Window, actions, canvas, div, img, point, prelude::*, px, rems, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -1217,6 +1216,7 @@ impl JobView {
         cx.notify();
         self.generation = cx.spawn_in(window, async move |this, cx| {
             let reply = call.await;
+            let writing = start.elapsed();
             let mut draft = match &reply {
                 Ok(reply) => generation::Answer::parse(&reply.response.text())
                     .map(|answer| {
@@ -1243,7 +1243,11 @@ impl JobView {
                 Some(checked) => {
                     let request = meaning_check::request(&checked.checked);
                     match cx.update(|_, cx| llm::complete(&assigned, request, cx)) {
-                        Ok(call) => Some(call.await),
+                        Ok(call) => {
+                            let started = Instant::now();
+                            let reply = call.await;
+                            Some((reply, started.elapsed()))
+                        }
                         Err(error) => {
                             eprintln!("job view: {error}");
                             None
@@ -1253,32 +1257,49 @@ impl JobView {
                 None => None,
             };
             let check = match (check, &mut draft) {
-                (Some(Ok(check)), Ok(draft)) => {
+                (Some((Ok(check), took)), Ok(draft)) => {
                     match meaning_check::flags(&check.response.text(), draft.checked.len()) {
                         Ok(flags) => draft.leave_out(&flags, &redaction, &sent),
                         Err(error) => eprintln!(
                             "job view: the meaning check's answer couldn't be read: {error}"
                         ),
                     }
-                    Some(check)
+                    Some((Some(check), took))
                 }
-                (Some(Err(error)), _) => {
+                (Some((Err(error), took)), _) => {
                     eprintln!("job view: the meaning check didn't run: {error}");
-                    None
+                    Some((None, took))
                 }
                 _ => None,
             };
             let duration = start.elapsed();
             let usage_limit = reply.as_ref().is_err_and(llm::Error::is_usage_limit);
             let claims = draft.as_ref().map_or(0, |draft| draft.claims.len());
-            let cost = reply
-                .as_ref()
-                .ok()
-                .and_then(|reply| reply.cost)
-                .map(|cost| cost + check.as_ref().and_then(|check| check.cost).unwrap_or(0.));
+            let cost =
+                reply
+                    .as_ref()
+                    .ok()
+                    .and_then(|reply| reply.cost)
+                    .and_then(|cost| match &check {
+                        Some((Some(check), _)) => check.cost.map(|checked| cost + checked),
+                        Some((None, _)) => None,
+                        None => Some(cost),
+                    });
             let saved = cx.update(|_, cx| {
                 database.read(cx).write(cx, move |write| {
                     let reply = reply.ok();
+                    let mut calls = vec![llm::Call {
+                        step: llm::Step::Write,
+                        duration: writing,
+                        reply: reply.as_ref(),
+                    }];
+                    if let Some((check, took)) = &check {
+                        calls.push(llm::Call {
+                            step: llm::Step::CheckMeaning,
+                            duration: *took,
+                            reply: check.as_ref(),
+                        });
+                    }
                     let resume = match &draft {
                         Ok(draft) => Some(generation::save(
                             write,
@@ -1296,8 +1317,7 @@ impl JobView {
                             assigned: &assigned,
                             started_at,
                             duration,
-                            reply: reply.as_ref(),
-                            check: check.as_ref(),
+                            calls: &calls,
                             done: resume.is_some(),
                             document: None,
                             job: Some(job.0),
@@ -1925,10 +1945,8 @@ fn job_header(
                 .with_timezone(&Local)
                 .format("%b %-d, %H:%M")
         ));
-        if let Some(cost) = version.cost {
-            details.push(format!("cost {}", llm::cost_label(cost)));
-        }
     }
+    let spent = version.and_then(|version| version.spent.clone());
 
     h_flex()
         .flex_1()
@@ -1957,13 +1975,124 @@ fn job_header(
                         )])),
                 )
                 .child(
-                    div()
+                    h_flex()
+                        .min_w_0()
                         .text_xs()
-                        .truncate()
                         .text_color(cx.theme().muted_foreground)
-                        .child(details.join(" · ")),
+                        .child(div().truncate().child(details.join(" · ")))
+                        .when_some(spent, |this, spent| {
+                            this.child(div().flex_shrink_0().child("\u{a0}·\u{a0}"))
+                                .child(spent_label(spent, cx))
+                        }),
                 ),
         )
+}
+
+/// What writing the résumé cost, all told, and each call apart when hovered.
+fn spent_label(spent: llm::Spent, cx: &Context<JobView>) -> impl IntoElement {
+    let label = match spent.total() {
+        Some(total) => format!("cost {}", llm::cost_label(total)),
+        None if spent.on_plan() => "on your ChatGPT plan".to_owned(),
+        None => "cost unknown".to_owned(),
+    };
+    div()
+        .id("cost")
+        .flex_shrink_0()
+        .border_b_1()
+        .border_dashed()
+        .border_color(cx.theme().muted_foreground.opacity(0.5))
+        .child(label)
+        .tooltip(move |window, cx| {
+            let spent = spent.clone();
+            Tooltip::element(move |_, cx| cost_breakdown(&spent, cx)).build(window, cx)
+        })
+}
+
+/// Each call that wrote the résumé: what for, on which model, the tokens
+/// sent and answered, how long it took, and what it cost.
+fn cost_breakdown(spent: &llm::Spent, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let cost = |cost: Option<f64>| match cost {
+        Some(cost) => llm::cost_detail(cost),
+        None if spent.on_plan() => "included".to_owned(),
+        None => "unknown".to_owned(),
+    };
+    let row = |step: String, detail: String, took: Option<Duration>, cost: String, strong: bool| {
+        h_flex()
+            .gap_4()
+            .justify_between()
+            .child(
+                v_flex()
+                    .child(
+                        div()
+                            .when(strong, |this| this.font_weight(FontWeight::SEMIBOLD))
+                            .child(step),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(detail),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .children(took.map(|took| format!("{:.1} s", took.as_secs_f32()))),
+                    )
+                    .child(
+                        div()
+                            .min_w(rems(3.5))
+                            .text_right()
+                            .when(strong, |this| this.font_weight(FontWeight::SEMIBOLD))
+                            .child(cost),
+                    ),
+            )
+    };
+    let took: Duration = spent.calls.iter().map(|call| call.duration).sum();
+    v_flex()
+        .py_1()
+        .gap_1p5()
+        .min_w(rems(16.))
+        .children(spent.calls.iter().map(|call| {
+            let step = call
+                .step
+                .map_or("Writing and checking", llm::Step::label)
+                .to_owned();
+            let detail = match call.tokens {
+                Some((input, output)) => format!(
+                    "{} · {} in, {} out",
+                    call.model,
+                    llm::tokens_label(input),
+                    llm::tokens_label(output)
+                ),
+                None => format!("{} · no answer", call.model),
+            };
+            row(step, detail, Some(call.duration), cost(call.cost), false)
+        }))
+        .when(spent.checked_nothing(), |this| {
+            this.child(row(
+                llm::Step::CheckMeaning.label().to_owned(),
+                "not needed: every line kept its facts' words".to_owned(),
+                None,
+                String::new(),
+                false,
+            ))
+        })
+        .when(spent.calls.len() > 1, |this| {
+            this.child(div().h_px().bg(theme.border)).child(row(
+                "Total".to_owned(),
+                format!("{} calls", spent.calls.len()),
+                Some(took),
+                cost(spent.total()),
+                true,
+            ))
+        })
+        .into_any_element()
 }
 
 /// "Title - Company", and how many bytes of it the title takes so it can be
@@ -2054,8 +2183,8 @@ struct Version {
     generated_at: DateTime<Utc>,
     template: &'static Template,
     paper: Paper,
-    /// What writing it cost, when every call was priced.
-    cost: Option<f64>,
+    /// What writing it took and cost; `None` for the sample.
+    spent: Option<llm::Spent>,
 }
 
 impl Versions {
@@ -2066,16 +2195,12 @@ impl Versions {
                 generated_at: DateTime::from_timestamp_millis(row.get(1)?).unwrap_or_default(),
                 template: typeset::template_of_version(row.get(2)?),
                 paper: Paper::from_stored(row.get::<_, Option<String>>(3)?.as_deref()),
-                cost: row.get(4)?,
+                spent: None,
             })
         };
-        // A version's cost is left out when a call wasn't priced: the total
-        // would only be a lower bound.
         let current = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id, paper,
-                        (SELECT CASE WHEN sum(unpriced_calls) > 0 THEN NULL ELSE sum(cost) END
-                         FROM llm_runs WHERE generation_id = generations.id)
+                "SELECT id, generated_at, template_version_id, paper
                  FROM generations
                  WHERE job_id = ?1 AND kind = 'resume' AND deleted_at IS NULL
                  ORDER BY generated_at DESC, id DESC LIMIT 1",
@@ -2084,9 +2209,7 @@ impl Versions {
             .optional()?;
         let sent = connection
             .prepare_cached(
-                "SELECT id, generated_at, template_version_id, paper,
-                        (SELECT CASE WHEN sum(unpriced_calls) > 0 THEN NULL ELSE sum(cost) END
-                         FROM llm_runs WHERE generation_id = generations.id)
+                "SELECT id, generated_at, template_version_id, paper
                  FROM generations
                  WHERE id = (
                      SELECT resume_id FROM events
@@ -2098,9 +2221,22 @@ impl Versions {
             )?
             .query_row([job.0], version)
             .optional()?;
+        let spent = |version: Option<Version>| -> Result<Option<Version>, Error> {
+            version
+                .map(|version| {
+                    Ok(Version {
+                        spent: llm::Spent::of_generation(connection, version.id.0)?,
+                        ..version
+                    })
+                })
+                .transpose()
+        };
+        let current = spent(current)?;
         Ok(Self {
             job,
-            sent: sent.filter(|sent| Some(sent.id) != current.as_ref().map(|current| current.id)),
+            sent: spent(
+                sent.filter(|sent| Some(sent.id) != current.as_ref().map(|current| current.id)),
+            )?,
             current,
         })
     }
@@ -2459,35 +2595,69 @@ mod tests {
     }
 
     #[test]
-    fn a_version_costs_what_its_runs_did_unless_one_was_unpriced() -> Result<(), Error> {
+    fn a_version_costs_what_its_calls_did_unless_one_was_unpriced() -> Result<(), Error> {
         let mut writer = sample::written()?;
-        let cost = |writer: &crate::database::Writer| -> Result<Option<f64>, Error> {
+        let spent = |writer: &crate::database::Writer| -> Result<Option<llm::Spent>, Error> {
             let connection = writer.kron();
             let job = sample::job(connection, "Ledgerly")?;
             Ok(Versions::read(connection, job)?
                 .current
-                .and_then(|version| version.cost))
+                .and_then(|version| version.spent))
         };
-        assert_eq!(cost(&writer)?, None, "the sample's weren't run");
-        let run = |cost: f64, unpriced: i64| {
+        assert_eq!(spent(&writer)?, None, "the sample's weren't run");
+        let run = |vendor: &str| {
             format!(
                 "INSERT INTO llm_runs (id, task, started_at, duration, outcome, provider, vendor,
-                                       model, calls, input_tokens, cached_input_tokens,
-                                       cache_written_tokens, output_tokens, reasoning_tokens,
-                                       cost, unpriced_calls, job_id, generation_id)
-                 SELECT randomblob(16), 'generate_resume', 0, 0, 'done', 'OpenAI', 'openai',
-                        'gpt-5.4-mini', 1, 0, 0, 0, 0, 0, {cost}, {unpriced}, jobs.id,
+                                       job_id, generation_id)
+                 SELECT x'01', 'generate_resume', 0, 0, 'done', 'Provider', '{vendor}', jobs.id,
                         generations.id
                  FROM generations JOIN jobs ON jobs.id = generations.job_id
                  WHERE jobs.company = 'Ledgerly' AND generations.kind = 'resume'
                  ORDER BY generated_at DESC LIMIT 1"
             )
         };
-        writer.execute(|write| write.seed(&run(0.03, 0)))?;
-        writer.execute(|write| write.seed(&run(0.01, 0)))?;
-        assert_eq!(cost(&writer)?.map(|cost| (cost * 100.).round()), Some(4.));
-        writer.execute(|write| write.seed(&run(0., 1)))?;
-        assert_eq!(cost(&writer)?, None, "a lower bound isn't shown");
+        let call = |id: u8, step: &str, cost: &str| {
+            format!(
+                "INSERT INTO llm_calls (id, run_id, step, model, duration, input_tokens,
+                                        cached_input_tokens, cache_written_tokens,
+                                        output_tokens, reasoning_tokens, cost)
+                 VALUES (x'{id:02x}', x'01', '{step}', 'model', 1500, 4000, 0, 0, 900, 0, {cost})"
+            )
+        };
+        writer.execute(|write| {
+            write.seed(&run("openai"))?;
+            write.seed(&call(1, "write", "0.03"))
+        })?;
+        assert!(
+            spent(&writer)?.is_some_and(|spent| spent.checked_nothing()),
+            "no line needed checking"
+        );
+        writer.execute(|write| write.seed(&call(2, "check_meaning", "0.01")))?;
+        let Some(both) = spent(&writer)? else {
+            panic!("its calls were recorded");
+        };
+        assert_eq!(
+            both.calls
+                .iter()
+                .map(|call| (call.step, call.tokens))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(llm::Step::Write), Some((4000, 900))),
+                (Some(llm::Step::CheckMeaning), Some((4000, 900)))
+            ]
+        );
+        assert_eq!(both.total().map(|cost| (cost * 100.).round()), Some(4.));
+        assert!(!both.checked_nothing());
+        writer.execute(|write| write.seed(&call(3, "check_meaning", "NULL")))?;
+        let unpriced = spent(&writer)?;
+        assert_eq!(
+            unpriced.as_ref().and_then(llm::Spent::total),
+            None,
+            "a lower bound isn't shown"
+        );
+        assert!(!unpriced.is_some_and(|spent| spent.on_plan()));
+        writer.execute(|write| write.seed("UPDATE llm_runs SET vendor = 'chatgpt'"))?;
+        assert!(spent(&writer)?.is_some_and(|spent| spent.on_plan()));
         Ok(())
     }
 

@@ -327,7 +327,7 @@ impl SettingsPage {
                     .item(picker(
                         2,
                         "Writing résumés",
-                        "Picks and words the facts for a job.",
+                        "Picks and words the facts for a job, then checks each reworded line.",
                     )),
             )
             .group(

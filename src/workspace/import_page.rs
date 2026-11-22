@@ -657,8 +657,11 @@ impl ImportPage {
                             assigned: &assigned,
                             started_at,
                             duration,
-                            reply: reply.as_ref(),
-                            check: None,
+                            calls: &[llm::Call {
+                                step: llm::Step::ExtractFacts,
+                                duration,
+                                reply: reply.as_ref(),
+                            }],
                             done: found.is_ok(),
                             document: Some(document.0),
                             job: None,
