@@ -7,6 +7,7 @@
 // together are taken one at a time, each asked about first in case it was
 // added by mistake, as is a file imported before.
 
+use super::parts::CONTROL;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -604,7 +605,7 @@ impl ImportPage {
                     .action(|_, _, cx| {
                         Button::new("set-up-ai")
                             .label("Set up AI")
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|notification, _, window, cx| {
                                 notification.dismiss(window, cx);
                                 window.dispatch_action(Box::new(SetUpAi), cx);
@@ -791,7 +792,7 @@ impl ImportPage {
                         Button::new("browse")
                             .label("Choose files…")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
                     ),
             )
@@ -823,7 +824,7 @@ impl ImportPage {
                         Button::new("write")
                             .label("Write")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.start_writing(window, cx)),
                             ),
@@ -831,7 +832,7 @@ impl ImportPage {
                     .child(
                         Button::new("paste")
                             .label("Paste")
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| this.paste(window, cx))),
                     ),
             )
@@ -887,7 +888,7 @@ impl ImportPage {
                         Button::new("read")
                             .label("Read it")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.read_asked(window, cx)),
                             ),
@@ -896,7 +897,7 @@ impl ImportPage {
                         Button::new("skip")
                             .label("Skip")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| this.skip(window, cx))),
                     )
                     .when(!self.queue.is_empty(), |this| {
@@ -904,7 +905,7 @@ impl ImportPage {
                             Button::new("skip-rest")
                                 .label("Skip the rest")
                                 .ghost()
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.skip_rest(window, cx)),
                                 ),
@@ -963,20 +964,20 @@ impl ImportPage {
                                 Button::new("cancel")
                                     .label("Cancel")
                                     .ghost()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .disabled(read.saving)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.skip_rest(window, cx)
                                     })),
                             )
-                            .children(
-                                other.map(|other| other.ghost().small().disabled(read.saving)),
-                            )
+                            .children(other.map(|other| {
+                                other.ghost().with_size(CONTROL).disabled(read.saving)
+                            }))
                             .child(
                                 Button::new("save")
                                     .label("Save")
                                     .primary()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .disabled(read.saving || empty)
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.save(window, cx)),
@@ -1035,7 +1036,7 @@ pub(super) fn facts_found(message: String, document: DocumentId) -> Notification
         .action(|_, _, cx| {
             Button::new("show-facts")
                 .label("Show facts")
-                .small()
+                .with_size(CONTROL)
                 .on_click(cx.listener(|notification, _, window, cx| {
                     notification.dismiss(window, cx);
                     window.dispatch_action(Box::new(ShowFacts), cx);

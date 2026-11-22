@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::component::notification::Notification;
-use gpui_kit::component::{ActiveTheme, IconName, Root, Sizable, WindowExt, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, IconName, Root, Sizable, Size, WindowExt, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, Div, Entity, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
     Keystroke, MouseButton, SharedString, StyledText, Window, div, prelude::*, px,
@@ -17,6 +17,16 @@ use rusqlite::Connection;
 
 use crate::database::Error;
 use crate::model::{EntryId, FactId, FactKind};
+
+/// The height of buttons and fields: 32 px, as Windows' Fluent and GNOME's
+/// libadwaita draw them, but 24 on a Mac, whose controls are smaller.
+#[cfg(not(target_os = "macos"))]
+pub const CONTROL: Size = Size::Medium;
+#[cfg(target_os = "macos")]
+pub const CONTROL: Size = Size::Small;
+/// Where a row has no room for `CONTROL`: 24 px, the smallest target
+/// WCAG 2.5.8 allows.
+pub const COMPACT: Size = Size::Small;
 
 pub fn heading(title: &str, count: Option<usize>, cx: &App) -> impl IntoElement {
     h_flex()
@@ -89,7 +99,7 @@ pub fn call_failed(message: String, usage_limit: bool) -> Notification {
             Button::new("manage-usage")
                 .label("Manage usage")
                 .primary()
-                .small()
+                .with_size(CONTROL)
                 .on_click(|_, _, cx| cx.open_url(crate::llm::chatgpt::USAGE_SETTINGS))
         }),
     }
@@ -110,7 +120,7 @@ pub fn page_title(text: impl Into<SharedString>) -> Div {
 /// up with nowhere to type.
 pub fn text_field<F, S>(field: F, state: &Entity<S>, cx: &App) -> Div
 where
-    F: IntoElement + Styled,
+    F: IntoElement + Styled + Sizable,
     S: Focusable,
 {
     let theme = cx.theme();
@@ -121,6 +131,7 @@ where
         })
         .child(
             field
+                .with_size(CONTROL)
                 .border_color(theme.transparent)
                 .bg(theme.foreground.opacity(0.06)),
         )
@@ -141,7 +152,7 @@ pub fn search_suffix(
         return Some(
             Button::new("clear-search")
                 .ghost()
-                .xsmall()
+                .with_size(COMPACT)
                 .icon(IconName::Close)
                 .tooltip("Clear search")
                 .on_click(move |_, window, cx| clear(window, cx))

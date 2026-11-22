@@ -1,3 +1,4 @@
+use super::parts::{COMPACT, CONTROL};
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone, Timelike, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::calendar::Date;
@@ -429,7 +430,7 @@ impl ApplicationView {
                             .label("Log")
                             .icon(IconName::Plus)
                             .outline()
-                            .small()
+                            .with_size(CONTROL)
                             // Always in the same order, so each item stays where
                             // the hand expects it; ones that don't fit are
                             // disabled rather than hidden.
@@ -477,7 +478,7 @@ impl ApplicationView {
                                 Button::new("no-response")
                                     .label("Mark as no response")
                                     .ghost()
-                                    .xsmall()
+                                    .with_size(COMPACT)
                                     .tooltip("Closes the application")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.log_now(JobEventKind::NoResponse, cx)
@@ -525,7 +526,7 @@ impl ApplicationView {
                 },
                 div()
                     .w(px(260.))
-                    .child(DatePicker::new(&self.date))
+                    .child(DatePicker::new(&self.date).with_size(CONTROL))
                     .into_any_element(),
             ))
             .when(form.step == StepKind::Interview, |this| {
@@ -533,7 +534,7 @@ impl ApplicationView {
                     "Kind",
                     TabBar::new("interview-kind")
                         .segmented()
-                        .small()
+                        .with_size(CONTROL)
                         .selected_index(interview_kind_index)
                         .children(
                             InterviewKind::ALL
@@ -601,7 +602,7 @@ impl ApplicationView {
                         Button::new("save-event")
                             .label("Save")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .tooltip("Ctrl+↩")
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     )
@@ -609,7 +610,7 @@ impl ApplicationView {
                         Button::new("cancel-event")
                             .label("Cancel")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .tooltip("Esc")
                             .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
                     ),
@@ -719,7 +720,7 @@ impl ApplicationView {
                                                     )))
                                                     .label("Edit")
                                                     .ghost()
-                                                    .xsmall()
+                                                    .with_size(COMPACT)
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             let step = StepKind::of(&editable.kind);
@@ -739,7 +740,7 @@ impl ApplicationView {
                                                     )))
                                                     .label("Delete")
                                                     .ghost()
-                                                    .xsmall()
+                                                    .with_size(COMPACT)
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             this.delete(id, window, cx)
@@ -812,7 +813,7 @@ impl ApplicationView {
                                     .label("Open the posting")
                                     .icon(IconName::ExternalLink)
                                     .ghost()
-                                    .xsmall()
+                                    .with_size(COMPACT)
                                     .tooltip(url.clone())
                                     .on_click(move |_, _, cx| cx.open_url(&url)),
                             ),
@@ -851,7 +852,7 @@ impl ApplicationView {
                                         Button::new("view-sent")
                                             .label("View")
                                             .ghost()
-                                            .xsmall()
+                                            .with_size(COMPACT)
                                             .on_click(cx.listener(move |_, _, _, cx| {
                                                 cx.emit(ApplicationViewEvent::ShowResume(id))
                                             })),

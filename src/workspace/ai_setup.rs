@@ -2,6 +2,7 @@
 // checked: the user's ChatGPT plan first, then one provider's API key, how to
 // get it and what it costs. The others are in Settings, which it opens.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement;
@@ -89,7 +90,7 @@ impl Render for AiSetup {
                         Button::new("other-provider")
                             .label("Use another provider")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(SetUpAi), cx)
                             }),
@@ -98,7 +99,7 @@ impl Render for AiSetup {
                         Button::new("skip-ai")
                             .label("Skip, find the facts later")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(AiSetupEvent::Skip))),
                     ),
             )
@@ -249,7 +250,7 @@ impl AiSetup {
                             Button::new("cancel-sign-in")
                                 .label("Cancel")
                                 .ghost()
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.saving = Task::ready(());
                                     this.signing_in = false;
@@ -330,7 +331,7 @@ impl AiSetup {
                         Button::new("save-key")
                             .label("Save key")
                             .outline()
-                            .small()
+                            .with_size(CONTROL)
                             .loading(self.working)
                             .disabled(empty || self.working || self.signing_in)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),

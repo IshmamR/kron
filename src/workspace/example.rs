@@ -5,6 +5,7 @@
 // databases of its own, so nothing done here reaches the user's data; its
 // views hold them, and drop them with it.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::{
@@ -100,7 +101,7 @@ impl Render for Example {
                                     Button::new("example-back-to-resume")
                                         .label("Back to the résumé")
                                         .ghost()
-                                        .small()
+                                        .with_size(CONTROL)
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.show_resume(window, cx)
                                         })),
@@ -110,7 +111,7 @@ impl Render for Example {
                                 Button::new("close-example")
                                     .label("Start with your CV")
                                     .primary()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .on_click(
                                         cx.listener(|_, _, _, cx| cx.emit(ExampleEvent::Close)),
                                     ),

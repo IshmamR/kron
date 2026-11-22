@@ -4,6 +4,7 @@
 // yet: no documents, jobs or name. Data arriving another way, like the
 // sample seeded in debug builds or a sync, ends it.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::notification::Notification;
@@ -310,7 +311,7 @@ impl Onboarding {
                         .child(
                             Button::new("see-example")
                                 .label("See an example")
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| {
                                         this.open_example(window, cx)
@@ -321,7 +322,7 @@ impl Onboarding {
                             Button::new("skip-onboarding")
                                 .label("Skip for now")
                                 .ghost()
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(
                                     cx.listener(|_, _, _, cx| cx.emit(OnboardingEvent::Done)),
                                 ),
@@ -409,7 +410,7 @@ impl Onboarding {
                                 Button::new("skip-name")
                                     .label("Skip")
                                     .ghost()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.ask_first_job(window, cx)
                                     })),
@@ -418,7 +419,7 @@ impl Onboarding {
                                 Button::new("confirm-name")
                                     .label("Confirm")
                                     .primary()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .disabled(empty)
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.confirm(window, cx)),

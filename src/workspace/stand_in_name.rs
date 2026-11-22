@@ -2,6 +2,7 @@
 // Saved on Save or Enter, not as typed, so a name that's in the user's facts
 // can be refused with why.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -45,12 +46,12 @@ impl Render for StandInName {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(text_field(Input::new(&self.name).small(), &self.name, cx).flex_1())
+                    .child(text_field(Input::new(&self.name), &self.name, cx).flex_1())
                     .child(
                         Button::new("save-stand-in")
                             .label("Save")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(unchanged)
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     ),

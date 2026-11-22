@@ -1,3 +1,4 @@
+use super::parts::COMPACT;
 use std::rc::Rc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -196,7 +197,7 @@ impl Inspector {
                                 .label("Revert")
                                 .icon(IconName::Undo2)
                                 .ghost()
-                                .xsmall()
+                                .with_size(COMPACT)
                                 .on_click(move |_, _, cx| {
                                     database
                                         .read(cx)
@@ -286,7 +287,7 @@ impl Inspector {
                     .label("Show fact")
                     .icon(IconName::Eye)
                     .outline()
-                    .xsmall()
+                    .with_size(COMPACT)
                     .tooltip("Lets résumés use it again")
                     .on_click(move |_, _, cx| {
                         database
@@ -300,7 +301,7 @@ impl Inspector {
                 Button::new(("add-fact", index))
                     .label("Add as fact")
                     .outline()
-                    .xsmall()
+                    .with_size(COMPACT)
                     .on_click(move |_, _, cx| {
                         database.read(cx).queue(move |write| {
                             commands::add_claim_as_fact(write, claim).map(drop)
@@ -622,7 +623,7 @@ fn show_in_facts_button(id: impl Into<ElementId>, fact: FactId) -> Button {
     Button::new(id)
         .label("Show in Facts")
         .ghost()
-        .xsmall()
+        .with_size(COMPACT)
         .on_click(move |_, window, cx| window.dispatch_action(Box::new(ShowFact { fact }), cx))
 }
 

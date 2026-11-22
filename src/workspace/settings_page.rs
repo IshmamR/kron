@@ -8,22 +8,23 @@ use gpui_kit::component::setting::{
 };
 use gpui_kit::component::{ActiveTheme, IconName};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
-    StyleRefinement, Subscription, Window, div, prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Rems, SharedString,
+    StyleRefinement, Subscription, Window, div, prelude::*,
 };
 
 use super::LeaveSettings;
 use super::ai_settings::AiSettings;
 use super::palette_picker::palette_picker;
 use super::stand_in_name::StandInName;
-use crate::appearance::{Appearance, Motion, Palette};
+use crate::appearance::{Appearance, Motion, Palette, TextSize};
 use crate::database::schema::Settings as SettingsTable;
 use crate::database::{Changed, Database};
 use crate::model::settings;
 
 const KEY_CONTEXT: &str = "SettingsPage";
-/// The back button's width and a gap.
-const SEARCH_INSET: Pixels = px(40.);
+/// The back button's width and a gap, in rems as the button grows with the
+/// text: 40 px at the default size.
+const SEARCH_INSET: Rems = Rems(2.5);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", LeaveSettings, Some(KEY_CONTEXT))]);
@@ -203,7 +204,32 @@ impl SettingsPage {
                              system follows your desktop's reduce-animation setting.",
                         )
                         .keywords(["motion"]),
-                    ),
+                    )
+                    .item({
+                        let database = self.database.clone();
+                        SettingItem::new(
+                            "Text size",
+                            SettingField::dropdown(
+                                TextSize::ALL
+                                    .into_iter()
+                                    .map(|size| (size.stored().into(), size.label().into()))
+                                    .collect(),
+                                |cx| TextSize::current(cx).stored().into(),
+                                move |key, cx| {
+                                    if let Some(size) = TextSize::from_stored(&key) {
+                                        database.read(cx).queue(move |write| {
+                                            settings::set_text_size(write, size)
+                                        });
+                                    }
+                                },
+                            ),
+                        )
+                        .description(
+                            "Buttons and fields grow with it. Kept for this computer only, \
+                             as it depends on the screen.",
+                        )
+                        .keywords(["font", "zoom", "scale"])
+                    }),
             )
     }
 
@@ -319,8 +345,8 @@ pub(super) enum SettingsSection {
 mod tests {
     use super::super::testing;
     use super::*;
-    use gpui_kit::TestAppContext;
     use gpui_kit::test::TestWindowExt;
+    use gpui_kit::{TestAppContext, px};
 
     #[test]
     fn choosing_a_palette_saves_it_and_closes_the_popover() {

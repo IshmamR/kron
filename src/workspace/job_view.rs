@@ -1,3 +1,4 @@
+use super::parts::{COMPACT, CONTROL};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -846,7 +847,7 @@ impl JobView {
                     .child(
                         TabBar::new("job-tabs")
                             .segmented()
-                            .small()
+                            .with_size(CONTROL)
                             .selected_index(match self.tab {
                                 Tab::Resume => 0,
                                 Tab::Application => 1,
@@ -867,7 +868,7 @@ impl JobView {
                             Button::new("export-pdf")
                                 .label("Export PDF")
                                 .icon(IconName::ArrowDown)
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.export(window, cx)),
                                 ),
@@ -968,7 +969,7 @@ impl JobView {
         };
         Button::new("generate")
             .label(label)
-            .small()
+            .with_size(CONTROL)
             .when(self.shown_id().is_none(), |this| this.primary())
             .disabled(self.generating)
             .on_click(cx.listener(|this, _, window, cx| this.ask_to_generate(window, cx)))
@@ -1025,7 +1026,7 @@ impl JobView {
                     Button::new("regenerate-outdated")
                         .label("Regenerate")
                         .outline()
-                        .small()
+                        .with_size(CONTROL)
                         .disabled(self.generating)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.ask_to_generate(window, cx)),
@@ -1070,7 +1071,7 @@ impl JobView {
                 Button::new("close-lines-notice")
                     .icon(IconName::Close)
                     .ghost()
-                    .xsmall()
+                    .with_size(COMPACT)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.lines_now_explained(cx);
                         cx.notify();
@@ -1145,7 +1146,7 @@ impl JobView {
                         |_, _, cx| {
                             Button::new("set-up-ai")
                                 .label("Set up AI")
-                                .small()
+                                .with_size(CONTROL)
                                 .on_click(cx.listener(|notification, _, window, cx| {
                                     notification.dismiss(window, cx);
                                     window.dispatch_action(Box::new(SetUpAi), cx);
@@ -1801,7 +1802,7 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
             Button::new("zoom-in")
                 .icon(IconName::Plus)
                 .ghost()
-                .small()
+                .with_size(CONTROL)
                 .disabled(zoom >= ZOOMS[ZOOMS.len() - 1])
                 .tooltip_with_action(
                     format!("Zoom in (now {percent})"),
@@ -1814,7 +1815,7 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
             Button::new("zoom-out")
                 .icon(IconName::Minus)
                 .ghost()
-                .small()
+                .with_size(CONTROL)
                 .disabled(zoom <= ZOOMS[0])
                 .tooltip_with_action(
                     format!("Zoom out (now {percent})"),
@@ -1828,7 +1829,7 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
             Button::new("fit-width")
                 .icon(lucide("maximize-2"))
                 .ghost()
-                .small()
+                .with_size(CONTROL)
                 .tooltip("Fit width")
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(FitWidth), cx)),
         )
@@ -1836,7 +1837,7 @@ fn zoom_bar(zoom: f32, cx: &App) -> impl IntoElement {
             Button::new("actual-size")
                 .icon(lucide("rotate-ccw"))
                 .ghost()
-                .small()
+                .with_size(CONTROL)
                 .disabled(zoom == 1.)
                 .tooltip_with_action(
                     format!("Back to 100% (now {percent})"),
@@ -1874,7 +1875,7 @@ fn template_menu(current: &'static typeset::Template) -> impl IntoElement {
         .label(typeset::template(current).name)
         .dropdown_caret(true)
         .ghost()
-        .small()
+        .with_size(CONTROL)
         .tooltip("Résumé template")
         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
             for template in &typeset::TEMPLATES {
@@ -1894,7 +1895,7 @@ fn paper_menu(current: Paper) -> impl IntoElement {
         .label(current.label())
         .dropdown_caret(true)
         .ghost()
-        .small()
+        .with_size(CONTROL)
         .tooltip("Paper size")
         .dropdown_menu_with_anchor(Anchor::TopLeft, move |mut menu, _, _| {
             for paper in Paper::ALL {
@@ -1936,7 +1937,7 @@ fn job_header(
         .child(
             Button::new("back")
                 .ghost()
-                .small()
+                .with_size(CONTROL)
                 .icon(IconName::ChevronLeft)
                 .tooltip("Back to résumés (Esc)")
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(JobViewEvent::Close))),
@@ -2023,7 +2024,7 @@ fn sent_notice(
                 Button::new("toggle-sent")
                     .label(label)
                     .outline()
-                    .small()
+                    .with_size(CONTROL)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let current = this
                             .versions

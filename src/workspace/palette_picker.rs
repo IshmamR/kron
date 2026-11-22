@@ -1,3 +1,4 @@
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::popover::{Popover, PopoverState};
 use gpui_kit::component::scroll::ScrollableElement;
@@ -27,7 +28,7 @@ pub fn palette_picker(dark: bool, database: Entity<Database>, cx: &App) -> AnyEl
             "choose-light-palette"
         })
         .outline()
-        .small()
+        .with_size(CONTROL)
         .dropdown_caret(true)
         .child(
             h_flex()

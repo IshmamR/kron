@@ -3,6 +3,7 @@
 // OS keyring and never shown again, so a provider's row only says whether one is
 // saved.
 
+use super::parts::CONTROL;
 use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -202,7 +203,7 @@ impl AiSettings {
             .when(!signed_in, |this| {
                 this.child(
                     ContinueWithChatGpt::new("continue-with-chatgpt")
-                        .small()
+                        .with_size(CONTROL)
                         .label(match waiting {
                             true => "Waiting for the browser…",
                             false => "Continue with ChatGPT",
@@ -216,7 +217,7 @@ impl AiSettings {
                     Button::new("cancel-sign-in")
                         .label("Cancel")
                         .ghost()
-                        .small()
+                        .with_size(CONTROL)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.sign_in = Task::ready(());
                             this.signing_in = SigningIn::Idle;
@@ -229,7 +230,7 @@ impl AiSettings {
                     .icon(IconName::Plus)
                     .label("Add provider")
                     .outline()
-                    .small()
+                    .with_size(CONTROL)
                     .disabled(all_added)
                     .when(all_added, |this| this.tooltip("Every provider is added."))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -241,7 +242,7 @@ impl AiSettings {
                     .icon(IconName::Plus)
                     .label("Add server")
                     .outline()
-                    .small()
+                    .with_size(CONTROL)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_editor(Editor::Server(None), window, cx)
                     })),
@@ -321,7 +322,7 @@ impl AiSettings {
                                 (false, false) => "Add key…",
                             })
                             .outline()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(working)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 let editor = match provider.is_compatible() {
@@ -335,7 +336,7 @@ impl AiSettings {
                         Button::new(SharedString::from(format!("remove-{id}")))
                             .label("Remove")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(working)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.confirming = Some(id);
@@ -390,14 +391,14 @@ impl AiSettings {
                         Button::new(SharedString::from(format!("usage-{id}")))
                             .label("Manage usage")
                             .outline()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(|_, _, cx| cx.open_url(chatgpt::USAGE_SETTINGS)),
                     )
                     .child(
                         Button::new(SharedString::from(format!("remove-{id}")))
                             .label("Sign out")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(working)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.confirming = Some(id);
@@ -432,7 +433,7 @@ impl AiSettings {
                         Button::new(SharedString::from(format!("keep-{id}")))
                             .label("Cancel")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.confirming = None;
                                 cx.notify();
@@ -446,7 +447,7 @@ impl AiSettings {
                             // its fill red too, which loses the contrast.
                             .outline()
                             .text_color(cx.theme().danger)
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.confirming = None;
                                 this.remove(id, cx);
@@ -468,7 +469,7 @@ impl AiSettings {
             .id(("model", index))
             .w(PICKER_WIDTH)
             .menu_width(PICKER_WIDTH)
-            .small()
+            .with_size(CONTROL)
             .placeholder(placeholder)
             .search_placeholder("Search models")
             .cleanable(task.is_some())
@@ -737,7 +738,7 @@ impl AiSettings {
                         Button::new("cancel-editor")
                             .label("Cancel")
                             .outline()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.close_editor(window, cx);
                                 window.close_dialog(cx);
@@ -751,7 +752,7 @@ impl AiSettings {
                                 (false, _) => "Save",
                             })
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(working || !ready)
                             .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
                     ),
@@ -1264,14 +1265,14 @@ pub(super) fn confirm_plan_use(window: &mut Window, cx: &mut App) {
                                     Button::new("plan-usage")
                                         .label("Manage usage")
                                         .outline()
-                                        .small()
+                                        .with_size(CONTROL)
                                         .on_click(|_, _, cx| cx.open_url(chatgpt::USAGE_SETTINGS)),
                                 )
                                 .child(
                                     Button::new("got-it")
                                         .label("Got it")
                                         .primary()
-                                        .small()
+                                        .with_size(CONTROL)
                                         .on_click(|_, window, cx| window.close_dialog(cx)),
                                 ),
                         ),

@@ -1,3 +1,4 @@
+use super::parts::CONTROL;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -232,7 +233,6 @@ impl Render for ResumeGrid {
                             .child(
                                 text_field(
                                     Input::new(&self.search)
-                                        .small()
                                         .prefix(Icon::new(IconName::Search).small())
                                         .when_some(suffix, |this, suffix| this.suffix(suffix)),
                                     &self.search,
@@ -246,7 +246,7 @@ impl Render for ResumeGrid {
                                 Button::new("new-job")
                                     .label("New job")
                                     .icon(IconName::Plus)
-                                    .small()
+                                    .with_size(CONTROL)
                                     .ghost()
                                     .on_click(
                                         cx.listener(|_, _, _, cx| cx.emit(ResumeGridEvent::NewJob)),
@@ -723,7 +723,7 @@ fn sort_menu(current: JobSort) -> impl IntoElement {
     Button::new("sort-jobs")
         .label(current.label())
         .ghost()
-        .small()
+        .with_size(CONTROL)
         .dropdown_caret(true)
         .dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
             for sort in JobSort::ALL {

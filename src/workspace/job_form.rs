@@ -2,6 +2,7 @@
 // description pasted from the posting. Fetching the description from the
 // link comes later, so the link is kept.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
@@ -119,14 +120,14 @@ impl Render for JobForm {
                         Button::new("cancel-job")
                             .label(self.cancel_label)
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|_, _, _, cx| cx.emit(JobFormEvent::Cancelled))),
                     )
                     .child(
                         Button::new("add-job")
                             .label(self.add_label)
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .disabled(!ready)
                             .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
                     ),

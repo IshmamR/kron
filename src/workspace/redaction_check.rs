@@ -4,6 +4,7 @@
 // or phrase it missed, like a colleague's name, can be hidden too. Nothing
 // here is stored: the text is redacted from what's shown when it's sent.
 
+use super::parts::CONTROL;
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -143,7 +144,7 @@ impl Render for RedactionCheck {
                                 Button::new("not-now")
                                     .label("Not now")
                                     .ghost()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.emit(RedactionCheckEvent::Dismissed)
                                     })),
@@ -152,7 +153,7 @@ impl Render for RedactionCheck {
                                 Button::new("confirm")
                                     .label("Confirm")
                                     .primary()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .on_click(cx.listener(|_, _, _, cx| {
                                         cx.emit(RedactionCheckEvent::Confirmed)
                                     })),
@@ -175,11 +176,11 @@ impl Render for RedactionCheck {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(text_field(Input::new(&self.also).small(), &self.also, cx).flex_1())
+                    .child(text_field(Input::new(&self.also), &self.also, cx).flex_1())
                     .child(
                         Button::new("hide")
                             .label("Hide")
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| this.hide(window, cx))),
                     ),
             )

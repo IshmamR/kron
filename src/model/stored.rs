@@ -6,7 +6,7 @@ use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ValueRef};
 
 use super::settings::WindowState;
 use super::{EntryKind, FactKind, Inclusion, InterviewKind, ReviewReason, SectionKind};
-use crate::appearance::{Appearance, Motion, Palette};
+use crate::appearance::{Appearance, Motion, Palette, TextSize};
 
 macro_rules! stored {
     ($type:ty { $($variant:ident => $text:literal),* $(,)? }) => {
@@ -98,6 +98,13 @@ stored!(Motion {
     System => "system",
     Reduced => "reduced",
     Full => "full",
+});
+
+stored!(TextSize {
+    Small => "small",
+    Default => "default",
+    Large => "large",
+    Larger => "larger",
 });
 
 stored!(Palette {

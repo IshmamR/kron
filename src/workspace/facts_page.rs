@@ -1,3 +1,4 @@
+use super::parts::{COMPACT, CONTROL};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -224,7 +225,6 @@ impl Render for FactsPage {
                                                             Icon::new(IconName::Search)
                                                                 .text_color(theme.muted_foreground),
                                                         )
-                                                        .small()
                                                         .when_some(suffix, |this, suffix| {
                                                             this.suffix(suffix)
                                                         }),
@@ -731,7 +731,7 @@ impl FactsPage {
                 Button::new("add-facts")
                     .label("Add facts")
                     .icon(IconName::Plus)
-                    .small()
+                    .with_size(CONTROL)
                     .on_click(cx.listener(|this, _, window, cx| this.open_add_form(window, cx))),
             )
     }
@@ -753,7 +753,7 @@ impl FactsPage {
         h_flex().flex_none().gap_2().px_4().pt_3().child(
             TabBar::new("fact-filter")
                 .segmented()
-                .small()
+                .with_size(CONTROL)
                 .flex_1()
                 .selected_index(selected_index)
                 .children(Filter::ALL.map(|filter| {
@@ -779,7 +779,7 @@ impl FactsPage {
                     Button::new("confirm")
                         .label("Confirm")
                         .primary()
-                        .small()
+                        .with_size(CONTROL)
                         .tooltip("Confirm and go to the next fact to review (↩)")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_fact(&ConfirmFact, window, cx)
@@ -795,7 +795,7 @@ impl FactsPage {
                         IconName::EyeOff
                     })
                     .outline()
-                    .small()
+                    .with_size(CONTROL)
                     .tooltip("Hidden facts are never used in résumés (⌫)")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_hidden(&ToggleHidden, window, cx)
@@ -862,7 +862,7 @@ impl FactsPage {
                                         .label("Revert")
                                         .icon(IconName::Undo2)
                                         .ghost()
-                                        .xsmall()
+                                        .with_size(COMPACT)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.revert_fact(id, cx)
                                         })),
@@ -970,7 +970,7 @@ impl FactsPage {
                                                     Button::new(("merge-with", index))
                                                         .label("Merge…")
                                                         .outline()
-                                                        .xsmall()
+                                                        .with_size(COMPACT)
                                                         .on_click(cx.listener(
                                                             move |this, _, _, cx| {
                                                                 this.merge_with(id, other, cx)
@@ -1104,7 +1104,7 @@ impl FactsPage {
                         Button::new("merge")
                             .label("Merge")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .tooltip("↩")
                             .on_click(cx.listener(|this, _, window, cx| this.merge(window, cx))),
                     )
@@ -1112,7 +1112,7 @@ impl FactsPage {
                         Button::new("cancel-merge")
                             .label("Cancel")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .tooltip("Esc")
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.set_marked(Vec::new(), cx);
@@ -1156,14 +1156,14 @@ impl FactsPage {
                         Button::new("add-note")
                             .label("Add")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, window, cx| this.add_note(window, cx))),
                     )
                     .child(
                         Button::new("cancel-add")
                             .label("Cancel")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.close_add_form(window, cx)),
                             ),

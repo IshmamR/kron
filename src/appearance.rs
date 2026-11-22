@@ -5,7 +5,7 @@ pub use palette::{Palette, Palettes};
 use std::process::Command;
 
 use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{Anchor, App, AppContext as _, Global, Hsla, Window, rgb};
+use gpui_kit::{Anchor, App, AppContext as _, Global, Hsla, Pixels, Window, px, rgb};
 
 /// gpui's Linux default (IBM Plex Sans) is rarely installed, and the fallback
 /// it lands on often has no bold. Inter is common and has every weight.
@@ -18,6 +18,7 @@ pub fn init(cx: &mut App) {
     #[cfg(target_os = "linux")]
     Theme::update(cx, |theme| theme.font_family = UI_FONT.into());
     Motion::default().set(cx);
+    cx.set_global(TextSize::default());
 }
 
 /// Light or dark. Follows the desktop unless the user picks one.
@@ -53,11 +54,14 @@ impl Appearance {
             Self::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
         }
         let palettes = Palettes::current(cx);
+        let text_size = TextSize::current(cx);
         Theme::update(cx, |theme| {
             let palette = palettes.for_mode(theme.is_dark());
             apply_palette(theme, palette);
-            // Changing the theme resets this too, so it's set again each time.
+            // Changing the theme resets these too, so they're set again each
+            // time.
             theme.notification.placement = Anchor::BottomRight;
+            theme.font_size = text_size.pixels();
         });
     }
 
@@ -145,6 +149,52 @@ fn apply_palette(theme: &mut Theme, palette: Palette) {
     theme.button_primary_foreground = theme.primary_foreground;
     theme.button_primary_hover = theme.primary_hover;
     theme.button_primary_active = theme.primary_active;
+}
+
+/// How big text is. The kit measures its controls in rems, the theme's font
+/// size, so they grow with it, like a browser's zoom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextSize {
+    Small,
+    #[default]
+    Default,
+    Large,
+    Larger,
+}
+
+impl Global for TextSize {}
+
+impl TextSize {
+    pub const ALL: [Self; 4] = [Self::Small, Self::Default, Self::Large, Self::Larger];
+
+    pub fn current(cx: &App) -> Self {
+        cx.try_global::<Self>().copied().unwrap_or_default()
+    }
+
+    /// Remembers the choice. The workspace observes it and calls
+    /// `Appearance::apply`, which sets it in the theme.
+    pub fn set(self, cx: &mut App) {
+        cx.set_global(self);
+    }
+
+    /// The rem: body text is 0.875 of it, 14 px at the default.
+    pub fn pixels(self) -> Pixels {
+        px(match self {
+            Self::Small => 14.,
+            Self::Default => 16.,
+            Self::Large => 18.,
+            Self::Larger => 20.,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Default => "Default",
+            Self::Large => "Large",
+            Self::Larger => "Larger",
+        }
+    }
 }
 
 /// Whether things slide and fade, like the sidebar collapsing. Reduced, they

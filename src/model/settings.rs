@@ -2,7 +2,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use super::JobId;
-use crate::appearance::{Appearance, Motion, Palette, Palettes};
+use crate::appearance::{Appearance, Motion, Palette, Palettes, TextSize};
 use crate::database::schema::{self, device_settings, settings};
 use crate::database::{Error, Write};
 
@@ -40,6 +40,7 @@ pub struct DeviceSettings {
     pub window: Option<SavedWindow>,
     pub sidebar_collapsed: bool,
     pub last_page: LastPage,
+    pub text_size: TextSize,
 }
 
 impl DeviceSettings {
@@ -53,11 +54,12 @@ impl DeviceSettings {
             bool,
             String,
             Option<Uuid>,
+            TextSize,
         );
-        let (state, x, y, width, height, sidebar_collapsed, last_page, last_job): Row = device
-            .query_row(
+        let (state, x, y, width, height, sidebar_collapsed, last_page, last_job, text_size): Row =
+            device.query_row(
                 "SELECT window_state, window_x, window_y, window_width, window_height,
-                        sidebar_collapsed, last_page, last_job
+                        sidebar_collapsed, last_page, last_job, text_size
                  FROM device_settings",
                 [],
                 |row| {
@@ -70,6 +72,7 @@ impl DeviceSettings {
                         row.get(5)?,
                         row.get(6)?,
                         row.get(7)?,
+                        row.get(8)?,
                     ))
                 },
             )?;
@@ -92,6 +95,7 @@ impl DeviceSettings {
             window,
             sidebar_collapsed,
             last_page,
+            text_size,
         })
     }
 }
@@ -191,6 +195,10 @@ pub fn set_sidebar_collapsed(write: &mut Write, collapsed: bool) -> Result<(), E
     write.set(device_settings::SIDEBAR_COLLAPSED, 1, &collapsed)
 }
 
+pub fn set_text_size(write: &mut Write, size: TextSize) -> Result<(), Error> {
+    write.set(device_settings::TEXT_SIZE, 1, &size.stored())
+}
+
 pub fn set_last_page(write: &mut Write, page: LastPage) -> Result<(), Error> {
     let (name, job) = match page {
         LastPage::Resumes => ("resumes", None),
@@ -254,6 +262,7 @@ mod tests {
             set_motion(write, Motion::Reduced)?;
             set_sidebar_collapsed(write, true)?;
             set_last_page(write, LastPage::Job(job))?;
+            set_text_size(write, TextSize::Larger)?;
             save_window(write, window)
         })?;
         assert_eq!(
@@ -270,6 +279,7 @@ mod tests {
                 window: Some(window),
                 sidebar_collapsed: true,
                 last_page: LastPage::Job(job),
+                text_size: TextSize::Larger,
             }
         );
 

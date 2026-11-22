@@ -22,6 +22,7 @@ mod stand_in_name;
 #[cfg(test)]
 mod testing;
 
+use parts::CONTROL;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -35,11 +36,11 @@ use gpui_kit::component::{
     ActiveTheme, Collapsible, Icon, IconName, Root, Sizable, WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    Action, App, Bounds, Context, Entity, Focusable, IntoElement, KeyBinding, Pixels, SharedString,
-    Subscription, Task, Window, WindowBounds, actions, div, prelude::*, px,
+    Action, App, Bounds, Context, Entity, Focusable, IntoElement, KeyBinding, Pixels, Rems,
+    SharedString, Subscription, Task, Window, WindowBounds, actions, div, prelude::*, px,
 };
 
-use crate::appearance::{Appearance, Motion, Palettes};
+use crate::appearance::{Appearance, Motion, Palettes, TextSize};
 use crate::database::schema::{self, Documents, FactSources, Facts, LlmRuns};
 use crate::database::{Changed, Database};
 use crate::llm::{self, Purpose};
@@ -56,7 +57,8 @@ use previews::Previews;
 use resume_grid::{ResumeGrid, ResumeGridEvent};
 use settings_page::{SettingsPage, SettingsSection};
 
-const SIDEBAR_WIDTH: Pixels = px(204.);
+/// In rems, 204 px at the default text size, so it widens with the text.
+const SIDEBAR_WIDTH: Rems = Rems(12.75);
 /// How long the window has to stay put before where it is gets saved, so a
 /// drag saves once, not on every step.
 const WINDOW_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -219,11 +221,12 @@ impl Workspace {
             Ok(stored) => apply_settings(stored, cx),
             Err(error) => eprintln!("workspace: couldn't read the settings: {error}"),
         }
-        Appearance::current(cx).apply(window, cx);
         let device = device.unwrap_or_else(|error| {
             eprintln!("workspace: couldn't read this device's settings: {error}");
             DeviceSettings::default()
         });
+        device.text_size.set(cx);
+        Appearance::current(cx).apply(window, cx);
 
         let previews = cx.new(|cx| Previews::new(database.clone(), cx));
         let resume_grid =
@@ -252,6 +255,17 @@ impl Workspace {
                         Err(error) => eprintln!("workspace: couldn't read the settings: {error}"),
                     }
                 }
+                if changed.touches(schema::DeviceSettings) {
+                    match DeviceSettings::read(database.read(cx).device_connection()) {
+                        Ok(device) if device.text_size != TextSize::current(cx) => {
+                            device.text_size.set(cx)
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            eprintln!("workspace: couldn't read this device's settings: {error}")
+                        }
+                    }
+                }
             }),
             cx.observe_window_bounds(window, |this, window, cx| this.save_window_soon(window, cx)),
             cx.subscribe_in(
@@ -274,6 +288,9 @@ impl Workspace {
                 Appearance::current(cx).apply(window, cx)
             }),
             cx.observe_global_in::<Palettes>(window, |_, window, cx| {
+                Appearance::current(cx).apply(window, cx)
+            }),
+            cx.observe_global_in::<TextSize>(window, |_, window, cx| {
                 Appearance::current(cx).apply(window, cx)
             }),
             cx.observe_window_appearance(window, |_, window, cx| {
@@ -451,7 +468,7 @@ impl Workspace {
             Button::new("find-facts")
                 .label("Find facts")
                 .primary()
-                .small()
+                .with_size(CONTROL)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_page(Page::Import, window, cx);
                     this.import_page.update(cx, |import_page, cx| {
@@ -462,7 +479,7 @@ impl Workspace {
             Button::new("set-up-ai")
                 .label("Set up AI")
                 .primary()
-                .small()
+                .with_size(CONTROL)
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(SetUpAi), cx))
         };
         let theme = cx.theme();
@@ -678,7 +695,7 @@ impl Workspace {
         let collapsed = self.sidebar_collapsed;
         let toggle = Button::new("toggle-sidebar")
             .ghost()
-            .small()
+            .with_size(CONTROL)
             .icon(if collapsed {
                 IconName::PanelLeftOpen
             } else {
@@ -732,7 +749,7 @@ impl Workspace {
                             .child(
                                 Button::new("undo")
                                     .ghost()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .icon(IconName::Undo2)
                                     .tooltip_with_action("Undo", &Undo, None)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -742,7 +759,7 @@ impl Workspace {
                             .child(
                                 Button::new("redo")
                                     .ghost()
-                                    .small()
+                                    .with_size(CONTROL)
                                     .icon(IconName::Redo2)
                                     .tooltip_with_action("Redo", &Redo, None)
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1229,6 +1246,58 @@ mod tests {
             gpui_kit::Hsla::from(gpui_kit::rgb(
                 crate::appearance::Palette::Glacier.colors().accent
             )),
+        );
+    }
+
+    #[test]
+    fn the_text_size_is_this_devices_and_outlasts_a_theme_change() {
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        let font_size = |open: &mut Open| open.read(|_, cx| cx.theme().font_size);
+        assert_eq!(font_size(&mut open), TextSize::Default.pixels());
+        open.run(|write| settings::set_text_size(write, TextSize::Large));
+        assert_eq!(font_size(&mut open), TextSize::Large.pixels());
+        assert_eq!(device_settings(&mut open).text_size, TextSize::Large);
+        // A theme change loads the theme's own font size, 16.
+        open.run(|write| settings::set_appearance(write, Appearance::Dark));
+        assert_eq!(font_size(&mut open), TextSize::Large.pixels());
+    }
+
+    /// Buttons are 32 px, as on Windows and GNOME, and they and the sidebar
+    /// grow with the text size, so its labels still fit.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn buttons_and_the_sidebar_grow_with_the_text_size() {
+        use gpui_kit::test::TestWindowExt;
+
+        let mut app = TestAppContext::single();
+        let mut open = open(&mut app);
+        let measure = |open: &mut Open| {
+            // The kit's Root sets the rem from the theme; this window has none.
+            open.cx.update(|window, cx| {
+                window.set_rem_size(cx.theme().font_size);
+                window.refresh();
+            });
+            open.cx.run_until_parked();
+            open.cx.update(|window, _| {
+                (
+                    window.find("new-job").bounds().size.height,
+                    // "Keyboard shortcuts", as wide as the sidebar's insides.
+                    window.find("footer-menu-0").bounds().size.width,
+                )
+            })
+        };
+        let (height, width) = measure(&mut open);
+        assert_eq!(height, px(32.));
+        open.run(|write| settings::set_text_size(write, TextSize::Larger));
+        let larger = TextSize::Larger.pixels() / TextSize::Default.pixels();
+        let (larger_height, larger_width) = measure(&mut open);
+        assert_eq!(larger_height, height * larger);
+        // Layout rounds to whole pixels.
+        assert!(
+            (f32::from(larger_width) - f32::from(width * larger)).abs() <= 1.,
+            "{larger_width:?} is about {:?}",
+            width * larger
         );
     }
 }

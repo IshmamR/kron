@@ -2,6 +2,7 @@
 // open-source work". It's optional, and starts from what the job's last
 // résumé was asked, so regenerating keeps it.
 
+use super::parts::CONTROL;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
@@ -60,7 +61,7 @@ impl Render for InstructionsForm {
                         Button::new("cancel-generate")
                             .label("Cancel")
                             .ghost()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(
                                 cx.listener(|_, _, _, cx| {
                                     cx.emit(InstructionsFormEvent::Cancelled)
@@ -71,7 +72,7 @@ impl Render for InstructionsForm {
                         Button::new("confirm-generate")
                             .label("Generate")
                             .primary()
-                            .small()
+                            .with_size(CONTROL)
                             .on_click(cx.listener(|this, _, _, cx| this.generate(cx))),
                     ),
             )
