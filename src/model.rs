@@ -232,6 +232,8 @@ pub enum UnsupportedReason {
     InventedYear(u16),
     NoSupportingFact,
     UsesHiddenFact(FactId),
+    /// A bullet takes from a fact of another job, project or other entry.
+    OtherEntry,
 }
 
 /// Tells whether another fact probably says the same thing as `text`: most

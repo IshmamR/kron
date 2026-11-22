@@ -366,16 +366,17 @@ impl Draft {
                 id: fact.id,
                 text: &fact.text,
                 hidden: false,
+                entry: fact.entry,
             })
             .collect();
         let mut claims = Vec::new();
         let (years, dates) = material.experience();
-        // A line the model wrote, citing those of `facts` that `allowed`
-        // lets it, if the verifier passes it. With `summary`, it may also
-        // say how many years the person has worked, as the jobs' dates
-        // count them, and cites those dates.
+        // A line the model wrote, if the verifier passes it: the summary,
+        // or a bullet of `entry`, citing only that entry's facts. With
+        // `summary`, it may also say how many years the person has worked,
+        // as the jobs' dates count them, and cites those dates.
         let mut written =
-            |written: &Written, allowed: &dyn Fn(usize) -> bool, summary: bool| -> Option<Line> {
+            |written: &Written, entry: Option<usize>, summary: bool| -> Option<Line> {
                 let text = redaction.restore(written.text.trim(), sent);
                 if text.is_empty() {
                     return None;
@@ -383,11 +384,28 @@ impl Draft {
                 let mut cites: Vec<FactId> = Vec::new();
                 for index in written.facts.iter().filter_map(|id| material.fact(id)) {
                     let id = material.facts[index].id;
-                    if allowed(index) && !cites.contains(&id) {
+                    if !cites.contains(&id) {
                         cites.push(id);
                     }
                 }
-                let Some(reason) = verifier::verify(&text, &cites, &given) else {
+                let verdict = match entry {
+                    Some(entry) => verifier::verify_bullet(&text, entry, &cites, &given),
+                    None => verifier::verify(&text, &cites, &given),
+                };
+                // A fact of another entry the bullet takes nothing from.
+                cites.retain(|id| {
+                    entry.is_none_or(|entry| {
+                        given
+                            .iter()
+                            .any(|fact| fact.id == *id && fact.entry == Some(entry))
+                    })
+                });
+                let verdict = verdict.or_else(|| {
+                    cites
+                        .is_empty()
+                        .then_some(UnsupportedReason::NoSupportingFact)
+                });
+                let Some(reason) = verdict else {
                     return Some(line(text, cites));
                 };
                 if summary
@@ -424,7 +442,7 @@ impl Draft {
         if let Some(summary) = answer
             .summary
             .as_ref()
-            .and_then(|summary| written(summary, &|_| true, true))
+            .and_then(|summary| written(summary, None, true))
         {
             sections.push(Section {
                 kind: SectionKind::Summary,
@@ -447,11 +465,10 @@ impl Draft {
                 .iter()
                 .filter(|(entry, _)| material.entries[*entry].kind == kind)
                 .filter_map(|(entry, chosen)| {
-                    let in_entry = |index: usize| material.facts[index].entry == Some(*entry);
                     let bullets = chosen
                         .bullets
                         .iter()
-                        .filter_map(|bullet| written(bullet, &in_entry, false))
+                        .filter_map(|bullet| written(bullet, Some(*entry), false))
                         .collect();
                     let block = entry_block(material, *entry, &chosen.skills, bullets)?;
                     Some((
@@ -640,6 +657,7 @@ pub fn save(
             UnsupportedReason::UsesHiddenFact(fact) => {
                 ("uses_hidden_fact", None, None, Some(fact.0))
             }
+            UnsupportedReason::OtherEntry => ("other_entry", None, None, None),
         };
         write.insert(
             UnsupportedClaims,
@@ -1090,8 +1108,10 @@ mod tests {
            {"entry": "E1", "bullets": [
               {"text": "Cut the routing API's p99 latency from 480 ms to 95 ms.", "facts": ["F10"]},
               {"text": "Led moving 12 backend services from Python to Rust, one service at a time.",
-               "facts": ["F9", "F12", "F12"]},
+               "facts": ["F9", "F12", "F12", "F75"]},
               {"text": "Cut cloud costs by 40%.", "facts": ["F10"]},
+              {"text": "Cut the routing API's p99 latency from 480 ms to 95 ms, for the appointment scheduling service.",
+               "facts": ["F10", "F23"]},
               {"text": "Built the appointment scheduling service used by 40 clinics.", "facts": ["F23"]}]},
            {"entry": "E5", "bullets": [
               {"text": "An open-source Rust crate for trace context across async tasks, with about 900 GitHub stars.",
@@ -1167,11 +1187,17 @@ mod tests {
                     UnsupportedReason::InventedFigure("40%".to_owned())
                 ),
                 (
+                    "Cut the routing API's p99 latency from 480 ms to 95 ms, for the appointment \
+                     scheduling service."
+                        .to_owned(),
+                    UnsupportedReason::OtherEntry
+                ),
+                (
                     "Built the appointment scheduling service used by 40 clinics.".to_owned(),
-                    UnsupportedReason::NoSupportingFact
+                    UnsupportedReason::OtherEntry
                 ),
             ],
-            "a figure no fact states, and a fact of another job"
+            "a figure no fact states, and work of another job, with a fact of this one or alone"
         );
     }
 
@@ -1200,11 +1226,13 @@ mod tests {
                 id: bullet,
                 text: "Led the migration of 12 backend services from Python to Rust.",
                 hidden: false,
+                entry: None,
             },
             GivenFact {
                 id: dates,
                 text: "Jan 2010 – Jan 2020",
                 hidden: false,
+                entry: None,
             },
         ];
         let check =
@@ -1425,7 +1453,7 @@ mod tests {
         };
         assert_eq!(
             count("SELECT count(*) FROM unsupported_claims WHERE generation_id = ?1")?,
-            2
+            3
         );
         assert_eq!(
             count("SELECT count(*) FROM fact_versions WHERE generation_id = ?1")?,
@@ -1567,10 +1595,12 @@ mod tests {
                         id: fact.id,
                         text: &fact.text,
                         hidden: false,
+                        entry: fact.entry,
                     })
                     .collect();
-                // As `Draft::new` takes them: a bullet cites only facts of
-                // its own entry.
+                // As `Draft::new` checks them: a bullet against its own
+                // entry, its own entry's facts first, as `cases.txt` reads
+                // the first fact's entry as the line's.
                 let mut written: Vec<(&str, Option<usize>, &Written)> = Vec::new();
                 written.extend(
                     answer
@@ -1590,36 +1620,45 @@ mod tests {
                 let mut lines = 0;
                 for (kind, entry, line) in written {
                     let text = listed.restore(line.text.trim(), &material.listing);
-                    let cited: Vec<usize> = line
+                    let mut cited: Vec<usize> = line
                         .facts
                         .iter()
                         .filter_map(|id| material.fact(id))
-                        .filter(|index| {
-                            entry.is_none_or(|entry| material.facts[*index].entry == Some(entry))
-                        })
                         .fold(Vec::new(), |mut cited, index| {
                             if !cited.contains(&index) {
                                 cited.push(index);
                             }
                             cited
                         });
+                    cited.sort_by_key(|index| material.facts[*index].entry != entry);
                     let cites: Vec<FactId> = cited
                         .iter()
                         .map(|index| material.facts[*index].id)
                         .collect();
-                    let verdict = match verifier::verify(&text, &cites, &given) {
+                    let verdict = match entry {
+                        Some(entry) => verifier::verify_bullet(&text, entry, &cites, &given),
+                        None => verifier::verify(&text, &cites, &given),
+                    };
+                    let verdict = match verdict {
                         None => "passed".to_owned(),
                         Some(reason) => format!("rejected: {reason:?}"),
                     };
                     set.push_str(&format!(
                         "\n?\n# {cv}, {company}, {kind}; the verifier {verdict}\n"
                     ));
-                    if cited.is_empty() {
+                    let own = |index: &usize| {
+                        entry.is_some_and(|entry| material.facts[*index].entry == Some(entry))
+                    };
+                    if entry.is_some() && !cited.iter().any(own) {
                         set.push_str("# cites no fact of its own entry\n");
                     }
                     for index in &cited {
+                        let named = match (entry, material.facts[*index].entry) {
+                            (Some(_), Some(of)) => format!("fact E{}", of + 1),
+                            _ => "fact".to_owned(),
+                        };
                         set.push_str(&format!(
-                            "fact: {}\n",
+                            "{named}: {}\n",
                             material.facts[*index]
                                 .text
                                 .split_whitespace()

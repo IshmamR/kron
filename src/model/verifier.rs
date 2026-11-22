@@ -1,7 +1,8 @@
 // Checks generated lines against the facts they cite, with no model: a line
 // may state only figures and years its facts state, counting what they
-// count, and may not rest on a fact the user hid. A line that fails is left
-// out of the résumé and listed as an unsupported claim.
+// count, may not rest on a fact the user hid, and a bullet may not take from
+// a fact of another entry. A line that fails is left out of the résumé and
+// listed as an unsupported claim.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -23,6 +24,8 @@ pub struct GivenFact<'a> {
     pub id: FactId,
     pub text: &'a str,
     pub hidden: bool,
+    /// The job, project or other entry it's from, if any.
+    pub entry: Option<usize>,
 }
 
 /// Why the line `text`, citing `cites` from the `given` facts, can't go on
@@ -36,6 +39,27 @@ pub struct GivenFact<'a> {
 /// not. A count must count what a fact stating it counts: "12 engineers"
 /// fails on "12 services". Lines and facts are read as English.
 pub fn verify(text: &str, cites: &[FactId], given: &[GivenFact]) -> Option<UnsupportedReason> {
+    check(text, None, cites, given)
+}
+
+/// `verify`, for a bullet of `entry`: it may cite a fact of another entry
+/// only if it takes nothing from it, so one line can't join work from two
+/// jobs.
+pub fn verify_bullet(
+    text: &str,
+    entry: usize,
+    cites: &[FactId],
+    given: &[GivenFact],
+) -> Option<UnsupportedReason> {
+    check(text, Some(entry), cites, given)
+}
+
+fn check(
+    text: &str,
+    entry: Option<usize>,
+    cites: &[FactId],
+    given: &[GivenFact],
+) -> Option<UnsupportedReason> {
     if cites.is_empty() {
         return Some(UnsupportedReason::NoSupportingFact);
     }
@@ -53,6 +77,9 @@ pub fn verify(text: &str, cites: &[FactId], given: &[GivenFact]) -> Option<Unsup
         let stems = content(fact.text, &figures);
         // A line of only figures, like "2016 – 2018", has no words to share.
         if words.is_empty() || stems.iter().any(|stem| words.contains(stem)) {
+            if entry.is_some_and(|entry| fact.entry != Some(entry)) {
+                return Some(UnsupportedReason::OtherEntry);
+            }
             facts.push((figures, stems));
         }
     }
@@ -532,6 +559,7 @@ mod tests {
             id: FactId::new(),
             text,
             hidden: false,
+            entry: None,
         }
     }
 
@@ -712,6 +740,7 @@ mod tests {
                     id: *id,
                     text,
                     hidden: *hidden,
+                    entry: None,
                 })
                 .collect();
             for (text, cites) in lines {
@@ -739,6 +768,7 @@ mod tests {
                 id: *id,
                 text,
                 hidden: *hidden,
+                entry: None,
             })
             .collect();
         let cited = [
@@ -799,11 +829,13 @@ mod tests {
     const GENERATED: &str = include_str!("verifier/generated.txt");
     /// Labels the verifier handles: getting any of those cases wrong fails
     /// the test. The rest are only reported.
-    const HANDLED: [&str; 4] = [
+    const HANDLED: [&str; 6] = [
         "paraphrase",
         "invented_figure",
         "invented_year",
         "unit_swap",
+        "combined",
+        "cross_entry",
     ];
 
     struct Case {
@@ -944,9 +976,25 @@ mod tests {
         let mut tally: Vec<(&str, usize, usize)> = Vec::new();
         let mut regressions = Vec::new();
         for case in cases(set) {
-            let given: Vec<GivenFact> = case.facts.iter().map(|text| fact(text)).collect();
+            // A case's line is in the entry of its first fact.
+            let entry = |name: Option<&str>| {
+                name.and_then(|name| name.trim_start_matches('E').parse::<usize>().ok())
+            };
+            let given: Vec<GivenFact> = case
+                .facts
+                .iter()
+                .zip(&case.entries)
+                .map(|(text, name)| GivenFact {
+                    entry: entry(*name),
+                    ..fact(text)
+                })
+                .collect();
             let cites: Vec<FactId> = given.iter().map(|fact| fact.id).collect();
-            let flagged = verify(case.line, &cites, &given).is_some();
+            let flagged = match given.first().and_then(|fact| fact.entry) {
+                Some(entry) => verify_bullet(case.line, entry, &cites, &given),
+                None => verify(case.line, &cites, &given),
+            }
+            .is_some();
             let wrong = flagged == true_label(case.label);
             match tally.iter_mut().find(|(label, ..)| *label == case.label) {
                 Some((.., total, wrongs)) => {

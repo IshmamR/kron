@@ -386,6 +386,7 @@ impl Inspection {
                     id,
                     text: &fact.text,
                     hidden: fact.hidden,
+                    entry: None,
                 })
                 .collect();
             let dates: Vec<&str> = cited()
@@ -498,6 +499,7 @@ fn claims(connection: &Connection, resume: ResumeId) -> Result<Vec<Claim>, Error
             ("invented_figure", Some(figure), _, _) => UnsupportedReason::InventedFigure(figure),
             ("invented_year", _, Some(year), _) => UnsupportedReason::InventedYear(year),
             ("no_supporting_fact", ..) => UnsupportedReason::NoSupportingFact,
+            ("other_entry", ..) => UnsupportedReason::OtherEntry,
             ("uses_hidden_fact", _, _, Some(fact)) => {
                 let fact = root(connection, fact)?;
                 hidden_fact_shown = connection
@@ -609,5 +611,6 @@ fn unsupported_reason(reason: &UnsupportedReason) -> String {
         UnsupportedReason::InventedYear(year) => format!("{year} isn't in any of your facts"),
         UnsupportedReason::NoSupportingFact => "No fact supports this".into(),
         UnsupportedReason::UsesHiddenFact(_) => "Relies on a fact you hid".into(),
+        UnsupportedReason::OtherEntry => "Mixes in work from another entry".into(),
     }
 }

@@ -208,9 +208,13 @@ Test set first. Each rule only adds rejections, and each is measured on
   through all of them: 6 of 6 cross_entry, 6 of 6 job_echo, 7 of 7
   dropped_qualifier, 12 of 12 scope_inflation, 6 of 6 invented_term, with
   no false flags on the 16 honest counterparts.
-- [ ] **Combined facts must share a job or project.** A line may combine facts
+- [x] **Combined facts must share a job or project.** A line may combine facts
   from one entry only. It's the cheapest rule, since citations already carry
-  their facts.
+  their facts. Before, a bullet's citations of other entries were dropped and
+  what it took from them stayed; now such a bullet is left out as "Mixes in
+  work from another entry" (`other_entry`). A cited fact the bullet takes no
+  words from is still only dropped. cross_entry: 6 of 6 caught, no false
+  flags on combined (2026-11-22).
 - [ ] **Job-description echo.** A word in `new_words` that also appears in the
   job description means rejection. `verify` needs the description passed in.
 - [ ] **Negation and modality.** Words like not, never, without, helped to and
