@@ -151,21 +151,37 @@ fn apply_palette(theme: &mut Theme, palette: Palette) {
     theme.button_primary_active = theme.primary_active;
 }
 
-/// How big text is. The kit measures its controls in rems, the theme's font
-/// size, so they grow with it, like a browser's zoom.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TextSize {
-    Small,
-    #[default]
-    Default,
-    Large,
-    Larger,
+/// How big text is, as a percentage of the default. The kit measures its
+/// controls in rems, the theme's font size, so they grow with it, like a
+/// browser's zoom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextSize(u32);
+
+impl Default for TextSize {
+    fn default() -> Self {
+        Self(100)
+    }
 }
 
 impl Global for TextSize {}
 
 impl TextSize {
-    pub const ALL: [Self; 4] = [Self::Small, Self::Default, Self::Large, Self::Larger];
+    pub const MIN: u32 = 85;
+    pub const MAX: u32 = 130;
+    pub const STEP: u32 = 5;
+    /// The rem at 100%: body text is 0.875 of it, 14 px.
+    const DEFAULT_REM: f32 = 16.;
+
+    /// The nearest size the slider stops at.
+    pub fn new(percent: f32) -> Self {
+        let step = Self::STEP as f32;
+        let percent = ((percent / step).round() * step) as u32;
+        Self(percent.clamp(Self::MIN, Self::MAX))
+    }
+
+    pub fn percent(self) -> u32 {
+        self.0
+    }
 
     pub fn current(cx: &App) -> Self {
         cx.try_global::<Self>().copied().unwrap_or_default()
@@ -177,23 +193,9 @@ impl TextSize {
         cx.set_global(self);
     }
 
-    /// The rem: body text is 0.875 of it, 14 px at the default.
+    /// The rem.
     pub fn pixels(self) -> Pixels {
-        px(match self {
-            Self::Small => 14.,
-            Self::Default => 16.,
-            Self::Large => 18.,
-            Self::Larger => 20.,
-        })
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small",
-            Self::Default => "Default",
-            Self::Large => "Large",
-            Self::Larger => "Larger",
-        }
+        px(Self::DEFAULT_REM * self.0 as f32 / 100.)
     }
 }
 
@@ -296,4 +298,19 @@ fn command_output(program: &str, arguments: &[&str]) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_size_stops_at_the_nearest_step_within_its_range() {
+        assert_eq!(TextSize::new(112.4).percent(), 110);
+        assert_eq!(TextSize::new(112.6).percent(), 115);
+        assert_eq!(TextSize::new(10.).percent(), TextSize::MIN);
+        assert_eq!(TextSize::new(500.).percent(), TextSize::MAX);
+        assert_eq!(TextSize::default().pixels(), px(16.));
+        assert_eq!(TextSize::new(125.).pixels(), px(20.));
+    }
 }

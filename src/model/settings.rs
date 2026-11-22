@@ -54,12 +54,12 @@ impl DeviceSettings {
             bool,
             String,
             Option<Uuid>,
-            TextSize,
+            u32,
         );
         let (state, x, y, width, height, sidebar_collapsed, last_page, last_job, text_size): Row =
             device.query_row(
                 "SELECT window_state, window_x, window_y, window_width, window_height,
-                        sidebar_collapsed, last_page, last_job, text_size
+                        sidebar_collapsed, last_page, last_job, text_scale
                  FROM device_settings",
                 [],
                 |row| {
@@ -95,7 +95,7 @@ impl DeviceSettings {
             window,
             sidebar_collapsed,
             last_page,
-            text_size,
+            text_size: TextSize::new(text_size as f32),
         })
     }
 }
@@ -196,7 +196,7 @@ pub fn set_sidebar_collapsed(write: &mut Write, collapsed: bool) -> Result<(), E
 }
 
 pub fn set_text_size(write: &mut Write, size: TextSize) -> Result<(), Error> {
-    write.set(device_settings::TEXT_SIZE, 1, &size.stored())
+    write.set(device_settings::TEXT_SCALE, 1, &size.percent())
 }
 
 pub fn set_last_page(write: &mut Write, page: LastPage) -> Result<(), Error> {
@@ -262,7 +262,7 @@ mod tests {
             set_motion(write, Motion::Reduced)?;
             set_sidebar_collapsed(write, true)?;
             set_last_page(write, LastPage::Job(job))?;
-            set_text_size(write, TextSize::Larger)?;
+            set_text_size(write, TextSize::new(125.))?;
             save_window(write, window)
         })?;
         assert_eq!(
@@ -279,7 +279,7 @@ mod tests {
                 window: Some(window),
                 sidebar_collapsed: true,
                 last_page: LastPage::Job(job),
-                text_size: TextSize::Larger,
+                text_size: TextSize::new(125.),
             }
         );
 

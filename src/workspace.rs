@@ -1254,13 +1254,13 @@ mod tests {
         let mut app = TestAppContext::single();
         let mut open = open(&mut app);
         let font_size = |open: &mut Open| open.read(|_, cx| cx.theme().font_size);
-        assert_eq!(font_size(&mut open), TextSize::Default.pixels());
-        open.run(|write| settings::set_text_size(write, TextSize::Large));
-        assert_eq!(font_size(&mut open), TextSize::Large.pixels());
-        assert_eq!(device_settings(&mut open).text_size, TextSize::Large);
+        assert_eq!(font_size(&mut open), px(16.));
+        open.run(|write| settings::set_text_size(write, TextSize::new(115.)));
+        assert_eq!(font_size(&mut open), TextSize::new(115.).pixels());
+        assert_eq!(device_settings(&mut open).text_size, TextSize::new(115.));
         // A theme change loads the theme's own font size, 16.
         open.run(|write| settings::set_appearance(write, Appearance::Dark));
-        assert_eq!(font_size(&mut open), TextSize::Large.pixels());
+        assert_eq!(font_size(&mut open), TextSize::new(115.).pixels());
     }
 
     /// Buttons are 32 px, as on Windows and GNOME, and they and the sidebar
@@ -1289,8 +1289,8 @@ mod tests {
         };
         let (height, width) = measure(&mut open);
         assert_eq!(height, px(32.));
-        open.run(|write| settings::set_text_size(write, TextSize::Larger));
-        let larger = TextSize::Larger.pixels() / TextSize::Default.pixels();
+        open.run(|write| settings::set_text_size(write, TextSize::new(125.)));
+        let larger = 1.25;
         let (larger_height, larger_width) = measure(&mut open);
         assert_eq!(larger_height, height * larger);
         // Layout rounds to whole pixels.

@@ -6,10 +6,11 @@ use gpui_kit::component::group_box::GroupBoxVariant;
 use gpui_kit::component::setting::{
     SelectIndex, SettingField, SettingGroup, SettingItem, SettingPage, Settings,
 };
-use gpui_kit::component::{ActiveTheme, IconName};
+use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
+use gpui_kit::component::{ActiveTheme, IconName, h_flex};
 use gpui_kit::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Rems, SharedString,
-    StyleRefinement, Subscription, Window, div, prelude::*,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Rems,
+    SharedString, StyleRefinement, Subscription, Window, div, prelude::*,
 };
 
 use super::LeaveSettings;
@@ -25,6 +26,9 @@ const KEY_CONTEXT: &str = "SettingsPage";
 /// The back button's width and a gap, in rems as the button grows with the
 /// text: 40 px at the default size.
 const SEARCH_INSET: Rems = Rems(2.5);
+const SLIDER_WIDTH: Rems = Rems(15.);
+/// Room for "130%", so the slider doesn't move as the number changes.
+const PERCENT_WIDTH: Rems = Rems(2.75);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", LeaveSettings, Some(KEY_CONTEXT))]);
@@ -34,6 +38,7 @@ pub struct SettingsPage {
     database: Entity<Database>,
     ai_settings: Entity<AiSettings>,
     stand_in_name: Entity<StandInName>,
+    text_size: Entity<SliderState>,
     /// The kit keeps the page picked under the settings' id; a new one opens
     /// on `start` instead.
     generation: usize,
@@ -91,6 +96,13 @@ impl SettingsPage {
     ) -> Self {
         let ai_settings = cx.new(|cx| AiSettings::new(database.clone(), window, cx));
         let stand_in_name = cx.new(|cx| StandInName::new(database.clone(), window, cx));
+        let text_size = cx.new(|cx| {
+            SliderState::new()
+                .min(TextSize::MIN as f32)
+                .max(TextSize::MAX as f32)
+                .step(TextSize::STEP as f32)
+                .default_value(TextSize::current(cx).percent() as f32)
+        });
         let subscriptions = vec![
             cx.subscribe(&database, |_, _, changed: &Changed, cx| {
                 if changed.touches(SettingsTable) {
@@ -99,11 +111,24 @@ impl SettingsPage {
             }),
             // Its rows are drawn by the page.
             cx.observe(&ai_settings, |_, _, cx| cx.notify()),
+            cx.subscribe(&text_size, |this, _, event: &SliderEvent, cx| match event {
+                // The percentage beside it follows the drag.
+                SliderEvent::Change(_) => cx.notify(),
+                // Applied once let go: applied while dragging, the slider
+                // would grow under the pointer.
+                SliderEvent::Release(value) => {
+                    let size = TextSize::new(value.end());
+                    this.database
+                        .read(cx)
+                        .queue(move |write| settings::set_text_size(write, size));
+                }
+            }),
         ];
         Self {
             database,
             ai_settings,
             stand_in_name,
+            text_size,
             generation: 0,
             start,
             focus_handle: cx.focus_handle(),
@@ -206,23 +231,10 @@ impl SettingsPage {
                         .keywords(["motion"]),
                     )
                     .item({
-                        let database = self.database.clone();
+                        let slider = self.text_size.clone();
                         SettingItem::new(
                             "Text size",
-                            SettingField::dropdown(
-                                TextSize::ALL
-                                    .into_iter()
-                                    .map(|size| (size.stored().into(), size.label().into()))
-                                    .collect(),
-                                |cx| TextSize::current(cx).stored().into(),
-                                move |key, cx| {
-                                    if let Some(size) = TextSize::from_stored(&key) {
-                                        database.read(cx).queue(move |write| {
-                                            settings::set_text_size(write, size)
-                                        });
-                                    }
-                                },
-                            ),
+                            SettingField::render(move |_, _, cx| text_size_slider(&slider, cx)),
                         )
                         .description(
                             "Buttons and fields grow with it. Kept for this computer only, \
@@ -341,6 +353,25 @@ pub(super) enum SettingsSection {
     Ai,
 }
 
+/// The text size slider, with the percentage it's at beside it.
+fn text_size_slider(slider: &Entity<SliderState>, cx: &App) -> AnyElement {
+    let size = TextSize::new(slider.read(cx).value().end());
+    h_flex()
+        .id("text-size")
+        .w(SLIDER_WIDTH)
+        .gap_3()
+        .child(Slider::new(slider).flex_1())
+        .child(
+            div()
+                .w(PERCENT_WIDTH)
+                .text_right()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("{}%", size.percent())),
+        )
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::testing;
@@ -411,5 +442,29 @@ mod tests {
             assert!(window.try_find("choose-dark-palette").is_none());
             assert!(window.find("add-provider").visible());
         });
+    }
+
+    #[test]
+    fn the_text_size_is_saved_once_the_slider_is_let_go() {
+        let mut app = TestAppContext::single();
+        let (database, _directory) = testing::open_sample(&mut app);
+        let (page, cx) = app.add_window_view(|window, cx| {
+            SettingsPage::new(database.clone(), SettingsSection::Appearance, window, cx)
+        });
+        cx.run_until_parked();
+        let saved = |cx: &mut gpui_kit::VisualTestContext| {
+            database.read_with(cx, |database, _| {
+                crate::model::settings::DeviceSettings::read(database.device_connection())
+                    .map(|device| device.text_size.percent())
+                    .ok()
+            })
+        };
+        let slider = page.read_with(cx, |page, _| page.text_size.clone());
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Change(115.0.into())));
+        testing::settle(cx, &database);
+        assert_eq!(saved(cx), Some(100), "not while dragging");
+        slider.update(cx, |_, cx| cx.emit(SliderEvent::Release(115.0.into())));
+        testing::settle(cx, &database);
+        assert_eq!(saved(cx), Some(115));
     }
 }
