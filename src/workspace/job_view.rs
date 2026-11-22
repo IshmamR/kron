@@ -39,10 +39,11 @@ use gpui_kit::component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt, h_flex, v_flex,
 };
 use gpui_kit::{
-    Action, Anchor, AnyElement, App, Bounds, Context, Div, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement, KeyBinding, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, RenderImage, ScrollHandle, Stateful, StyledText,
-    Subscription, Task, Window, actions, canvas, div, img, point, prelude::*, px, rgb,
+    Action, Anchor, AnyElement, App, Bounds, Context, DispatchPhase, Div, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, Hsla, IntoElement,
+    KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    RenderImage, ScrollDelta, ScrollHandle, ScrollWheelEvent, Stateful, StyledText, Subscription,
+    Task, Window, actions, canvas, div, img, point, prelude::*, px, rgb,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -51,6 +52,11 @@ const KEY_CONTEXT: &str = "JobView";
 const PAGE_WIDTH: Pixels = px(640.);
 /// The zoom steps, as a share of `PAGE_WIDTH`.
 const ZOOMS: [f32; 9] = [0.5, 0.67, 0.75, 0.9, 1., 1.1, 1.25, 1.5, 2.];
+/// How far the mouse moves, pressed, before it drags the pages rather than
+/// clicking a line.
+const DRAG_THRESHOLD: f32 = 4.;
+/// A touchpad's Ctrl+scroll, in pixels, that makes one zoom step.
+const WHEEL_ZOOM_STEP: f32 = 40.;
 /// Between pages, and above the first and below the last.
 const PAGE_GAP: f32 = 24.;
 const INSPECTOR_WIDTH: Pixels = px(340.);
@@ -155,6 +161,10 @@ pub struct JobView {
     layout: Entity<ResizableState>,
     /// The pages' width as a share of `PAGE_WIDTH`.
     zoom: f32,
+    /// A touchpad's Ctrl+scroll not yet a whole zoom step.
+    wheel_zoom: f32,
+    /// The mouse pressed on the pages: a click on a line, or a drag of them.
+    drag: Option<Drag>,
     /// The pages as last drawn, to map clicks to lines and scroll to them.
     pages: Option<Arc<RenderedPages>>,
     /// Where each page was drawn in the window, written during paint.
@@ -333,6 +343,8 @@ impl JobView {
             scroll_handle: ScrollHandle::new(),
             layout: cx.new(|_| ResizableState::default()),
             zoom: 1.,
+            wheel_zoom: 0.,
+            drag: None,
             pages: None,
             page_bounds: Rc::default(),
             scroll_pending: false,
@@ -542,13 +554,38 @@ impl JobView {
     /// To the next zoom step up or down from the current zoom, which may
     /// be between steps after fitting the width.
     fn step_zoom(&mut self, up: bool, cx: &mut Context<Self>) {
+        let center = self.scroll_handle.bounds().size.center();
+        self.step_zoom_at(up, center, cx);
+    }
+
+    /// `step_zoom`, keeping what's at `anchor`, a point in the pages' view,
+    /// where it is.
+    fn step_zoom_at(&mut self, up: bool, anchor: Point<Pixels>, cx: &mut Context<Self>) {
         let next = if up {
             ZOOMS.iter().find(|zoom| **zoom > self.zoom + 0.01)
         } else {
             ZOOMS.iter().rev().find(|zoom| **zoom < self.zoom - 0.01)
         };
         if let Some(&zoom) = next {
-            self.set_zoom(zoom, cx);
+            self.zoom_at(zoom, anchor, cx);
+        }
+    }
+
+    /// Ctrl and the wheel zoom toward the pointer, a step a notch; a
+    /// touchpad's smooth scroll adds up to steps.
+    fn wheel_zoom(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let anchor = event.position - self.scroll_handle.bounds().origin;
+        let steps = match event.delta {
+            ScrollDelta::Lines(lines) => lines.y.signum() as i32,
+            ScrollDelta::Pixels(pixels) => {
+                self.wheel_zoom += f32::from(pixels.y);
+                let steps = (self.wheel_zoom / WHEEL_ZOOM_STEP).trunc();
+                self.wheel_zoom -= steps * WHEEL_ZOOM_STEP;
+                steps as i32
+            }
+        };
+        for _ in 0..steps.unsigned_abs() {
+            self.step_zoom_at(steps > 0, anchor, cx);
         }
     }
 
@@ -565,17 +602,99 @@ impl JobView {
         self.set_zoom(fitted.clamp(ZOOMS[0], ZOOMS[ZOOMS.len() - 1]), cx);
     }
 
-    /// Keeps the same part of the page in view as it grows or shrinks.
+    /// Keeps the middle of the view on the same part of the page.
     fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        let center = self.scroll_handle.bounds().size.center();
+        self.zoom_at(zoom, center, cx);
+    }
+
+    /// Keeps what's at `anchor`, a point in the pages' view, where it is as
+    /// the pages grow or shrink around it.
+    fn zoom_at(&mut self, zoom: f32, anchor: Point<Pixels>, cx: &mut Context<Self>) {
         if zoom == self.zoom {
             return;
         }
         let ratio = zoom / self.zoom;
         let offset = self.scroll_handle.offset();
-        self.scroll_handle
-            .set_offset(point(offset.x * ratio, offset.y * ratio));
+        // A point of the content under the anchor is `anchor - offset`; it
+        // grows by `ratio` and stays under the anchor.
+        self.scroll_handle.set_offset(point(
+            anchor.x - (anchor.x - offset.x) * ratio,
+            anchor.y - (anchor.y - offset.y) * ratio,
+        ));
         self.zoom = zoom;
         cx.notify();
+    }
+
+    /// Starts a press on the pages: a click on the line under it if the
+    /// mouse comes up where it went down, or a drag of the pages.
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag = Some(Drag {
+            start: event.position,
+            offset: self.scroll_handle.offset(),
+            target: self.target(event.position),
+            moved: false,
+        });
+        self.focus_handle.focus(window, cx);
+    }
+
+    /// Drags the pages, once the mouse has moved past `DRAG_THRESHOLD`.
+    fn drag_pages(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
+        // Released outside the window, where the release isn't seen.
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.drag = None;
+            cx.notify();
+            return;
+        }
+        let moved = event.position - drag.start;
+        if !drag.moved {
+            if f32::from(moved.x.abs().max(moved.y.abs())) < DRAG_THRESHOLD {
+                return;
+            }
+            drag.moved = true;
+            self.hovered = None;
+        }
+        let max = self.scroll_handle.max_offset();
+        let offset = drag.offset + moved;
+        self.scroll_handle.set_offset(point(
+            offset.x.clamp(-max.x, px(0.)),
+            offset.y.clamp(-max.y, px(0.)),
+        ));
+        cx.notify();
+    }
+
+    /// Ends a press: one that didn't drag selects the line under it, and
+    /// on a page between lines clears the selection.
+    fn release(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if !drag.moved
+            && let Some(line) = drag.target
+        {
+            self.selected = line;
+        }
+        cx.notify();
+    }
+
+    /// What a press at `position` is on: `Some` on a page, with the line
+    /// there, if any; `None` beside the pages.
+    fn target(&self, position: Point<Pixels>) -> Option<Option<LineId>> {
+        let page = self
+            .page_bounds
+            .borrow()
+            .iter()
+            .position(|bounds| bounds.contains(&position))?;
+        Some(self.line_at(page, position))
+    }
+
+    /// Whether the pages are bigger than their view, so can be dragged.
+    fn draggable(&self) -> bool {
+        let max = self.scroll_handle.max_offset();
+        max.x > px(0.) || max.y > px(0.)
     }
 
     /// Scrolls just enough to show the selected line's first box.
@@ -1397,6 +1516,22 @@ impl JobView {
                     .track_scroll(&self.scroll_handle)
                     .overflow_y_scroll()
                     .overflow_x_scroll()
+                    // A click selects on release, as a press may become a
+                    // drag of the pages.
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::press))
+                    .on_mouse_move(cx.listener(|this, event, _, cx| this.drag_pages(event, cx)))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseUpEvent, _, cx| this.release(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &MouseUpEvent, _, cx| this.release(cx)),
+                    )
+                    .when(self.draggable(), |this| this.cursor_grab())
+                    .when(self.drag.as_ref().is_some_and(|drag| drag.moved), |this| {
+                        this.cursor_grabbing()
+                    })
                     .child(
                         v_flex()
                             .min_w(self.page_width() + px(PAGE_GAP * 2.))
@@ -1408,6 +1543,7 @@ impl JobView {
             )
             .vertical_scrollbar(&self.scroll_handle)
             .horizontal_scrollbar(&self.scroll_handle)
+            .child(wheel_zoom_catcher(cx))
             .children(menus.map(|menus| div().absolute().top_3().left_3().child(menus)))
             .child(
                 div()
@@ -1533,17 +1669,10 @@ impl JobView {
                 .absolute()
                 .size_full(),
             )
-            // Selects on press, like native lists; clicking between lines
-            // clears the selection.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.selected = this.line_at(index, event.position);
-                    this.focus_handle.focus(window, cx);
-                    cx.notify();
-                }),
-            )
             .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                if this.drag.as_ref().is_some_and(|drag| drag.moved) {
+                    return;
+                }
                 let hovered = this.line_at(index, event.position);
                 if hovered != this.hovered {
                     this.hovered = hovered;
@@ -1557,6 +1686,47 @@ impl JobView {
             }))
             .into_any_element()
     }
+}
+
+/// The mouse pressed on the pages.
+struct Drag {
+    start: Point<Pixels>,
+    /// The scroll offset when pressed, which the drag moves from.
+    offset: Point<Pixels>,
+    /// What a click there selects: `Some` on a page, with its line if any.
+    target: Option<Option<LineId>>,
+    /// Past `DRAG_THRESHOLD`, so a drag, not a click.
+    moved: bool,
+}
+
+/// Catches Ctrl and the wheel over the pages before the scroll view does,
+/// to zoom rather than scroll. It has no hitbox, so it doesn't block the
+/// mouse.
+fn wheel_zoom_catcher(cx: &Context<JobView>) -> impl IntoElement {
+    let view = cx.entity().downgrade();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            window.on_mouse_event(move |event: &ScrollWheelEvent, phase, _, cx| {
+                if phase != DispatchPhase::Capture
+                    || !event.modifiers.secondary()
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+                cx.stop_propagation();
+                if let Err(error) = view.update(cx, |view, cx| view.wheel_zoom(event, cx)) {
+                    eprintln!("job view: {error}");
+                }
+            });
+        },
+    )
+    // Without an inset, an absolute child sits where it would flow: below
+    // the pages, where it caught nothing.
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// Lines to mark in the page margin.
@@ -2092,7 +2262,7 @@ fn centered_message(text: &'static str, cx: &App) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{TestAppContext, VisualTestContext};
+    use gpui_kit::{Modifiers, TestAppContext, VisualTestContext};
 
     use super::*;
 
@@ -2506,6 +2676,32 @@ mod tests {
             self.read(|view| view.selected)
         }
 
+        /// A line of the résumé with a box on the page, and the middle of
+        /// that box in the window.
+        fn line_on_page(&mut self) -> (LineId, Point<Pixels>) {
+            let found = self.read(|view| {
+                let pages = view.pages.as_ref()?;
+                let bounds = view.page_bounds.borrow();
+                view.shown.as_ref()?.lines.iter().find_map(|line| {
+                    let first = pages.layout.boxes_of(line.id).next()?;
+                    let page = bounds.get(first.page)?;
+                    let scale = view.scale(*pages.layout.pages.get(first.page)?);
+                    Some((
+                        line.id,
+                        page.origin
+                            + point(
+                                px((first.left + first.right) / 2. * scale),
+                                px((first.top + first.bottom) / 2. * scale),
+                            ),
+                    ))
+                })
+            });
+            match found {
+                Some(found) => found,
+                None => panic!("no line drawn on a page"),
+            }
+        }
+
         fn shown(&mut self) -> Rc<ShownResume> {
             match self.read(|view| view.shown.clone()) {
                 Some(shown) => shown,
@@ -2864,6 +3060,60 @@ mod tests {
         );
         view.keys("ctrl-0");
         assert_eq!(view.read(|view| view.zoom), 1.);
+    }
+
+    #[test]
+    fn a_click_on_a_line_selects_it_on_release() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        let (line, at) = view.line_on_page();
+        view.cx
+            .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(view.selected(), None, "a press may become a drag");
+        view.cx
+            .simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(view.selected(), Some(line));
+    }
+
+    #[test]
+    fn a_drag_moves_the_pages_and_selects_nothing() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        view.update(|view, cx| view.set_zoom(2., cx));
+        view.cx.run_until_parked();
+        let (before, at) = view.read(|view| {
+            let bounds = view.scroll_handle.bounds();
+            (view.scroll_handle.offset(), bounds.center())
+        });
+        let to = at - point(px(60.), px(80.));
+        view.cx
+            .simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        view.cx
+            .simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        view.cx
+            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        assert_eq!(view.selected(), None);
+        let after = view.read(|view| view.scroll_handle.offset());
+        // At 200% the page is still narrower than the test window, so only
+        // up and down move.
+        assert_eq!(after - before, point(px(0.), px(-80.)));
+    }
+
+    #[test]
+    fn ctrl_and_the_wheel_zoom_and_the_wheel_alone_scrolls() {
+        let mut app = TestAppContext::single();
+        let mut view = open(&mut app, "Ledgerly");
+        let (_, at) = view.line_on_page();
+        let wheel = |modifiers| ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Lines(point(0., 1.)),
+            modifiers,
+            ..Default::default()
+        };
+        view.cx.simulate_event(wheel(Modifiers::control()));
+        assert_eq!(view.read(|view| view.zoom), 1.1);
+        view.cx.simulate_event(wheel(Modifiers::none()));
+        assert_eq!(view.read(|view| view.zoom), 1.1);
     }
 
     #[test]
