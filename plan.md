@@ -273,6 +273,9 @@ Test set first. Each rule only adds rejections, and each is measured on
   - A one-line explanation of Career facts on the first visit.
   - Move the stand-in name under Privacy.
 - [ ] **A reassuring heading** above the left-out list.
+- [ ] **A left-out line says how to use it:** "If it's true, add it as a fact
+  and regenerate." Steering can't put a claim on the page, so a user who asks
+  for one ("say I fixed…") sees it left out with no next step (2026-11-22).
 - [ ] **The "Set up AI" toast** is hidden on the AI settings page, and goes away
   once a service is added.
 - [ ] **Keyboard hints** appear only after the first arrow key. "Keyboard
