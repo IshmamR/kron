@@ -268,7 +268,8 @@ Test set first. Each rule only adds rejections, and each is measured on
 - [ ] **Preview zoom:** Ctrl + / − / 0, and "fit width".
 - [ ] **Re-join broken lines** in "Check the text": join a line that doesn't end
   in `.`, `:` or `;` to the next one when it starts in lowercase.
-- [ ] **Make Moss the default dark palette** (`src/appearance/palette.rs`).
+- [x] **A new default dark palette:** Graphite, in place of Orchid's violet
+  (2026-11-22; migration `0006_kron.sql` moves installs still on Orchid).
 
 ## Phase 5: Release readiness
 
@@ -289,6 +290,9 @@ Test set first. Each rule only adds rejections, and each is measured on
   (with the facts behind it) or not shown (with "Add a fact if true"), and a
   coarse estimate from them on the job page before writing: Strong fit,
   Partial fit or Stretch. An estimate, never a percentage.
+- [ ] **Test résumés for poor-fit jobs** with the fit check: an engineer's
+  facts for a bartender's ad and the other way round. They put the most
+  pressure on the job-echo rule, which a matching job hardly tests.
 - [ ] **A record that grows:**
   - a gentle monthly check-in;
   - importing LinkedIn's data export;

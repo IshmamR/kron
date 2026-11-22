@@ -261,7 +261,7 @@ impl Default for Palettes {
     fn default() -> Self {
         Self {
             light: Palette::Linen,
-            dark: Palette::Orchid,
+            dark: Palette::Graphite,
         }
     }
 }

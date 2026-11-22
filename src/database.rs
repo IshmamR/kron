@@ -545,6 +545,27 @@ mod tests {
     }
 
     #[test]
+    fn an_install_on_orchid_by_default_moves_to_graphite() -> Result<(), Error> {
+        let before_graphite = KRON_MIGRATIONS.len() - 1;
+        let palette = |chosen: Option<&str>| -> Result<String, Error> {
+            let mut connection = Connection::open_in_memory()?;
+            migrate(
+                &mut connection,
+                "kron.sqlite",
+                &KRON_MIGRATIONS[..before_graphite],
+            )?;
+            if let Some(chosen) = chosen {
+                connection.execute("UPDATE settings SET dark_palette = ?1", [chosen])?;
+            }
+            migrate(&mut connection, "kron.sqlite", KRON_MIGRATIONS)?;
+            Ok(connection.query_row("SELECT dark_palette FROM settings", [], |row| row.get(0))?)
+        };
+        assert_eq!(palette(None)?, "graphite");
+        assert_eq!(palette(Some("moss"))?, "moss", "a palette chosen stays");
+        Ok(())
+    }
+
+    #[test]
     fn refuses_a_newer_schema() -> Result<(), Error> {
         let mut connection = Connection::open_in_memory()?;
         connection.pragma_update(None, "user_version", 99)?;
