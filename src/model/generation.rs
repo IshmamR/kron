@@ -1011,14 +1011,16 @@ fn years_worked(text: &str) -> Vec<(Range<usize>, u32)> {
         "nineteen",
         "twenty",
     ];
-    let lower = text.to_lowercase();
+    // ASCII lowercasing keeps every byte offset, so the ranges index `text`.
+    let lower = text.to_ascii_lowercase();
     let mut found = Vec::new();
     for (at, _) in lower.match_indices("year") {
         let before = lower[..at].trim_end();
         let before = before.strip_suffix('+').unwrap_or(before).trim_end();
         let word_start = before
-            .rfind(|character: char| !character.is_alphanumeric())
-            .map_or(0, |index| index + 1);
+            .char_indices()
+            .rfind(|(_, character)| !character.is_alphanumeric())
+            .map_or(0, |(index, character)| index + character.len_utf8());
         let word = &before[word_start..];
         let number = word.parse::<u32>().ok().or_else(|| {
             WORDS
@@ -1505,6 +1507,18 @@ mod tests {
             )
             .is_some(),
             "without dates there are no years to say"
+        );
+    }
+
+    #[test]
+    fn years_worked_are_found_beside_letters_that_take_several_bytes() {
+        assert_eq!(
+            without_years_worked("Engineer—10 years in Rust.", 10).as_deref(),
+            Some("Engineer— in Rust.")
+        );
+        assert_eq!(
+            without_years_worked("İstanbul engineer, 10 years in Rust.", 10).as_deref(),
+            Some("İstanbul engineer,  in Rust.")
         );
     }
 
