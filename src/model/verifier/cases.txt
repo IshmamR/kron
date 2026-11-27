@@ -538,3 +538,26 @@ line: Built an open-source browser game that teaches the Bijoy keyboard layout a
 paraphrase
 fact: Added offline support to the trip history screen with a local SQLite cache, so riders on 2G can still see their last 50 trips.
 line: Added offline trip history with a local SQLite cache, letting riders on 2G view their last 50 trips.
+
+# "N times" may say how often, not how many fold, and a count may be placed
+# in time with "prior" (live_rates, 2026-11-23). The fails take the same
+# readings too far.
+paraphrase
+fact: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+line: Small library for formatting naira and kobo amounts on Android and iOS, starred 600 times on GitHub and used in production by four Lagos fintechs.
+
+paraphrase
+fact: I build two-sided marketplaces, mostly the unglamorous parts: pricing, payouts and trust. Eight years in product, two before that as a data analyst, so I still write my own SQL and occasionally regret it.
+line: Product leader with eight years in product and two prior years as a data analyst, focused on pricing, payouts and trust in two-sided marketplaces.
+
+invented_figure
+fact: A small library for formatting naira and kobo amounts on Android and iOS; 600 stars on GitHub and used in production by four Lagos fintechs.
+line: Small library for formatting naira and kobo amounts on Android and iOS, downloaded 600 times and used in production by four Lagos fintechs.
+
+invented_figure
+fact: Onboarded 3 new regions to the booking platform in one quarter.
+line: Onboarded new regions to the booking platform 3 times faster in one quarter.
+
+invented_figure
+fact: I build two-sided marketplaces, mostly the unglamorous parts: pricing, payouts and trust. Eight years in product, two before that as a data analyst, so I still write my own SQL and occasionally regret it.
+line: Product leader with eight years in product and two prior decades as a data analyst, focused on pricing, payouts and trust in two-sided marketplaces.

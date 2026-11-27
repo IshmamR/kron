@@ -19,6 +19,16 @@ const CURRENCIES: [char; 6] = ['$', '€', '£', '¥', '₹', '৳'];
 /// Lone numbers under this stay words when number words are read: "one" and
 /// "first" are more often "one of the first" than a count.
 const LONE_NUMBER_WORDS_BELOW: f64 = 2.0;
+/// Words after "N times" that make it a multiple, "3 times faster", not how
+/// often something happened, "starred 600 times".
+const COMPARISONS: [&str; 20] = [
+    "faster", "slower", "quicker", "more", "less", "fewer", "larger", "bigger", "smaller",
+    "higher", "lower", "greater", "cheaper", "longer", "shorter", "better", "as", "over", "the",
+    "that",
+];
+/// Words that only place a count in time: "two prior years" counts what
+/// "two years before that" does, whose "before" is a stop word.
+const WHEN_WORDS: [&str; 5] = ["prior", "previous", "earlier", "preceding", "former"];
 /// Words saying work was only proposed, planned, begun, tried or tested, or
 /// only partly the person's, as written: a line may reword its fact but must
 /// keep one. Matched whole, not by stem, so a "pricing plan" isn't
@@ -195,21 +205,29 @@ fn check(
         return Some(UnsupportedReason::NoSupportingFact);
     }
     let figure = line.iter().find_map(|figure| {
-        let stating: Vec<&Vec<String>> = facts
-            .iter()
-            .filter(|(figures, ..)| figures.iter().any(|stated| stated.value == figure.value))
-            .map(|(_, stems, _)| stems)
-            .collect();
-        if stating.is_empty() {
+        let (end, counted_after) = counted(text, figure, &line);
+        let mut stated = false;
+        let mut counts_the_same = false;
+        for (figures, stems, _) in &facts {
+            for reading in figures.iter().filter_map(|stated| reading(figure, stated)) {
+                stated = true;
+                let before;
+                let counted = match reading {
+                    Reading::Count if figure.maybe_count => {
+                        before = counted_before(text, figure);
+                        &before
+                    }
+                    Reading::Same | Reading::Count => &counted_after,
+                };
+                counts_the_same |= counted.iter().all(|stem| stems.contains(stem));
+            }
+        }
+        if !stated {
             return Some(match figure.year {
                 Some(year) => UnsupportedReason::InventedYear(year),
                 None => UnsupportedReason::InventedFigure(figure.written.to_owned()),
             });
         }
-        let (end, counted) = counted(text, figure, &line);
-        let counts_the_same = stating
-            .iter()
-            .any(|stems| counted.iter().all(|stem| stems.contains(stem)));
         (!counts_the_same)
             .then(|| UnsupportedReason::InventedFigure(text[figure.start..end].to_owned()))
     });
@@ -407,6 +425,9 @@ struct Figure<'a> {
     /// Written with letters glued on that aren't a scale, like "95ms" or
     /// "2G": a measure or a name, which counts nothing.
     glued: bool,
+    /// A bare "N times", with no comparison after it: a multiple, or how
+    /// often something happened, as in "starred 600 times".
+    maybe_count: bool,
 }
 
 /// A number reduced so equal ones compare equal however they're written:
@@ -431,6 +452,30 @@ impl Figure<'_> {
     fn end(&self) -> usize {
         self.start + self.written.len()
     }
+}
+
+/// How a line's figure reads as one its fact states.
+#[derive(Clone, Copy)]
+enum Reading {
+    /// The same figure: 1.2M and 1,200,000.
+    Same,
+    /// The same count, where one says "N times" and the other a plain N:
+    /// "starred 600 times" and "600 stars".
+    Count,
+}
+
+/// How `figure` reads as `stated`, if it does.
+fn reading(figure: &Figure, stated: &Figure) -> Option<Reading> {
+    if figure.value == stated.value {
+        return Some(Reading::Same);
+    }
+    let plain = |figure: &Figure| {
+        figure.value.unit == Unit::Plain && figure.year.is_none() && !figure.glued
+    };
+    let same_number = figure.value.digits == stated.value.digits
+        && figure.value.exponent == stated.value.exponent;
+    let count = (figure.maybe_count && plain(stated)) || (stated.maybe_count && plain(figure));
+    (same_number && count).then_some(Reading::Count)
 }
 
 /// A word, or the run of other characters between two words, split as
@@ -623,6 +668,7 @@ fn measured(
         };
         end += sign.len_utf8();
     }
+    let mut maybe_count = false;
     if text[end..].starts_with(' ') {
         let word_end = word_end(text, end + 1);
         let word = text[end + 1..word_end].to_ascii_lowercase();
@@ -635,6 +681,7 @@ fn measured(
             _ => (None, -1),
         };
         if unit_word.is_some() || scale > 0 {
+            maybe_count = word == "times" && unit == Unit::Plain && !compared(text, word_end);
             unit = unit_word.unwrap_or(unit);
             exponent += scale;
             end = word_end;
@@ -658,9 +705,20 @@ fn measured(
             },
             year,
             glued,
+            maybe_count,
         },
         end,
     )
+}
+
+/// Whether the word after `end` compares, as "faster" does in "3 times
+/// faster".
+fn compared(text: &str, end: usize) -> bool {
+    let start = text[end..]
+        .find(|character: char| !character.is_whitespace())
+        .map_or(text.len(), |length| end + length);
+    let word = text[start..word_end(text, start)].to_lowercase();
+    COMPARISONS.contains(&word.as_str())
 }
 
 /// `digits` with `fraction` of them after the point, as significant digits
@@ -706,8 +764,33 @@ fn counted(text: &str, figure: &Figure, figures: &[Figure]) -> (usize, Vec<Strin
         if word.is_empty() || figures.iter().any(|other| other.start == start) || stop_word(word) {
             return (end, stems);
         }
-        stems.push(stem(word));
+        if !WHEN_WORDS.contains(&word.to_lowercase().as_str()) {
+            stems.push(stem(word));
+        }
         end = start + word.len();
+    }
+}
+
+/// What "N times" counts when read as how often something happened: the
+/// stem of the nearest word before it that isn't a stop word, in the same
+/// clause. "Starred more than 600 times" counts "star".
+fn counted_before(text: &str, figure: &Figure) -> Vec<String> {
+    let mut end = figure.start;
+    loop {
+        let before = text[..end].trim_end_matches(|character: char| character.is_whitespace());
+        let start = before
+            .rfind(|character: char| !character.is_alphanumeric())
+            .map_or(0, |index| {
+                index + before[index..].chars().next().map_or(1, char::len_utf8)
+            });
+        let word = &before[start..];
+        if word.is_empty() || word.starts_with(|character: char| character.is_ascii_digit()) {
+            return Vec::new();
+        }
+        if !stop_word(word) {
+            return vec![stem(word)];
+        }
+        end = start;
     }
 }
 
@@ -934,6 +1017,73 @@ mod tests {
                 "15 backend services".into()
             )),
             "what a count counts must come from a fact stating it"
+        );
+    }
+
+    #[test]
+    fn n_times_may_count_how_often() {
+        let library = fact("A small library for formatting amounts; 600 stars on GitHub.");
+        let builds = fact("Cut build times 3x by caching dependencies in CI.");
+        let cites = [library.id, builds.id];
+        let given = [library, builds];
+        let check = |line| verify(line, &cites, &given);
+        assert_eq!(
+            check("A library for formatting amounts, starred 600 times on GitHub."),
+            None
+        );
+        assert_eq!(
+            check("A library for formatting amounts, starred more than 600 times."),
+            None,
+            "stop words between the verb and the figure are passed over"
+        );
+        assert_eq!(
+            check("Cut build times 3 times by caching dependencies."),
+            None
+        );
+        assert_eq!(
+            check("A library for formatting amounts, downloaded 600 times."),
+            Some(UnsupportedReason::InventedFigure("600 times".into())),
+            "it counts what the word before it says"
+        );
+        assert_eq!(
+            check("A library for formatting amounts, 600 times faster."),
+            Some(UnsupportedReason::InventedFigure("600 times".into())),
+            "a comparison makes it a multiple"
+        );
+
+        let deploys = fact("Deployed 40 times a day after moving CI to GitHub Actions.");
+        let cites = [deploys.id];
+        let given = [deploys];
+        assert_eq!(
+            verify(
+                "40 deploys a day after moving CI to GitHub Actions.",
+                &cites,
+                &given
+            ),
+            None,
+            "the fact may be the one saying N times"
+        );
+    }
+
+    #[test]
+    fn a_count_may_be_placed_in_time() {
+        let analyst = fact("Eight years in product, two before that as a data analyst.");
+        let cites = [analyst.id];
+        let given = [analyst];
+        let check = |line| verify(line, &cites, &given);
+        assert_eq!(
+            check("Eight years in product and two prior years as a data analyst."),
+            None
+        );
+        assert_eq!(
+            check("Eight years in product and two previous years as a data analyst."),
+            None
+        );
+        assert_eq!(
+            check("Eight years in product and two prior decades as a data analyst."),
+            Some(UnsupportedReason::InventedFigure(
+                "two prior decades".into()
+            ))
         );
     }
 

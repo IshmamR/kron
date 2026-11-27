@@ -276,9 +276,14 @@ Test set first. Each rule only adds rejections, and each is measured on
   155), none of its 13 job-worded lines rejected, each read and honest;
   DeepSeek, which barely rewords, 0 instead of 1. Real lines added to
   `cases.txt` as `job_wording`.
-- [ ] **Two figure readings reject honest lines** (seen in `live_rates`):
+- [x] **Two figure readings reject honest lines** (seen in `live_rates`):
   "starred 600 times" is read as 600×, against "600 stars"; and "two prior
-  years" doesn't count what "two before that" does.
+  years" doesn't count what "two before that" does. Fixed 2026-11-26: a bare
+  "N times" (no "faster", "more", "as"… after it) matches a fact's N× or its
+  plain N, and as a count it counts the word before it, so "starred" matches
+  "stars" but "downloaded" doesn't. A count may add prior, previous,
+  earlier, preceding or former, which say when, not what. Both lines, and
+  three fails that push the readings too far, are in `cases.txt`.
 - [x] **The meaning check through the user's AI service** (2026-11-22). One
   more call after the résumé, on the same service, with the lines the rules
   passed that have words their facts don't; a line it flags goes to Left out
